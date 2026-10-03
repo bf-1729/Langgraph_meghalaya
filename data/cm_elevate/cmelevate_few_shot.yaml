@@ -1,0 +1,1926 @@
+# cmelevate_few_shot.yaml
+#
+# Validated question-to-SQL pairs for CM Elevate - node 5.10.
+#
+# ===========================================================================
+# v1.0 - 2026-09-04 - FIRST VERSION, WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# There is no flat-table predecessor, so nothing here is a retarget. Every
+# example runs against curated.v_cm_elevate unless it needs the scheme
+# dimension, the fact table's GIN index, or the reconciliation view.
+#
+# House rules encoded in every example below:
+#   FROM curated.v_cm_elevate       the primary query surface; both its joins are
+#                                   INNER on NOT NULL keys, so no rows are lost
+#   COUNT(*) ONLY                   there is NO measure column. If an example
+#                                   contains SUM or AVG over a v_cm_elevate
+#                                   column, it is WRONG
+#   applicants -> DISTINCT          "applicants"/"beneficiaries" = distinct people,
+#                                   COUNT(DISTINCT request_id) - request_id repeats on
+#                                   ~36 rows (all Piggery), so COUNT(*) overcounts them.
+#                                   "applications"/"requests" = the raw row count,
+#                                   COUNT(*), unchanged. (2026-09-13 policy change)
+#   NO DATE ANYTHING                no year, month, date_trunc, BETWEEN on a date,
+#                                   no ingested_at, no request_id parsing
+#   entity_type <> 'Unresolved'     on VILLAGE counts and lists only - never on
+#                                   district, block or scheme totals
+#   data_verified = 'On Hold'       never the onhold boolean, which is FALSE on
+#                                   every row and returns zero looking correct
+#   LOWER(current_level)            'level1' and 'Level1' are the same level
+#   LOWER(current_file_status)      'sendback' and 'sendback to vdv/citizen' both
+#   applicant_category              never type_raw - the raw taxonomy is per-scheme
+#   scheme_name / cm_scheme_key     15 schemes; read the list from the dimension
+#   lgd_district / lgd_block        UPPERCASE literals - dim_geography stores them so
+#   village_code                    for counting villages, never a name
+#   scheme_specific ->> 'key'       ALWAYS scoped to one scheme, except gender_id
+#
+# Examples marked status: UNANSWERABLE carry sql: null. They are NEGATIVE
+# examples: the question is asked often - 40 of the 89 use cases in the
+# requirement workbook are of this kind - and the data cannot answer it. They
+# are here so the generator refuses instead of improvising, and never answers a
+# money question with an application count.
+#
+# NOT ONE OF THESE QUERIES HAS BEEN EXECUTED against megh_db. They are correct
+# against the structure in SCHEMA_FOR_DEVELOPERS.md (2026-09-04) and unverified
+# against the data. Run them before trusting a result.
+# ===========================================================================
+
+sql_generation_examples:
+
+# ---------------------------------------------------------------------------
+# PROGRAMME-LEVEL COUNTS
+# ---------------------------------------------------------------------------
+- question: How many CM Elevate applications are there?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    One row is one application. There is no placeholder flag to exclude, so unlike PMAY
+    no blanket predicate is needed. Report this as an application count, not a count of
+    people funded.
+
+- question: How many beneficiaries are there under CM Elevate?
+  sql: |
+    SELECT COUNT(DISTINCT request_id) AS applicants
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    'Beneficiary' resolves to an applicant, not a raw row. The grain is a REQUEST, not
+    an award - nothing in this data confirms anyone received anything - but request_id
+    is also NOT unique (about 36 numbers repeat, all inside Piggery), so a bare
+    COUNT(*) overcounts applicants by those duplicates. Say 'applicants' in the answer,
+    not 'applications'.
+
+- question: How many CM Elevate applicants are there?
+  sql: |
+    SELECT COUNT(DISTINCT request_id) AS applicants
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    'Applicants' means distinct people, not rows. Dedupe on request_id - never
+    COUNT(*), which double-counts the ~36 repeating request_id values. Contrast with
+    'How many CM Elevate applications are there?' above, which asks for the raw
+    request count and stays COUNT(*).
+
+- question: How many CM Elevate applicants are there in West Garo Hills?
+  sql: |
+    SELECT COUNT(DISTINCT request_id) AS applicants
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Same rule as the programme-level applicant count, scoped by district: 'applicants'
+    dedupes on request_id, 'applications' does not.
+
+- question: How many distinct applications are there?
+  sql: |
+    SELECT COUNT(*) AS rows_total,
+           COUNT(DISTINCT request_id) AS distinct_applications
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    request_id carries no unique constraint - about 36 numbers repeat. Report both
+    figures; the difference is a finding, not a number to pick between.
+
+- question: How many schemes run under CM Elevate?
+  sql: |
+    SELECT COUNT(*) AS schemes
+    FROM curated.dim_cm_elevate_scheme;
+  tables:
+  - curated.dim_cm_elevate_scheme
+  note: >
+    FIFTEEN. Read the dimension, not a DISTINCT over the fact - a scheme with zero
+    applications would be invisible in the fact. The requirement workbook says 13; that
+    figure describes a different dataset.
+
+- question: List all CM Elevate schemes
+  sql: |
+    SELECT scheme_name, endpoint
+    FROM curated.dim_cm_elevate_scheme
+    ORDER BY scheme_name;
+  tables:
+  - curated.dim_cm_elevate_scheme
+
+- question: How many districts does CM Elevate reach?
+  sql: |
+    SELECT COUNT(DISTINCT lgd_district) AS districts
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    No Unresolved filter here. An Unresolved row still carries the district it was placed
+    under, and excluding it would understate district coverage.
+
+- question: How many blocks are covered?
+  sql: |
+    SELECT COUNT(DISTINCT lgd_block) AS blocks
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    About 58, of which roughly 44 are rural C&RD blocks and 10 are urban Municipal Boards
+    or Town Committees. Say so, or offer the split - unlike PMAY-G, CM Elevate is not
+    rural-only.
+
+- question: How many villages are covered?
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate
+    WHERE entity_type <> 'Unresolved';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Two rules fire together - count by code because 36 village names map to more than one
+    LGD code, and exclude Unresolved because it is a synthetic placeholder, not a village.
+
+# ---------------------------------------------------------------------------
+# BY SCHEME - the dimension that matters most
+# ---------------------------------------------------------------------------
+- question: Applications by scheme
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Heavily skewed - two schemes hold about 78%. Show the counts, not only shares.
+
+- question: Which scheme has the most applications?
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC
+    LIMIT 1;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which scheme has the fewest applications?
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications ASC
+    LIMIT 1;
+  tables:
+  - curated.v_cm_elevate
+  note: Several schemes hold only two or three applications - report the count, never a rank alone.
+
+- question: Top 5 schemes by applications
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC
+    LIMIT 5;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Show every scheme including those with no applications
+  sql: |
+    SELECT d.scheme_name, COUNT(f.cm_elevate_fact_id) AS applications
+    FROM curated.dim_cm_elevate_scheme d
+    LEFT JOIN curated.fact_cm_elevate_application f USING (cm_scheme_key)
+    GROUP BY d.scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.dim_cm_elevate_scheme
+  - curated.fact_cm_elevate_application
+  note: >
+    The one sanctioned LEFT JOIN in this partition. A scheme with zero applications is
+    invisible in the fact, and a missing row reads very differently from a zero row.
+
+- question: What share of applications does each scheme hold?
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS share_pct
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    One decimal, and the count travels with the share. Six schemes have fewer than 15
+    applications, where one record moves the percentage by 7 to 50 points.
+
+- question: How concentrated is CM Elevate by scheme?
+  sql: |
+    WITH s AS (
+      SELECT scheme_name, COUNT(*) AS applications
+      FROM curated.v_cm_elevate GROUP BY scheme_name
+    )
+    SELECT scheme_name, applications,
+           ROUND(applications * 100.0 / SUM(applications) OVER (), 1) AS share_pct,
+           ROUND(SUM(applications) OVER (ORDER BY applications DESC) * 100.0
+                 / SUM(applications) OVER (), 1) AS cumulative_pct
+    FROM s
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: Answers the concentration question by count. There is no monetary concentration to compute.
+
+- question: How many applications are under the Piggery scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under PRIME Small Enterprise Empowerment?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'PRIME Small Enterprise Empowerment and Development (SEED)';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The largest scheme, about 43% of the programme - and absent from the requirement
+    workbook's scheme list, so users may not know to ask for it.
+
+- question: How many applications are under the Poultry Farming scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Poultry Farming Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under PRIME Tourism Vehicle?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'PRIME Tourism Vehicle Scheme';
+  tables:
+  - curated.v_cm_elevate
+  note: Do not confuse with Agro Tourism Villa or PRIME Agriculture Response Vehicle.
+
+- question: How many applications are under PRIME Agriculture Response Vehicle?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'PRIME Agriculture Response Vehicle Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under the Dairy Development scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Dairy Development Scheme';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Reaches 11 districts, not 12, and is a double outlier - about 39.8% online against
+    70-100% elsewhere, and 52.7% verified Valid against 75-100% elsewhere.
+
+- question: How many applications are under Any Business Venture?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Any Business Venture Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under the Goat Farming scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Goat Farming Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under the Warehouse scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Warehouse Scheme';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The only scheme where registered bodies outnumber individuals, and it reaches 9
+    districts, not 12.
+
+- question: How many applications are under the Sericulture scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Sericulture & Weaving Scheme';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Held as ONE scheme, not split into Spinning and Weaving as the requirement workbook
+    assumes. Single-district - all applications are in Ri Bhoi.
+
+- question: How many applications are under the Green Taxi scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Chief Minister's Green Taxi Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under Sports and Wellness Centre?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Sports & Wellness Centre Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under Agro Tourism Villa?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Agro Tourism Villa Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under the Motorcaravan scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Motorcaravan Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are under the Cinema Theatre scheme?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Cinema Theatre Scheme';
+  tables:
+  - curated.v_cm_elevate
+
+- question: Compare Piggery and Poultry
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) AS applications,
+           COUNT(DISTINCT lgd_district) AS districts,
+           COUNT(DISTINCT village_code) FILTER (WHERE entity_type <> 'Unresolved') AS villages
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme',
+                          'Meghalaya Poultry Farming Scheme')
+    GROUP BY scheme_name;
+  tables:
+  - curated.v_cm_elevate
+  note: Two named schemes returned side by side, never silently merged.
+
+- question: Compare applicant counts for Piggery and Poultry across Ri Bhoi and East Khasi Hills
+  sql: |
+    SELECT scheme_name, lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme',
+                          'Meghalaya Poultry Farming Scheme')
+      AND lgd_district IN ('RI BHOI', 'EAST KHASI HILLS')
+    GROUP BY scheme_name, lgd_district
+    ORDER BY scheme_name, lgd_district;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Two schemes AND two districts named together is one GROUP BY scheme_name,
+    lgd_district — four cells, not two separate single-scheme or single-district
+    queries. State all four counts and, if useful, which district leads for each
+    scheme.
+
+- question: How many applicants are there in Umling block under Piggery, Poultry and Dairy?
+  sql: |
+    SELECT scheme_name,
+           COUNT(DISTINCT request_id) AS applicants
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme',
+                          'Meghalaya Poultry Farming Scheme',
+                          'Meghalaya Dairy Development Scheme')
+      AND lgd_block = 'UMLING'
+    GROUP BY scheme_name
+    ORDER BY scheme_name;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THREE (OR MORE) NAMED SCHEMES IN ONE "how many applicants" QUESTION IS STILL
+    A GROUP BY, never a single merged COUNT(*) with no breakdown — the same rule
+    as the two-scheme case above, it does not relax as more schemes are listed.
+    State each scheme's own applicant count AND the combined total across all
+    three (confirmed live 2026-09-13: "Piggery, Poultry and Dairy" collapsed to
+    one bare `COUNT(*) ... WHERE scheme_name IN (...)` with no GROUP BY at all,
+    losing the per-scheme breakdown the question needs and also using COUNT(*)
+    instead of COUNT(DISTINCT request_id) for "applicants"). Naming three or
+    four schemes by comma list ("A, B and C") is exactly the same shape as
+    naming two with "and" — resolve every named scheme into the IN-list and
+    GROUP BY scheme_name regardless of how many are named.
+
+- question: Compare the three PRIME schemes
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) AS applications,
+           COUNT(DISTINCT lgd_district) AS districts
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('PRIME Small Enterprise Empowerment and Development (SEED)',
+                          'PRIME Tourism Vehicle Scheme',
+                          'PRIME Agriculture Response Vehicle Scheme')
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    PRIME is a naming family, not a stored attribute. Say that the grouping was applied
+    by the resolver.
+
+- question: How many applications are under the livestock schemes?
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme',
+                          'Meghalaya Poultry Farming Scheme',
+                          'Meghalaya Goat Farming Scheme',
+                          'Meghalaya Dairy Development Scheme')
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THERE IS NO SECTOR COLUMN. 'Livestock' is the resolver's grouping and must be declared
+    as such in the answer.
+
+- question: How many applications are under the vehicle schemes?
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('PRIME Tourism Vehicle Scheme',
+                          'PRIME Agriculture Response Vehicle Scheme',
+                          'Chief Minister's Green Taxi Scheme',
+                          'Meghalaya Motorcaravan Scheme')
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Resolver grouping, and it OVERLAPS the tourism grouping - PRIME Tourism Vehicle is in
+    both. Never sum two groupings together.
+
+- question: How many schemes operate in each district?
+  sql: |
+    SELECT lgd_district, COUNT(DISTINCT cm_scheme_key) AS schemes
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY schemes DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which schemes are not statewide?
+  sql: |
+    SELECT scheme_name, COUNT(DISTINCT lgd_district) AS districts
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    HAVING COUNT(DISTINCT lgd_district) < 12
+    ORDER BY districts ASC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Eight of the 15 schemes reach fewer than all 12 districts. Sericulture and
+    Motorcaravan reach one each, so a district breakdown for them returns a single row.
+
+# ---------------------------------------------------------------------------
+# GEOGRAPHY
+# ---------------------------------------------------------------------------
+- question: Applications by district
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications DESC
+    LIMIT 12;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which district has the most applications?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications DESC
+    LIMIT 1;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which district has the fewest applications?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications ASC
+    LIMIT 1;
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are in East Khasi Hills?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'EAST KHASI HILLS';
+  tables:
+  - curated.v_cm_elevate
+  note: District is stored UPPERCASE in dim_geography - emit the uppercase literal.
+
+- question: How many applications are in Ri Bhoi?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'RI BHOI';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Three spellings are in circulation - the source export's 'Ri-Bhoi', the requirement
+    workbook's 'Ri Bhoi', and the roster's 'RI BHOI'. All resolve to the stored form.
+
+- question: How many applications are in West Garo Hills?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_cm_elevate
+
+- question: Top 5 districts by applications
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications DESC
+    LIMIT 5;
+  tables:
+  - curated.v_cm_elevate
+
+- question: What share of applications is in each district?
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1) AS share_pct
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Applications by block
+  sql: |
+    SELECT lgd_district, lgd_block, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district, lgd_block
+    ORDER BY applications DESC
+    LIMIT 20;
+  tables:
+  - curated.v_cm_elevate
+  note: Block is scoped by district because block names can repeat across districts.
+
+- question: Top 5 blocks by applications
+  sql: |
+    SELECT lgd_block, lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_block, lgd_district
+    ORDER BY applications DESC
+    LIMIT 5;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which blocks are in East Khasi Hills?
+  sql: |
+    SELECT lgd_block, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'EAST KHASI HILLS'
+    GROUP BY lgd_block
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many blocks does each district have in CM Elevate?
+  sql: |
+    SELECT lgd_district, COUNT(DISTINCT lgd_block) AS blocks
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY blocks DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    This counts blocks with at least one application, not all blocks in the district.
+    Say which.
+
+- question: Top 10 villages by applications
+  sql: |
+    SELECT lgd_village_name, village_code, lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE entity_type <> 'Unresolved'
+    GROUP BY lgd_village_name, village_code, lgd_district
+    ORDER BY applications DESC
+    LIMIT 10;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Grouped on the CODE as well as the name, because 36 names map to more than one code.
+    Grouping on name alone would merge different villages.
+
+- question: How many villages does each district have in CM Elevate?
+  sql: |
+    SELECT lgd_district, COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate
+    WHERE entity_type <> 'Unresolved'
+    GROUP BY lgd_district
+    ORDER BY villages DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications are in Umling block?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE lgd_block = 'UMLING';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Block is stored UPPERCASE. The source export writes 'Umling C & RD Block'; the roster
+    form is what the column holds. Confirm the exact stored form before shipping.
+
+- question: How many applications came from urban wards?
+  sql: |
+    SELECT COUNT(*) AS applications,
+           COUNT(DISTINCT village_code) AS wards
+    FROM curated.v_cm_elevate
+    WHERE entity_type = 'Ward';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Unlike PMAY-G, which is rural-only, CM Elevate reaches urban wards. These are REAL
+    localities - do not confuse them with entity_type = 'Unresolved'.
+
+- question: Applications by region
+  sql: |
+    SELECT CASE
+             WHEN lgd_district IN ('EAST GARO HILLS','NORTH GARO HILLS','SOUTH GARO HILLS',
+                                   'SOUTH WEST GARO HILLS','WEST GARO HILLS') THEN 'Garo Hills'
+             WHEN lgd_district IN ('EAST KHASI HILLS','EASTERN WEST KHASI HILLS',
+                                   'SOUTH WEST KHASI HILLS','WEST KHASI HILLS') THEN 'Khasi Hills'
+             WHEN lgd_district IN ('EAST JAINTIA HILLS','WEST JAINTIA HILLS') THEN 'Jaintia Hills'
+             WHEN lgd_district = 'RI BHOI' THEN 'Ri Bhoi'
+           END AS region,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY region
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THERE IS NO REGION COLUMN. This CASE is the resolver's grouping and the answer must
+    say so. Ri Bhoi is its own group and is never folded into Khasi Hills.
+
+- question: Which district has the widest scheme coverage?
+  sql: |
+    SELECT lgd_district,
+           COUNT(DISTINCT cm_scheme_key) AS schemes,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY schemes DESC, applications DESC
+    LIMIT 1;
+  tables:
+  - curated.v_cm_elevate
+
+# ---------------------------------------------------------------------------
+# SCHEME x GEOGRAPHY
+# ---------------------------------------------------------------------------
+- question: Cross-tab districts by scheme
+  sql: |
+    SELECT lgd_district, scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district, scheme_name
+    ORDER BY lgd_district, applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The full grid is 12 x 15 = 180 cells and most are empty or very small. Restrict to
+    the larger schemes or chart it.
+
+- question: Applications by scheme in Ri Bhoi
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'RI BHOI'
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which districts does the Warehouse scheme reach?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Warehouse Scheme'
+    GROUP BY lgd_district
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: Reaches 9 districts, not 12 - say so rather than implying statewide coverage.
+
+- question: Show Sericulture by district
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Sericulture & Weaving Scheme'
+    GROUP BY lgd_district
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Returns ONE row - Sericulture is a single-district scheme. Present it as a fact, not
+    as a geographic comparison.
+
+- question: Which scheme dominates each district?
+  sql: |
+    SELECT DISTINCT ON (lgd_district)
+           lgd_district, scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district, scheme_name
+    ORDER BY lgd_district, applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Show every district for a scheme, including districts with none
+  sql: |
+    WITH d AS (SELECT DISTINCT lgd_district FROM curated.v_cm_elevate),
+         s AS (
+           SELECT lgd_district, COUNT(*) AS applications
+           FROM curated.v_cm_elevate
+           WHERE scheme_name = 'Meghalaya Warehouse Scheme'
+           GROUP BY lgd_district
+         )
+    SELECT d.lgd_district, COALESCE(s.applications, 0) AS applications
+    FROM d LEFT JOIN s USING (lgd_district)
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    A missing row and a zero row read very differently when eight of 15 schemes are not
+    statewide. Show the zeros.
+
+- question: Compare East Khasi Hills and West Garo Hills
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) AS applications,
+           COUNT(DISTINCT cm_scheme_key) AS schemes,
+           COUNT(DISTINCT lgd_block) AS blocks,
+           COUNT(DISTINCT village_code) FILTER (WHERE entity_type <> 'Unresolved') AS villages
+    FROM curated.v_cm_elevate
+    WHERE lgd_district IN ('EAST KHASI HILLS','WEST GARO HILLS')
+    GROUP BY lgd_district;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The requirement workbook's version of this compares rupees disbursed. That column
+    does not exist - compare counts and coverage instead.
+
+- question: Which blocks have the Piggery scheme?
+  sql: |
+    SELECT lgd_district, lgd_block, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+    GROUP BY lgd_district, lgd_block
+    ORDER BY applications DESC
+    LIMIT 20;
+  tables:
+  - curated.v_cm_elevate
+
+# ---------------------------------------------------------------------------
+# APPLICANT CATEGORY
+# ---------------------------------------------------------------------------
+- question: What is the applicant type breakdown?
+  sql: |
+    SELECT COALESCE(applicant_category, '(not recorded)') AS applicant_category,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Group on applicant_category, NEVER on type_raw - the raw taxonomy is per-scheme and
+    carries source typos preserved verbatim.
+
+- question: How many applications came from registered bodies?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE applicant_category = 'registered';
+  tables:
+  - curated.v_cm_elevate
+  note: About 83 programme-wide. Always show the count with any percentage.
+
+- question: How many applications came from individuals?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE applicant_category = 'individual';
+  tables:
+  - curated.v_cm_elevate
+
+- question: Applicant type by scheme
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE applicant_category = 'individual')   AS individual,
+           COUNT(*) FILTER (WHERE applicant_category = 'registered')   AS registered,
+           COUNT(*) FILTER (WHERE applicant_category = 'unregistered') AS unregistered,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Warehouse is the ONLY scheme where registered outnumbers individual. Every 'applicants
+    are individuals' assumption breaks there.
+
+- question: Which schemes have registered-body applicants?
+  sql: |
+    SELECT scheme_name, COUNT(*) AS registered_applications
+    FROM curated.v_cm_elevate
+    WHERE applicant_category = 'registered'
+    GROUP BY scheme_name
+    ORDER BY registered_applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Applicant type by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE applicant_category = 'individual') AS individual,
+           COUNT(*) FILTER (WHERE applicant_category <> 'individual') AS bodies,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Show the raw applicant labels for one scheme
+  sql: |
+    SELECT type_raw, applicant_category, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+    GROUP BY type_raw, applicant_category
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The ONLY sanctioned use of type_raw - audit, scoped to ONE scheme, shown alongside
+    the normalised category. Never group on type_raw across schemes.
+
+# ---------------------------------------------------------------------------
+# STATUS - verification, workflow, level
+# ---------------------------------------------------------------------------
+- question: How many applications are on hold?
+  sql: |
+    SELECT COUNT(*) AS on_hold
+    FROM curated.v_cm_elevate
+    WHERE data_verified = 'On Hold';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THE MOST IMPORTANT EXAMPLE IN THIS FILE. There is also a boolean column named onhold
+    and it is FALSE on every row - a query against it returns zero and looks perfectly
+    correct. 'On hold' ALWAYS routes to data_verified.
+
+- question: Show the verification status breakdown
+  sql: |
+    SELECT COALESCE(data_verified, '(not recorded)') AS verification_status,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    NULL means no verdict was recorded - it is NOT 'Valid'. Surface it as its own bucket
+    rather than dropping it or folding it in.
+
+- question: How many applications are verified valid?
+  sql: |
+    SELECT COUNT(*) AS valid
+    FROM curated.v_cm_elevate
+    WHERE data_verified = 'Valid';
+  tables:
+  - curated.v_cm_elevate
+
+- question: What is the current application status distribution across CM Elevate?
+  sql: |
+    SELECT CASE WHEN LOWER(current_file_status) LIKE 'sendback%' THEN 'Sent back' WHEN current_file_status IS NULL THEN '(not recorded)' ELSE INITCAP(LOWER(current_file_status)) END AS status,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    "Status" / "current status" / "application status" means current_file_status
+    (product decision 2026-09-28). The two send-back spellings are one bucket
+    (rule 7). Verification words (verified, valid, on hold, pending) stay on
+    data_verified — see the verification examples.
+
+- question: How many CM Elevate applicants have completed data verification in Ri Bhoi?
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE data_verified = 'Valid')            AS verified,
+           COUNT(*) FILTER (WHERE data_verified IS DISTINCT FROM 'Valid') AS not_verified,
+           COUNT(*)                                                   AS total_applications,
+           ROUND(COUNT(*) FILTER (WHERE data_verified = 'Valid') * 100.0
+                 / NULLIF(COUNT(*), 0), 1)                             AS verified_pct
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'RI BHOI';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    "Completed verification" / "verified" means data_verified = 'Valid' — there is
+    no 'Completed' literal anywhere in this column, never invent one. State both the
+    verified and not-verified counts (On Hold + Invalid + Wrong + NULL combined),
+    plus the verified percentage, in one query — never just one side.
+
+- question: What is the status-wise applicant count for Piggery in Umshaken village?
+  sql: |
+    SELECT CASE WHEN LOWER(current_file_status) LIKE 'sendback%' THEN 'Sent back' WHEN current_file_status IS NULL THEN '(not recorded)' ELSE INITCAP(LOWER(current_file_status)) END AS status,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+      AND village_code = 277617
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    "Status-wise ... count" is a GROUP BY over every current_file_status value at
+    the named scope (decided 2026-09-28), never a single filtered count.
+
+- question: How many applications have invalid or wrong data?
+  sql: |
+    SELECT data_verified, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE data_verified IN ('Invalid','Wrong')
+    GROUP BY data_verified
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    'Wrong' and 'Invalid' are SEPARATE stored verdicts - shown separately rather than
+    merged. Neither is a scheme rejection; both describe the application's own data.
+
+- question: Verification status by scheme
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE data_verified = 'Valid')     AS valid,
+           COUNT(*) FILTER (WHERE data_verified = 'On Hold')   AS on_hold,
+           COUNT(*) FILTER (WHERE data_verified = 'Wrong')     AS wrong,
+           COUNT(*) FILTER (WHERE data_verified = 'Invalid')   AS invalid,
+           COUNT(*) FILTER (WHERE data_verified IS NULL)       AS not_recorded,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The Valid share ranges from about 52.7% (Dairy) to 100% in the smallest schemes.
+    Never quote the programme figure for one scheme.
+
+- question: Verification status by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE data_verified = 'Valid')   AS valid,
+           COUNT(*) FILTER (WHERE data_verified = 'On Hold') AS on_hold,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) FILTER (WHERE data_verified = 'Valid') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS valid_pct
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which scheme has the most applications on hold?
+  sql: |
+    SELECT scheme_name, COUNT(*) AS on_hold
+    FROM curated.v_cm_elevate
+    WHERE data_verified = 'On Hold'
+    GROUP BY scheme_name
+    ORDER BY on_hold DESC
+    LIMIT 1;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Show the workflow file status breakdown
+  sql: |
+    SELECT CASE WHEN LOWER(current_file_status) LIKE 'sendback%' THEN 'sendback'
+                ELSE LOWER(current_file_status) END AS file_status,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    About 98.4% sit at 'forward'. This is near-constant, not a distribution - and
+    'forward' means the file moved on, NOT that it was approved or funded.
+    'sendback' and 'sendback to vdv/citizen' are the same idea stored two ways
+    (rule 7) - merged into one bucket here, never shown as two separate rows.
+
+- question: How many applications were sent back?
+  sql: |
+    SELECT COUNT(*) AS sent_back
+    FROM curated.v_cm_elevate
+    WHERE LOWER(current_file_status) LIKE 'sendback%';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Two stored strings for one idea - 'sendback' and 'sendback to vdv/citizen'. A prefix
+    match on the folded value catches both.
+
+- question: How many applications were resubmitted?
+  sql: |
+    SELECT COUNT(*) AS resubmitted
+    FROM curated.v_cm_elevate
+    WHERE LOWER(current_file_status) = 'resubmit';
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which schemes have applications that were sent back?
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE LOWER(current_file_status) LIKE 'sendback%') AS sent_back,
+           COUNT(*) FILTER (WHERE LOWER(current_file_status) = 'resubmit')     AS resubmitted,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    HAVING COUNT(*) FILTER (WHERE LOWER(current_file_status) <> 'forward') > 0
+    ORDER BY sent_back DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Only two schemes carry any non-Forward status - PRIME Tourism Vehicle and Piggery.
+    Everywhere else the column is constant.
+
+- question: Show the workflow level breakdown
+  sql: |
+    SELECT LOWER(current_level) AS level, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    LOWER() IS MANDATORY. 'level1' and 'Level1' are the same level stored two ways -
+    without folding, the same level appears twice in the answer.
+
+- question: How many applications are at level 2?
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE LOWER(current_level) = 'level2';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Do not read level2 as 'further along'. The data does not assert a progression, and
+    level0 co-occurs with sent-back files.
+
+- question: How many applications were withdrawn?
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE is_withdraw IS TRUE) AS withdrawn,
+           COUNT(*) FILTER (WHERE is_withdraw IS NULL) AS not_recorded,
+           COUNT(*) AS total_applications
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Answer zero AND say the flag is unpopulated on every record, so the zero reads as a
+    data gap rather than as applicant behaviour. IS TRUE, not a bare boolean test - the
+    column is nullable.
+
+- question: Are the onhold and withdrawn flags populated?
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE onhold IS TRUE)       AS onhold_true,
+           COUNT(*) FILTER (WHERE onhold IS FALSE)      AS onhold_false,
+           COUNT(*) FILTER (WHERE onhold IS NULL)       AS onhold_null,
+           COUNT(*) FILTER (WHERE is_withdraw IS TRUE)  AS withdraw_true,
+           COUNT(*) FILTER (WHERE is_withdraw IS FALSE) AS withdraw_false,
+           COUNT(*) FILTER (WHERE is_withdraw IS NULL)  AS withdraw_null
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The data-quality check behind the on-hold routing rule. Expect every row FALSE on
+    both. Run it before trusting any answer that touches either flag.
+
+# ---------------------------------------------------------------------------
+# APPLICATION MODE
+# ---------------------------------------------------------------------------
+- question: How did people apply?
+  sql: |
+    SELECT application_mode, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY application_mode
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The cleanest categorical on this fact - two values, no case variants.
+    'cmconnectcenter' is an assisted walk-in centre; emit the stored form.
+
+- question: How many applications were submitted online?
+  sql: |
+    SELECT COUNT(*) AS online_applications
+    FROM curated.v_cm_elevate
+    WHERE application_mode = 'online';
+  tables:
+  - curated.v_cm_elevate
+
+- question: How many applications came through CM Connect Centres?
+  sql: |
+    SELECT COUNT(*) AS assisted_applications
+    FROM curated.v_cm_elevate
+    WHERE application_mode = 'cmconnectcenter';
+  tables:
+  - curated.v_cm_elevate
+
+- question: Application mode by scheme
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE application_mode = 'online')          AS online,
+           COUNT(*) FILTER (WHERE application_mode = 'cmconnectcenter') AS connect_centre,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) FILTER (WHERE application_mode = 'online') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS online_pct
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Online share varies sharply - Dairy is about 39.8% against 70-100% elsewhere. Never
+    quote the programme's 90.6% for a single scheme.
+
+- question: Application mode by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE application_mode = 'online')          AS online,
+           COUNT(*) FILTER (WHERE application_mode = 'cmconnectcenter') AS connect_centre,
+           ROUND(COUNT(*) FILTER (WHERE application_mode = 'cmconnectcenter') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS assisted_pct
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY assisted_pct DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: Where assisted application is highest is a genuine digital-access finding.
+
+- question: Which scheme relies most on assisted application?
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE application_mode = 'cmconnectcenter') AS connect_centre,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) FILTER (WHERE application_mode = 'cmconnectcenter') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS assisted_pct
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    HAVING COUNT(*) >= 15
+    ORDER BY assisted_pct DESC
+    LIMIT 1;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The HAVING guard excludes the six schemes under 15 applications, where a percentage
+    is not meaningful.
+
+# ---------------------------------------------------------------------------
+# GENDER - lives in JSONB
+# ---------------------------------------------------------------------------
+- question: What is the gender split of CM Elevate applicants?
+  sql: |
+    SELECT scheme_specific ->> 'gender_id' AS gender,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    gender was NOT promoted to a typed column - read it from scheme_specific. Despite the
+    _id suffix it holds text (Female / Male / Other), not a code. It is the one
+    scheme_specific key common to all 15 schemes, so this read needs no scheme scope.
+
+- question: How many women applied to CM Elevate?
+  sql: |
+    SELECT COUNT(*) AS female_applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_specific ->> 'gender_id' = 'Female';
+  tables:
+  - curated.v_cm_elevate
+
+- question: Gender split by scheme
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Female') AS female,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Male')   AS male,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Other')  AS other,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Female') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS female_pct
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THE PROGRAMME AVERAGE HIDES THE FINDING. About 61% female overall, but Sericulture is
+    100%, Piggery 74%, Tourism Vehicle 20% and Green Taxi 0%. Never quote the programme
+    figure for a single scheme.
+
+- question: Gender split by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Female') AS female,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Male')   AS male,
+           ROUND(COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Female') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS female_pct
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY female_pct DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which schemes are majority female?
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Female') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS female_pct
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    HAVING COUNT(*) >= 15
+       AND COUNT(*) FILTER (WHERE scheme_specific ->> 'gender_id' = 'Female') * 2 > COUNT(*)
+    ORDER BY female_pct DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: The HAVING guard drops schemes too small for a share to mean anything.
+
+- question: Gender split by application mode
+  sql: |
+    SELECT application_mode,
+           scheme_specific ->> 'gender_id' AS gender,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1, 2
+    ORDER BY 1, applications DESC;
+  tables:
+  - curated.v_cm_elevate
+
+# ---------------------------------------------------------------------------
+# SCHEME-SPECIFIC JSONB
+# ---------------------------------------------------------------------------
+- question: What extra fields does the Warehouse scheme record?
+  sql: |
+    SELECT DISTINCT jsonb_object_keys(scheme_specific) AS field
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Warehouse Scheme'
+      AND scheme_specific IS NOT NULL
+    ORDER BY field;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Key discovery MUST be scoped to one scheme - 25 fields are common to all 15 schemes
+    and 125 appear in exactly one.
+
+- question: How many CM Elevate applicants are associated with poultry sector?
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE scheme_specific ->> 'sector_id' ILIKE 'poultry')
+             AS poultry_sector_applicants,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'sector_id' IS NOT NULL)
+             AS sector_recorded,
+           COUNT(*) AS scheme_total
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Poultry Farming Scheme';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THE QUESTION NAMES "sector" - answer the sector field, don't silently collapse it
+    into the bare scheme total (that was tried and reported back as ignoring the
+    question, confirmed live 2026-09-11). sector_id needs THREE guards at once: it is
+    stored Title Case ('Poultry', not 'poultry' - compare with ILIKE, never an exact
+    lowercase match, or the filter silently returns 0); the "is it recorded" test MUST
+    be `->> 'sector_id' IS NOT NULL`, NEVER `? 'sector_id'` - the `?` has-key operator
+    is TRUE on all 501 rows because the key is present with a JSON null value on 475
+    of them, which silently makes the "recorded" count equal the scheme total (this
+    exact mistake shipped once already before being caught live); and it is recorded
+    on only 26 of the scheme's 501 rows even with the right predicate - a filtered
+    count with no denominator reads as either "the whole scheme" or "broken data"
+    depending which way it's wrong. State all three numbers: 21 have sector recorded
+    as Poultry, out of 26 rows where sector is recorded at all, out of 501 total
+    applicants under the scheme. Contrast with the NEXT example, which explicitly asks
+    for a breakdown "by" or "each" sector and groups by sector_id instead of filtering
+    to one value.
+
+- question: How many applicants under Piggery and Poultry are associated with poultry sector in Ri Bhoi?
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'sector_id' ILIKE 'poultry')
+             AS poultry_sector_applicants,
+           COUNT(*) FILTER (WHERE scheme_specific ->> 'sector_id' IS NOT NULL)
+             AS sector_recorded,
+           COUNT(*) AS scheme_total
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme',
+                          'Meghalaya Poultry Farming Scheme')
+      AND lgd_district = 'RI BHOI'
+    GROUP BY scheme_name
+    ORDER BY scheme_name;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    NAMING TWO SCHEMES TOGETHER — the sector test stays INSIDE the two
+    COUNT(*) FILTER(...) clauses only; it must NEVER also appear in the outer
+    WHERE. Putting it in the WHERE too (`AND scheme_specific ->> 'sector_id' IS
+    NOT NULL`) silently corrupts scheme_total into the sector-recorded count AND
+    drops Piggery from the result entirely, since Piggery never carries
+    sector_id at all (confirmed live 2026-09-12: this exact mistake reported
+    Poultry's Ri Bhoi scheme_total as 8 instead of the real 238, with Piggery
+    missing rather than shown as 0/0/1950). Every named scheme gets its own row
+    with its true, unfiltered scheme_total — for one with no sector_id key at
+    all, say plainly that sector isn't tracked for it rather than reading its
+    0 as "checked and found none".
+
+- question: How many CM Elevate applicants are associated with each poultry sector?
+  sql: |
+    SELECT COALESCE(scheme_specific ->> 'sector_id', '(not recorded)') AS sector,
+           COUNT(*) AS applicants
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Poultry Farming Scheme'
+    GROUP BY 1
+    ORDER BY applicants DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THE KEY IS sector_id, NOT 'sector' - one keystroke wrong and `->>` silently returns
+    NULL for every row, which reads as "no matching records" even though the scheme has
+    501 real applicants (confirmed live 2026-09-11: this exact question was answered as a
+    refusal because the generator guessed 'sector'). sector_id exists only for Poultry,
+    Dairy and Goat Farming, and is mostly NULL even there (475 of 501 Poultry rows) - say
+    so rather than implying full coverage. "Sector" in a question about ONE already-named
+    scheme is not asking to filter further; COALESCE the NULLs into their own bucket
+    instead of dropping them.
+
+- question: Give me the applicant count and pendency status for Piggery, Poultry and Dairy in Ri Bhoi, broken down by sector.
+  sql: |
+    SELECT scheme_name,
+           COALESCE(scheme_specific ->> 'sector_id', '(not recorded)') AS sector,
+           COUNT(*) AS applicant_count,
+           COUNT(*) FILTER (WHERE data_verified = 'On Hold') AS pending_applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme',
+                          'Meghalaya Poultry Farming Scheme',
+                          'Meghalaya Dairy Development Scheme')
+      AND lgd_district = 'RI BHOI'
+    GROUP BY scheme_name, sector
+    ORDER BY scheme_name, applicant_count DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    "BROKEN DOWN BY SECTOR" / "BY SECTOR" / "EACH SECTOR" WITH NO SPECIFIC SECTOR
+    VALUE NAMED means GROUP BY the sector dimension itself (COALESCE the NULLs
+    into their own "(not recorded)" bucket) — it is a completely different
+    request from "associated with POULTRY sector" / "belongs to DAIRY sector",
+    which names one sector VALUE to filter/count, not a breakdown (see the
+    "poultry sector" examples above; that shape uses COUNT(*) FILTER(...), never
+    a plain GROUP BY). Do NOT confuse the two just because one of the SCHEMES
+    named in the IN-list (here, "Poultry") is spelled the same as a possible
+    sector VALUE — the question is asking for a cross-tab of scheme x sector,
+    not "how many of these three schemes are in the poultry sector" (confirmed
+    live 2026-09-13: this exact question was answered instead with a
+    poultry_sector_applicants FILTER on every scheme, which is the wrong
+    request — it silently substituted the narrower filtered-count shape for the
+    breakdown that was actually asked for). Piggery carries no sector_id key at
+    all, so every one of its rows lands in "(not recorded)" — that is the
+    correct, informative answer for Piggery here, not a sign the query is wrong.
+
+- question: How many scheme-specific fields does each scheme record?
+  sql: |
+    SELECT scheme_name, COUNT(DISTINCT k) AS fields
+    FROM curated.v_cm_elevate,
+         LATERAL jsonb_object_keys(scheme_specific) AS k
+    WHERE scheme_specific IS NOT NULL
+    GROUP BY scheme_name
+    ORDER BY fields DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: Ranges from about 41 fields for Goat Farming to 81 for Agriculture Response Vehicle.
+
+- question: Read a scheme-specific field for one scheme
+  sql: |
+    SELECT scheme_specific ->> 'occupation_id' AS occupation,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE cm_scheme_key = {scheme_key}
+    GROUP BY 1
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    THE SCHEME FILTER IS MANDATORY. Without it, `->>` returns NULL for every scheme that
+    lacks the key, and those NULLs are indistinguishable from genuinely empty values.
+    Note also that occupation_id is an UNRESOLVABLE CODE - there is no lookup table
+    anywhere in megh_db, so report the stored value and say it is uncoded.
+
+- question: Find applications with a specific scheme-specific value
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.fact_cm_elevate_application
+    WHERE scheme_specific @> '{"some_key": "some_value"}';
+  tables:
+  - curated.fact_cm_elevate_application
+  note: >
+    Containment queries run against the FACT, not the view, so the GIN index
+    idx_cm_elevate_specific_gin applies. This is the only routine reason to bypass
+    v_cm_elevate.
+
+- question: Which scheme-specific fields are common to every scheme?
+  sql: |
+    WITH k AS (
+      SELECT DISTINCT cm_scheme_key, jsonb_object_keys(scheme_specific) AS field
+      FROM curated.v_cm_elevate
+      WHERE scheme_specific IS NOT NULL
+    )
+    SELECT field, COUNT(DISTINCT cm_scheme_key) AS schemes
+    FROM k
+    GROUP BY field
+    HAVING COUNT(DISTINCT cm_scheme_key) = (SELECT COUNT(*) FROM curated.dim_cm_elevate_scheme)
+    ORDER BY field;
+  tables:
+  - curated.v_cm_elevate
+  - curated.dim_cm_elevate_scheme
+  note: >
+    Builds the key manifest this partition does not otherwise have. Fields returned here
+    are the only ones safe to read across schemes - gender_id is one of them.
+
+# ---------------------------------------------------------------------------
+# LOOKUPS AND LISTINGS
+# ---------------------------------------------------------------------------
+- question: Look up application REQ/001/001/10102025/188877
+  sql: |
+    SELECT request_id, scheme_name, lgd_district, lgd_block, lgd_village_name,
+           applicant_category, current_level, current_file_status,
+           application_mode, data_verified
+    FROM curated.v_cm_elevate
+    WHERE request_id = 'REQ/001/001/10102025/188877'
+    LIMIT 10;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    LIMIT 10, not 1 - request_id is not unique. Personal fields were stripped at ingest,
+    so the detail is scheme, geography and status. Segment 1 of the number (001)
+    identifies the scheme as Piggery before the query even runs.
+
+- question: List applications in a village
+  sql: |
+    SELECT request_id, scheme_name, applicant_category, data_verified, application_mode
+    FROM curated.v_cm_elevate
+    WHERE village_code = {village_code}
+    ORDER BY scheme_name, request_id
+    LIMIT 100;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Filter on the CODE, not the name. Never include names, dates of birth, addresses,
+    contact details or bank fields in a listing.
+
+- question: List applications for a scheme in a district
+  sql: |
+    SELECT request_id, lgd_block, lgd_village_name, applicant_category, data_verified
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+      AND lgd_district = 'RI BHOI'
+    ORDER BY lgd_block, lgd_village_name
+    LIMIT 100;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Which scheme does application number REQ/233/137/10112025/224648 belong to?
+  sql: |
+    SELECT request_id, scheme_name, endpoint
+    FROM curated.v_cm_elevate
+    WHERE request_id = 'REQ/233/137/10112025/224648'
+    LIMIT 10;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Segment 1 = 233 identifies PRIME Small Enterprise Empowerment without a lookup. The
+    prefix map is a measured regularity, useful for validating a number before querying.
+
+# ---------------------------------------------------------------------------
+# DATA QUALITY
+# ---------------------------------------------------------------------------
+- question: Are there data-quality issues I should know about?
+  sql: |
+    SELECT COUNT(*)                                              AS rows_total,
+           COUNT(*) - COUNT(DISTINCT request_id)                 AS duplicate_request_ids,
+           COUNT(*) FILTER (WHERE entity_type = 'Unresolved')    AS unresolved_geography,
+           COUNT(*) FILTER (WHERE data_verified IS NULL)         AS verdict_not_recorded,
+           COUNT(*) FILTER (WHERE has_geo_conflict)              AS geo_conflict_rows,
+           COUNT(*) FILTER (WHERE applicant_category IS NULL)    AS applicant_type_missing
+    FROM curated.v_cm_elevate;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The five real quality signals on this partition. Note what is NOT here - there are no
+    #ERROR! cells, no missing months and no missing sanctioned amounts, because none of
+    those columns exist. The requirement workbook's data-quality answer describes a
+    different dataset.
+
+- question: Which application numbers appear more than once?
+  sql: |
+    SELECT request_id, COUNT(*) AS occurrences
+    FROM curated.v_cm_elevate
+    GROUP BY request_id
+    HAVING COUNT(*) > 1
+    ORDER BY occurrences DESC, request_id
+    LIMIT 100;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    About 36 numbers repeat, all inside the Piggery scheme. A finding to report, not an
+    error to hide.
+
+- question: How many applications could not be matched to a real village?
+  sql: |
+    SELECT COUNT(*) AS unresolved_applications,
+           COUNT(DISTINCT lgd_district) AS districts_affected
+    FROM curated.v_cm_elevate
+    WHERE entity_type = 'Unresolved';
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    These are synthetic placeholders kept so district and scheme totals reconcile to the
+    source. Counting them is a data-completeness question in its own right.
+
+- question: Unresolved geography by scheme
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE entity_type = 'Unresolved') AS unresolved,
+           COUNT(*) AS applications,
+           ROUND(COUNT(*) FILTER (WHERE entity_type = 'Unresolved') * 100.0
+                 / NULLIF(COUNT(*), 0), 1) AS unresolved_pct
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY unresolved DESC;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Break applications down by geography entity type
+  sql: |
+    SELECT entity_type, COUNT(*) AS applications,
+           COUNT(DISTINCT village_code) AS distinct_codes
+    FROM curated.v_cm_elevate
+    GROUP BY entity_type
+    ORDER BY applications DESC;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    Three values - Village, Ward and Unresolved. Wards are REAL urban localities and must
+    be counted; Unresolved is a placeholder and must not.
+
+- question: How many applications sit on villages with conflicting geography?
+  sql: |
+    SELECT COUNT(*) AS applications,
+           COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate
+    WHERE has_geo_conflict;
+  tables:
+  - curated.v_cm_elevate
+  note: >
+    The conflict is recorded, not resolved - the stored block and district are the
+    roster's. The count of conflicting villages is contested between sources; do not
+    quote a figure without measuring it.
+
+- question: How many applications have no verification outcome recorded?
+  sql: |
+    SELECT COUNT(*) AS not_recorded
+    FROM curated.v_cm_elevate
+    WHERE data_verified IS NULL;
+  tables:
+  - curated.v_cm_elevate
+
+- question: Check that CM Elevate loaded completely
+  sql: |
+    SELECT dataset, scheme_name, raw_rows, curated_rows, quarantined,
+           raw_rows - curated_rows - quarantined AS discrepancy
+    FROM meta.v_reconciliation_cm_elevate
+    ORDER BY dataset;
+  tables:
+  - meta.v_reconciliation_cm_elevate
+  note: >
+    Reconciliation is PER SUB-SCHEME for CM Elevate - raw must equal curated plus
+    quarantined for each of the 15 endpoints independently, not merely in aggregate.
+    Not readable by megh_readonly.
+
+- question: How many CM Elevate rows were quarantined?
+  sql: |
+    SELECT source_dataset, reason_code, COUNT(*) AS rows
+    FROM staging.quarantine
+    WHERE source_system = 'cm_elevate'
+    GROUP BY source_dataset, reason_code
+    ORDER BY rows DESC;
+  tables:
+  - staging.quarantine
+  note: Not readable by megh_readonly - a data-team query.
+
+# ---------------------------------------------------------------------------
+# CROSS-SCHEME
+# ---------------------------------------------------------------------------
+- question: Which villages have CM Elevate applications but no PMAY houses?
+  sql: |
+    WITH cm AS (
+      SELECT village_code, COUNT(*) AS cm_applications
+      FROM curated.v_cm_elevate
+      WHERE entity_type <> 'Unresolved'
+      GROUP BY village_code
+    )
+    SELECT cm.village_code, c.lgd_district, cm.cm_applications, c.pmay_houses
+    FROM cm
+    LEFT JOIN curated.v_cross_scheme_village_coverage c USING (village_code)
+    WHERE COALESCE(c.pmay_houses, 0) = 0
+    ORDER BY cm.cm_applications DESC
+    LIMIT 50;
+  tables:
+  - curated.v_cm_elevate
+  - curated.v_cross_scheme_village_coverage
+  note: >
+    CM Elevate has no column in the coverage view, so aggregate to village_code first and
+    join the aggregate. NEVER join the facts. The view COALESCEs its measures to 0, so
+    the test is = 0, never IS NULL.
+
+- question: Which villages get both CM Elevate and MGNREGA?
+  sql: |
+    WITH cm AS (
+      SELECT village_code, COUNT(*) AS cm_applications
+      FROM curated.v_cm_elevate
+      WHERE entity_type <> 'Unresolved'
+      GROUP BY village_code
+    )
+    SELECT COUNT(*) FILTER (WHERE c.mgnrega_person_days > 0) AS both,
+           COUNT(*) FILTER (WHERE COALESCE(c.mgnrega_person_days, 0) = 0) AS cm_elevate_only
+    FROM cm
+    LEFT JOIN curated.v_cross_scheme_village_coverage c USING (village_code);
+  tables:
+  - curated.v_cm_elevate
+  - curated.v_cross_scheme_village_coverage
+
+- question: Add CM Elevate to the cross-scheme village coverage view
+  sql: |
+    WITH cm AS (
+      SELECT village_code, COUNT(*) AS cm_applications
+      FROM curated.v_cm_elevate
+      WHERE entity_type <> 'Unresolved'
+      GROUP BY village_code
+    )
+    SELECT c.village_code, c.lgd_district, c.pmay_houses, c.mgnrega_person_days,
+           COALESCE(cm.cm_applications, 0) AS cm_applications
+    FROM curated.v_cross_scheme_village_coverage c
+    LEFT JOIN cm USING (village_code)
+    ORDER BY cm_applications DESC
+    LIMIT 100;
+  tables:
+  - curated.v_cross_scheme_village_coverage
+  - curated.v_cm_elevate
+  note: The aggregate-then-join pattern, in the direction that keeps every coverage-view village.
+
+# ---------------------------------------------------------------------------
+# UNANSWERABLE - negative examples. sql: null on every one.
+# These cover the 40 of 89 requirement-workbook use cases that megh_db cannot
+# answer. NEVER answer one of these with an application count.
+# ---------------------------------------------------------------------------
+- question: What is the total amount disbursed under CM Elevate?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    CM Elevate has NO money column. There is no disbursement, subsidy, loan or sanctioned
+    amount on fact_cm_elevate_application, and none in the source export either. Answer
+    that the figure is not held in this warehouse. Do NOT substitute the application
+    count - a count of requests is not an amount of money. Covers UC-008.
+
+- question: What is the total amount sanctioned under CM Elevate?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    No sanctioned_amount column. An application is a REQUEST, not an award - the data
+    cannot even confirm that anything was approved. Covers UC-015.
+
+- question: How much subsidy has been disbursed?
+  sql: null
+  status: UNANSWERABLE
+  reason: No subsidy column and no tranche columns. Covers UC-009, UC-039, UC-040, UC-041.
+
+- question: How much loan has been disbursed?
+  sql: null
+  status: UNANSWERABLE
+  reason: No loan column. Covers UC-010, UC-038.
+
+- question: What is the gap between sanctioned and disbursed?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    Both operands are absent, so the gap is not computable. Do not present a count of
+    unverified applications as a funding pipeline. Covers UC-016, UC-017, UC-018.
+
+- question: What is the average disbursement per beneficiary?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    There is no amount to average. Dividing an application count by anything does not
+    produce a rupee figure. Covers UC-011.
+
+- question: What is the disbursement rate by scheme?
+  sql: null
+  status: UNANSWERABLE
+  reason: Neither operand exists. Covers UC-014.
+
+- question: Which scheme disbursed the most money?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    No amount to rank by. If the user meant 'largest scheme', offer the application-count
+    ranking as an explicitly different question. Covers UC-020, UC-058, UC-060.
+
+- question: How much was disbursed in East Khasi Hills?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    Resolve the district, then refuse the measure. Covers UC-012, UC-030, UC-031 and the
+    per-scheme disbursement questions UC-079 through UC-089.
+
+- question: Show the CM Elevate application trend by month
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    CM Elevate has NO date column - no application date, no year_key, no FK to dim_year.
+    The source export carries no date either, so this is a source limitation, not a
+    loading gap. Do NOT use ingested_at, which describes the load, and do NOT parse a
+    date out of request_id. Covers UC-053.
+
+- question: How many applications were made in 2024 versus 2025?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    No year on a CM Elevate row. Refuse rather than parsing request_id, whose date
+    segment resolved only 3,038 of 8,436 source rows and produced dates after the export
+    date. Covers UC-054.
+
+- question: How many applications were processed in April 2024?
+  sql: null
+  status: UNANSWERABLE
+  reason: No month and no date. Covers UC-052.
+
+- question: How much will be disbursed next quarter?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    Forecasting is out of scope, and CM Elevate has neither an amount nor a dated history
+    to project from. Covers ED-018.
+
+- question: How are loans split between Bank and LIFCOM?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    There is no loan-entity field. Both the channel and the disbursement it would describe
+    are absent. A bank_id field survives in scheme_specific for some schemes but holds an
+    unresolvable numeric code with no lookup table - it is not a loan channel. Covers
+    UC-033 through UC-037, UC-046, UC-047.
+
+- question: How many applications were desanctioned, and why?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    No desanctioned column and no reason column. The nearest recorded verdict is
+    data_verified (Valid / On Hold / Wrong / Invalid), which is a data-verification
+    outcome, not a funding decision - offer it only if clearly relabelled. Covers UC-048,
+    UC-049.
+
+- question: How many applications were refused?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    No refusal flag and no refusal reasons. is_withdraw exists but is FALSE on every row
+    and means withdrawn by the applicant, which is a different concept. Covers UC-050,
+    UC-051.
+
+- question: How many applications were approved?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    No approval field. current_file_status = 'forward' means the file moved to the next
+    step and covers 98.4% of rows - presenting it as approval is a silent wrong answer.
+
+- question: What is the name of the applicant on request REQ/001/001/10102025/188877?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    citizen_name was stripped at ingest, along with epic_id, mobile_number, pan_number and
+    every bank_account field. There is no join that recovers them. Return 'not held in
+    this data' and do not build an applicant-lookup feature. Covers UC-042, UC-045.
+
+- question: Find an applicant named Benadvin
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    Names are not in the curated layer, and individual-level lookup is out of scope under
+    the PII rule. Covers UC-045.
+
+- question: Show the date of birth and address for applications in Zikzak block
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    dob, address, email_id, member_id, family_id and pds_id survive into scheme_specific
+    because the loader's strip list does not cover them, but they must NEVER be surfaced.
+    Date of birth plus address plus village is re-identifying. Refuse and aggregate
+    instead.
+
+- question: Which names appear on more than one application?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    Names are not held. The nearest answerable question is duplicate application numbers -
+    offer that instead, relabelled. Covers UC-066.
+
+- question: Compare CM Elevate spending against PMAY by district
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    CM Elevate has no money column and is absent from v_cross_scheme_money_district_year,
+    whose definition is a two-branch UNION ALL over MGNREGA and PMAY only. Village
+    coverage is the only cross-scheme axis available. Covers UC-063.
+
+- question: Show MGNREGA person-days for the villages in this CM Elevate result
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    A row-level join from fact_cm_elevate_application to any other fact is prohibited -
+    all ten fact pairs in megh_db are. Aggregate each side to village_code independently
+    and join the aggregates.
+
+- question: How many applications are under the Common Facility Center scheme?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    No such scheme exists in megh_db. It appears in requirement-workbook UC-083, which
+    describes a different dataset. Return not-found with the 15 real scheme names as
+    did-you-mean candidates - and do not fuzzy-match it onto 'Sports and Wellness Centre',
+    which is the nearest string and a completely different scheme.
+
+- question: Look up application MPDSI018599
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    Not the identifier format held here. Every CM Elevate application number in megh_db
+    begins 'REQ/'. MPDSI, PTVSI and MEWSI prefixes come from the requirement workbook's
+    dataset. Say the format is not the one held rather than returning a bare not-found.
+    Covers UC-042, UC-043, ED-004.
+
+- question: What is the total of all village LGD codes?
+  sql: null
+  status: UNANSWERABLE
+  reason: >
+    LGD codes are identifiers, not measures. SUM on village_code is semantically invalid.
+    Decline and offer COUNT(DISTINCT village_code) instead, excluding Unresolved.
+
+- question: Update the status of a CM Elevate application
+  sql: null
+  status: UNANSWERABLE
+  reason: The read role permits SELECT only. Refuse rather than translating into write SQL.

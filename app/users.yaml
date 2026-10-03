@@ -1,0 +1,43 @@
+# One-time seed for app.users — imported ONLY when the table is empty at
+# startup (see backend/appdb._seed_users_from_yaml). After that the DB is the
+# source of truth and this file is ignored. Manage users via the admin API /
+# dashboard, not here.
+#
+# Every seeded user goes into the default tenant (DEFAULT_TENANT_CODE) with
+# password "CHANGE_ME" unless `password:` is given. ROTATE THESE IMMEDIATELY.
+#
+#   role: super_admin | tenant_admin | admin | state_officer |
+#         district_officer | block_officer | analyst | public
+#   districts / blocks : UPPERCASE names; required for geographically-scoped
+#                        *_officer roles
+#   schemes            : optional subset of [MGNREGA, PMAY-G, Focus Plus,
+#                        CM Elevate, Focus Legacy, CM Elevate Legacy]
+
+users:
+  - user_id: superadmin
+    username: superadmin
+    name: Platform Super Admin
+    role: super_admin
+    password: CHANGE_ME
+
+  - user_id: rd-admin
+    username: rd-admin
+    name: Rural Development Dept Admin
+    role: tenant_admin
+    password: CHANGE_ME
+
+  - user_id: state-rd
+    username: state-rd
+    name: RD State Officer
+    role: state_officer
+
+  - user_id: wgh-officer
+    username: wgh-officer
+    name: West Garo Hills District Officer
+    role: district_officer
+    districts: [WEST GARO HILLS]
+
+  - user_id: analyst-1
+    username: analyst-1
+    name: RD Data Analyst
+    role: analyst

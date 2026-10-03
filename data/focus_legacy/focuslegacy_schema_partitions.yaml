@@ -1,0 +1,1796 @@
+schema_version: '1.0'
+schema_name: focuslegacy_curated_semantic_schema
+display_name: Focus Legacy Curated Star-Schema Semantic Schema (megh_db)
+
+# ===========================================================================
+# v1.0 - 2026-09-21 - WRITTEN AGAINST THE LIVE DATABASE
+#
+# Focus Legacy is the FIFTH scheme in megh_db. Like Focus Plus and CM Elevate
+# it has no flat-table ancestor: it was loaded straight into the curated star
+# schema, so there is no v1.0-to-v2.0 migration to describe and no obsolete
+# SQL pattern to retire.
+#
+# Authority for structure: SCHEMA_FOR_DEVELOPERS.md, regenerated 2026-09-21
+#                          06:02 UTC from the live five-schema extract
+#                          (44 objects). Column names, types, nullability,
+#                          defaults, PKs, FKs and indexes come from there.
+# Authority for values:    datasets/Focus legacy/
+#                          "Focus Legacy to share to BLH.xlsx", Sheet1,
+#                          profiled 2026-09-21 (14,569 rows x 22 columns).
+#
+# ---------------------------------------------------------------------------
+# WHAT MAKES THIS SCHEME DIFFERENT - read before editing
+# ---------------------------------------------------------------------------
+#
+#   1. IT IS THE ONLY GROUP-LEVEL FACT IN megh_db. PMAY is house-grain,
+#      Focus Plus is person-grain, CM Elevate is application-grain, MGNREGA is
+#      village-year-grain. Focus Legacy pays a PRODUCER GROUP. There is no
+#      individual beneficiary anywhere in this partition - no name, no EPIC,
+#      no member id. "How many beneficiaries" has no person answer here; see
+#      semantic_rules.beneficiary_term.
+#
+#   2. THE MONEY IS FULLY DETERMINED BY THE MEMBER COUNT.
+#      amount_disbursed = no_of_pg_members * 5000 on EVERY row, with zero
+#      exceptions - confirmed by the DB table comment (verified 2026-09-16)
+#      and re-confirmed on all 14,569 source rows on 2026-09-21. A rupee
+#      question and a member question are therefore the SAME question at a
+#      x5000 scale factor. AVG(amount_disbursed) is not an entitlement, it is
+#      5000 x average group size. See semantic_rules.entitlement_identity -
+#      this is the single most important semantic fact about the scheme.
+#
+#   3. IT HAS A REAL DATE, BUT ONLY 30 OF THEM. date_of_remittance spans
+#      2021-08-31 to 2026-03-31 and takes just 30 distinct values, because
+#      payments go out in bulk runs (the largest single date carries 3,503 of
+#      14,569 rows). Daily and monthly GROUP BYs are valid SQL and misleading
+#      prose: they describe DISBURSEMENT BATCHES, not a payment rate. See
+#      semantic_rules.batch_payment_rule.
+#
+#   4. FY 2023-24 IS ABSENT FROM THE DATA, NOT EMPTY IN IT. The scheme has
+#      four financial years - 2021-22, 2022-23, 2024-25, 2025-26 - with a
+#      one-year hole in the middle. dim_year holds 2023-24, so a GROUP BY
+#      simply returns no row for it. Never draw a line through the gap and
+#      never report it as zero disbursement. See semantic_rules.time_gap_rule.
+#
+#   5. THE pg_id ENCODES A DISTRICT THAT IS SOMETIMES THE WRONG ONE.
+#      pg_id looks like PG-FOCUS-WGH-7089. The three-letter token is the
+#      district AT ENROLMENT. On 1,075 of 14,569 source rows it disagrees with
+#      the mapped LGD district, and the disagreement is CORRECT: 990 WKH groups
+#      now sit in Eastern West Khasi Hills and 85 WGH groups in South West Garo
+#      Hills, both post-bifurcation districts. NEVER derive geography from
+#      pg_id. See semantic_rules.pg_id_structure_rule.
+#
+#   6. IT CARRIES BANK DETAILS, INCLUDING PII. account_no (full) and
+#      name_on_the_account sit on the fact. The view masks the first and drops
+#      the second outright. bridge_pg_bank_history ALSO carries full account
+#      numbers. Query curated.v_focus_legacy and nothing else. See
+#      semantic_rules.pii_rule.
+#
+#   7. IT IS IN NEITHER CROSS-SCHEME VIEW. v_cross_scheme_money_district_year
+#      unions MGNREGA and PMAY only; v_cross_scheme_village_coverage joins PMAY
+#      and MGNREGA only. Both are verifiable from their definitions in the
+#      2026-09-21 extract. A Focus Legacy cross-scheme comparison has to be
+#      built by aggregating each side independently. See
+#      nlp_sql_rules.cross_scheme_behavior.
+#
+# ---------------------------------------------------------------------------
+# SOURCE COLUMN -> CURATED COLUMN
+# ---------------------------------------------------------------------------
+#   id                            -> fact.source_row_id  (UNIQUE constraint)
+#   name_of_the_programme_updated -> programme_variant
+#   pg_id                         -> dim_producer_group.pg_id
+#   name_of_pg                    -> dim_producer_group.current_name -> pg_name
+#   product                       -> product_raw            (VERBATIM, see below)
+#   no_of_pg_members              -> no_of_pg_members
+#   name_on_the_account           -> fact.name_on_the_account  *** PII, view drops it ***
+#   account_no                    -> fact.account_no (full) -> view account_no_masked
+#   bank_name                     -> bank_name
+#   branch                        -> branch_raw
+#   ifsc_code                     -> ifsc_code
+#   amount                        -> amount_disbursed
+#   date_of_remittance            -> date_of_remittance
+#   financial_year                -> year_key -> dim_year (financial_year, _short)
+#   mapped_village_lgd_code       -> village_code / geography_key
+#   mapped_village_lgd_name       -> dim_geography.lgd_village_name
+#   mapped_block_lgd_name         -> dim_geography.lgd_block
+#   mapped_district_lgd_name      -> dim_geography.lgd_district
+#   mapped_district_lgd_code      -> NO EQUIVALENT. dim_geography carries the
+#   mapped_block_lgd_code            VILLAGE code only; district and block are
+#                                    names with no code column.
+#   mapped_constituency_name      -> NOT CARRIED ON THE FACT. dim_geography has
+#   mapped_constituency_name_and_number  ac_name / ac_number, but the view does
+#                                    not expose them. See semantic_rules.constituency_rule.
+#
+#   product_raw IS NOT NORMALISED. The source holds 62 distinct spellings that
+#   collapse to 45 once case is folded - Piggery / PIGGERY / piggery,
+#   Ginger / GINGER / ginger, Squash / SQUASH / squash, Betel Leaf / Betel leaf,
+#   Long Pepper / Long pepper / long pepper. A bare GROUP BY product_raw splits
+#   one product into three rows. See semantic_rules.product_rule.
+#
+# ---------------------------------------------------------------------------
+# PROVENANCE OF NUMBERS IN THIS FILE
+# ---------------------------------------------------------------------------
+#   Column names, types, nullability, defaults, PK/FK, indexes
+#                                   -> live DB extract, 2026-09-21. Trust.
+#   Row counts printed by the extract
+#                                   -> pg_class PLANNER ESTIMATES ("approx."),
+#                                      not COUNT(*). Marked approx_row_count_db.
+#                                      Close enough to reason with, never to
+#                                      publish.
+#   Distinct counts, distributions, value lists, coverage percentages
+#                                   -> source workbook, 2026-09-21. NOT
+#                                      re-measured inside megh_db. Marked
+#                                      `unverified_in_db: true`.
+#
+#   THE SOURCE-TO-CURATED ARITHMETIC RECONCILES EXACTLY, which is why the
+#   source figures here are unusually trustworthy for a first version:
+#       14,569 source rows - 3 quarantined = 14,566 curated rows
+#       11,906 source pg_ids - 2 rejected  = 11,904 dim_producer_group rows
+#   Both match the live extract. The three quarantined rows are identified in
+#   semantic_rules.load_integrity. Run meta.v_reconciliation_focus_legacy before
+#   publishing any total anyway.
+# ===========================================================================
+
+architecture_alignment:
+  schema_linking: Enriched table and column documents are embedded for scheme-partitioned Qdrant retrieval.
+  entity_resolution: Dimension catalogue plus approved aliases, RapidFuzz, and BGE-small fallback.
+  join_discovery: information_schema FKs plus SME-reviewed implicit FK YAML; LLM never invents joins.
+  sql_generation: Retrieved schema, resolved entities, graph-generated joins, and curated question-to-SQL examples.
+  safety: SQLGlot read-only validation, enforced LIMIT, SELECT-only database role.
+  observability: Inputs, outputs, rule firings, SQL, results, chart spec, and response are traceable.
+  pii_boundary: >
+    ADDITIONAL FOR THIS SCHEME. fact_focus_legacy_disbursement.account_no and
+    .name_on_the_account, and bridge_pg_bank_history.account_no, are personal banking
+    data. They must never enter the embedding set, a vector-store payload, an export or a
+    rendered answer. name_on_the_account is already marked semantic_role=audit and
+    is_chatbot_visible=false in 006_semantic_seed.sql; keep it that way and keep
+    account_no out of semantic.column_catalog.sample_values. Expose only
+    curated.v_focus_legacy, which masks the account and drops the name.
+
+database:
+  name: megh_db
+  schema: curated
+  read_role: megh_readonly
+  primary_query_surface: curated.v_focus_legacy
+  structure_verified: '2026-09-21'
+  volumes_verified: false
+  reconciliation_view: meta.v_reconciliation_focus_legacy
+  lineage_view: meta.v_lineage
+  quarantine_table: staging.quarantine
+  grant_warning: >
+    The Focus Legacy objects were created after the last access review. A new object does
+    not inherit a grant unless ALTER DEFAULT PRIVILEGES was in place, so v_focus_legacy
+    may be invisible - or the fact over-granted - to megh_readonly. Confirm with
+    meta.v_access_matrix before assuming this partition is queryable, and specifically
+    confirm that megh_readonly canNOT reach fact_focus_legacy_disbursement or
+    bridge_pg_bank_history, both of which carry full account numbers.
+
+datasets:
+
+  # =========================================================================
+  # PRIMARY QUERY SURFACE - query this, not the fact table.
+  # For this scheme that instruction is a PRIVACY boundary, not a convenience:
+  # the view masks account_no and drops name_on_the_account entirely.
+  # =========================================================================
+  v_focus_legacy:
+    table_name: curated.v_focus_legacy
+    object_type: view
+    over: curated.fact_focus_legacy_disbursement
+    column_count: 28
+    grain: one row per disbursement - one payment, to one producer group
+    approx_row_count_db: 14566
+    row_count_note: >
+      The planner estimate is 14,566, which matches the source arithmetic exactly
+      (14,569 rows less 3 quarantined). Treat 14,566 as reliable for reasoning and still
+      run meta.v_reconciliation_focus_legacy before publishing it. The view itself cannot
+      drop rows: every join in it is either to a NOT NULL FK or a LEFT JOIN.
+    aggregate_before_reporting: false
+    grain_note: >
+      One row IS one payment, so COUNT(*) needs no prior aggregation - but it is a
+      PAYMENT count, not a group count and not a person count. 2,647 groups were paid
+      twice and 8 were paid three times in the source, so COUNT(*) exceeds
+      COUNT(DISTINCT pg_id) by about 2,663. Say which one the answer is.
+    money_unit: unverified
+    money_unit_authority: curated.dim_scheme.money_unit
+    money_unit_note: >
+      The DB table comment does not state a unit for amount_disbursed the way the PMAY
+      comment does for sanctioned_amount. Source values are exact multiples of 5,000 with
+      a maximum of 950,000, which is consistent with RUPEES and inconsistent with lakh or
+      crore, but that is corroboration, not confirmation. Read
+      curated.dim_scheme.money_unit for the Focus Legacy row before formatting a figure.
+    person_level: false
+    group_level: true
+    joins_performed_by_the_view:
+    - {to: curated.dim_producer_group,      type: INNER, on: producer_group_key}
+    - {to: curated.dim_pg_entity_type,      type: INNER, on: pg_entity_type_key}
+    - {to: curated.dim_geography,           type: INNER, on: geography_key}
+    - {to: curated.dim_year,                type: LEFT,  on: year_key}
+    - {to: curated.bridge_pg_bank_history,  type: LEFT,  on: 'producer_group_key AND account_no AND is_current'}
+    columns:
+
+    # ---- keys -------------------------------------------------------------
+    - name: focus_legacy_fact_id
+      source_column: fact_focus_legacy_disbursement.focus_legacy_fact_id
+      meaning: Surrogate primary key of the Focus Legacy disbursement fact.
+      type: bigint
+      nullable: false
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [record id, row id, fact id, disbursement id, payment id]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - Declared PRIMARY KEY on the fact.
+      - Not stable across a reload. Never export it or store it outside the database.
+
+    - name: source_row_id
+      source_column: fact_focus_legacy_disbursement.source_row_id
+      meaning: The source workbook's own `id` column, carried through for lineage.
+      type: integer
+      nullable: false
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [source id, original id, sheet id]
+      sample_values: [11, 12, 13, 1148, 14565]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "UNIQUE - constraint uq_focus_legacy_row_id. This is the strongest row identity in the partition and the key to use when tracing a row back to the spreadsheet."
+      - "Source ids are NOT dense - the workbook's max id is 14,569 across 14,569 rows but three of those ids were quarantined, so three values are missing from the fact."
+
+    - name: pg_id
+      source_column: dim_producer_group.pg_id
+      meaning: The Producer Group identifier - the natural key of the group being paid.
+      type: varchar(50)
+      nullable: false
+      category: producer_group_identifier
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT, COUNT DISTINCT]
+      synonyms: [PG id, producer group id, group id, PG code, PG number]
+      sample_values: [PG-FOCUS-EGH-754, PG-FOCUS-WGH-7089, PG-LAMP-WGH-5956, PG-EXISTING-COOPERATIVE-NGH-12, PG-FOCUS-WKH-5956]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "THE ONLY GROUP IDENTITY. UNIQUE on dim_producer_group. Every group-level count is COUNT(DISTINCT pg_id); never count groups by name."
+      - "THE NUMERIC SUFFIX IS NOT GLOBALLY UNIQUE. PG-FOCUS-WKH-5956 and PG-LAMP-WGH-5956 are two different groups. Only the whole string identifies."
+      - "DO NOT PARSE THE DISTRICT TOKEN OUT OF IT. See semantic_rules.pg_id_structure_rule - it disagrees with the mapped district on about 7% of rows, and the mapped district is the correct one."
+      - "11,906 distinct values in the source; 11,904 loaded. The two rejects are malformed - see semantic_rules.load_integrity. (unverified_in_db)"
+
+    - name: pg_name
+      source_column: dim_producer_group.current_name
+      meaning: Best-effort display name of the producer group.
+      type: text
+      nullable: true
+      category: producer_group_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, ILIKE]
+      synonyms: [PG name, producer group name, group name, name of PG]
+      sample_values: [Bak 15 Banana, Iainehlang Pg, Muskan Producer Group, Nongprat Lynti Pg, Jyrmi Biskot]
+      business_rules:
+      - "DISPLAY TEXT, NOT AN IDENTIFIER. The DB column comment is explicit: 1,634 of 11,906 pg_ids have more than one spelling of their name on file, and dim_producer_group keeps one best-effort value."
+      - "NEVER GROUP BY pg_name and never count groups with COUNT(DISTINCT pg_name) - the source holds 10,678 distinct names for 11,906 groups, so names both split one group and merge several."
+      - "Naming is unstable across payments to the same group: 'Muskan Producer Group' in one run and 'Muskan Pg' in the next. Use ILIKE for user-supplied name search, then resolve to pg_id and query on that."
+      - Nullable in the DDL. Handle NULL before using it in a label.
+
+    # ---- producer group classification ------------------------------------
+    - name: pg_entity_type
+      source_column: dim_pg_entity_type.type_code
+      meaning: Which of the three producer-group entity types this group is.
+      type: varchar(30)
+      nullable: false
+      category: producer_group_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [entity type, PG type, group type, organisation type, type code]
+      sample_values: UNVERIFIED_ENUMERATE_FIRST
+      business_rules:
+      - "THE STORED CODES ARE NOT DOCUMENTED ANYWHERE IN THE EXTRACT. dim_pg_entity_type has exactly 3 rows, but their type_code strings were not captured. RUN `SELECT type_code, type_name, source_id_prefix FROM curated.dim_pg_entity_type` BEFORE WRITING ANY FILTER. Do not guess 'FOCUS', 'LAMP' or 'EXISTING'."
+      - "The three types correspond to the three pg_id prefixes observed in the source: PG-FOCUS (12,721 rows), PG-LAMP (1,794 rows), PG-EXISTING (53 rows). (unverified_in_db)"
+      - "STRUCTURAL AND FIXED. The DB comment states it is derived from the pg_id prefix at ingest and never changes for a given pg_id. It is not a status and not a lifecycle stage."
+      - A pg_id whose prefix matches none of the three is NOT guessed into a type - it is quarantined as BAD_PG_ID_PREFIX. So this column has no 'Unknown' or 'Other' member.
+
+    - name: pg_entity_type_name
+      source_column: dim_pg_entity_type.type_name
+      meaning: Human-readable name of the entity type.
+      type: text
+      nullable: false
+      category: producer_group_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [entity type name, PG type name, type description]
+      business_rules:
+      - Prefer this for display and pg_entity_type for filtering.
+      - "THE LAMP READING IS UNCONFIRMED. dim_pg_entity_type.notes records a hypothesis that this type corresponds to what the Focus+ use-case docs call 'LAMP' as distinct from 'PG' (UC-041), explicitly flagged as not settled. Do not present the distinction as an established programme fact until a client or SME confirms it."
+
+    # ---- programme --------------------------------------------------------
+    - name: programme_variant
+      source_column: fact_focus_legacy_disbursement.programme_variant
+      meaning: Which variant of the Focus programme the payment was made under.
+      type: varchar(20)
+      nullable: false
+      category: programme_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [programme, program, variant, programme name, scheme variant, additional focus]
+      sample_values: UNVERIFIED_ENUMERATE_FIRST
+      business_rules:
+      - "SOURCE HOLDS EXACTLY TWO VALUES: 'FOCUS' (13,863 rows) and 'Focus (Addnl)' (706 rows). Whether the loader stored them verbatim is UNVERIFIED - the second is 13 characters and fits varchar(20), so it probably survived intact, but enumerate with SELECT DISTINCT before filtering. (unverified_in_db)"
+      - "THE TWO VARIANTS ARE NOT TWO ERAS. 'Focus (Addnl)' appears ONLY in FY 2025-26 (all 706 rows, all remitted 2025-06-26). 'FOCUS' spans all four years. A programme breakdown that is not also a year breakdown will read as a trend when it is a one-off top-up. (unverified_in_db)"
+      - NOT NULL, so every payment has a variant. There is no unclassified bucket.
+      - Do not confuse programme_variant with pg_entity_type - one describes the payment, the other the group.
+
+    # ---- time -------------------------------------------------------------
+    - name: year_key
+      source_column: fact_focus_legacy_disbursement.year_key
+      meaning: Financial-year key of the payment, resolved against dim_year.
+      type: smallint
+      nullable: true
+      category: time_key
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [year key, financial year key]
+      business_rules:
+      - "NULLABLE IN THE DDL, BUT SHOULD NEVER BE NULL IN PRACTICE. The source carries financial_year on all 14,569 rows and all four values exist in dim_year, so a NULL here is a load defect, not an expected unresolved case. Count them; a non-zero result is a finding worth reporting."
+      - The view LEFT JOINs dim_year, so a NULL key yields NULL financial_year rather than dropping the row.
+      - Value is the FY start year - 2025 means FY 2025-26.
+
+    - name: financial_year
+      source_column: dim_year.financial_year
+      meaning: Canonical financial year of the payment.
+      type: char(9)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [financial year, FY, fiscal year]
+      sample_values: ['2021-2022', '2022-2023', '2024-2025', '2025-2026']
+      business_rules:
+      - "char(9), so a comparison against an unpadded literal can behave unexpectedly. Prefer financial_year_short for equality filters."
+      - "FOUR YEARS OF DATA, NOT FIVE. 2023-2024 exists in dim_year and has no Focus Legacy rows - see semantic_rules.time_gap_rule."
+      - Use this rather than deriving a financial year from date_of_remittance with a CASE expression.
+
+    - name: financial_year_short
+      source_column: dim_year.financial_year_short
+      meaning: Short form of the financial year - the form the source file uses.
+      type: char(7)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [FY short, financial year short, year]
+      sample_values: ['2021-22', '2022-23', '2024-25', '2025-26']
+      business_rules:
+      - "PREFER THIS FOR FILTERING. It is the exact form the source spreadsheet's financial_year column used, so it is the form users will type."
+      - "Row distribution in the source: 2021-22 = 965, 2022-23 = 2,139, 2024-25 = 2,653, 2025-26 = 8,812. Sixty per cent of the scheme is one year. (unverified_in_db)"
+
+    - name: year_note
+      source_column: dim_year.data_quality_note
+      meaning: Year-level data-quality warning carried on the year dimension.
+      type: text
+      nullable: true
+      category: time_metadata
+      nlp_sql_priority: low
+      sql_operations: [WHERE]
+      business_rules:
+      - "DO NOT ATTACH IT BLINDLY. dim_year is scheme-blind and its notes were written about MGNREGA extracts. A note on 2025-26 is not automatically a statement about Focus Legacy. Read it, decide whether it applies, and say which scheme it describes if you surface it."
+
+    - name: date_of_remittance
+      source_column: fact_focus_legacy_disbursement.date_of_remittance
+      meaning: Date the money was remitted to the group's bank account.
+      type: date
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, MIN, MAX]
+      synonyms: [remittance date, payment date, date of payment, transfer date, disbursement date]
+      sample_values: ['2021-08-31', '2022-05-17', '2024-10-08', '2025-09-11', '2026-03-31']
+      business_rules:
+      - "ONE OF ONLY TWO TRUE DATES IN megh_db - the other is PMAY's sanction_date. MGNREGA, Focus Plus and CM Elevate have none."
+      - "ONLY 30 DISTINCT VALUES ACROSS 14,398 DATED ROWS. Payments are bulk runs, not a flow. The five largest: 2025-09-11 (3,503), 2025-06-18 (3,359), 2024-10-08 (2,331), 2025-06-20 (1,041), 2022-05-17 (783). A monthly or daily series is a batch chart - label it as one. (unverified_in_db)"
+      - "Range 2021-08-31 to 2026-03-31. NULL on 171 source rows, of which 170 are FY 2025-26; those rows still carry a financial year, so use financial_year for time grouping when completeness matters. (unverified_in_db)"
+      - "IT NEVER CONTRADICTS THE FINANCIAL YEAR. Every dated source row's April-March bucket matches its stated financial_year - checked on all 14,398. So the two time columns can be used interchangeably for bucketing, and any future mismatch is a defect. (unverified_in_db)"
+      - Use this for exact-date, date-range and calendar-year questions; use financial_year for FY questions.
+
+    # ---- geography --------------------------------------------------------
+    - name: geography_key
+      source_column: fact_focus_legacy_disbursement.geography_key
+      meaning: Surrogate key into the conformed geography dimension.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [geography key]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - NOT stable across a reload. Use village_code for anything leaving the database.
+      - "NOT NULL, so every payment has a geography key - but that key may point at an Unresolved placeholder. See entity_type."
+      - "This is the one column that makes the documented optional join possible - see semantic_rules.constituency_rule."
+
+    - name: village_code
+      source_column: dim_geography.village_code
+      meaning: LGD village code - the national village identifier.
+      type: integer
+      nullable: true
+      category: geographic_identifier
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [village code, LGD village code, mapped village code]
+      sample_values: [275225, 275180, 276898, 277023, 275178]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "VILLAGE IDENTITY. Village names are not unique in Meghalaya - the source alone holds 3,384 distinct village codes against 3,270 distinct village names. Count villages with COUNT(DISTINCT village_code), never by name."
+      - "PAIR EVERY VILLAGE COUNT WITH entity_type <> 'Unresolved'. A placeholder row carries a village_code that is not a real village."
+      - "The view selects dim_geography.village_code, not the fact's denormalised copy. Both exist and are NOT NULL on the fact; the view's is nullable only because the column is nullable on the dimension."
+
+    - name: lgd_village_name
+      source_column: dim_geography.lgd_village_name
+      meaning: LGD-standardised village name.
+      type: varchar(200)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [village, LGD village, mapped village, village name]
+      sample_values: [Dalbot Kongkil, Rongrong Antidam, Dijogre, Umsaw, Umpdem]
+      business_rules:
+      - Display and filter name. NOT an identity - see village_code.
+      - "1,101 source rows carry no village at all (7.6%) - they resolved to an Unresolved placeholder. Village-level coverage is therefore about 92% of payments, and a village ranking silently answers for that 92%. State it. (unverified_in_db)"
+      - Village names are NOT uppercased in dim_geography even though district and block are. Do not apply one casing rule to all three.
+
+    - name: lgd_block
+      source_column: dim_geography.lgd_block
+      meaning: LGD-standardised block name, uppercased in the dimension.
+      type: varchar(150)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [block, LGD block, mapped block, block name, C&RD block]
+      sample_values: [MAIRANG, LASKEIN, RESUBELPARA, RONGRAM, SELSELLA]
+      business_rules:
+      - "STORED UPPERCASE. A mixed-case exact-match filter returns zero rows silently, not an error. Compare case-folded and emit the stored form."
+      - "NO BLOCK CODE EXISTS in the curated layer. The source's mapped_block_lgd_code has no equivalent - block is a name only."
+      - "56 blocks appear in the source. The largest by payment count are Mairang (699), Laskein (647), Resubelpara (569), Rongram (561) and Selsella (558). (unverified_in_db)"
+      - "BLOCK TOTALS LOSE MORE THAN VILLAGE TOTALS SUGGEST. 1,013 source rows have a block but no village, so they resolve to a placeholder whose lgd_block is most likely NULL. Whether the placeholder preserves the source block is UNVERIFIED - check before publishing a block-level total, and compare the block sum against the scheme total."
+
+    - name: lgd_district
+      source_column: dim_geography.lgd_district
+      meaning: LGD-standardised district name, uppercased in the dimension.
+      type: varchar(100)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [district, LGD district, mapped district, district name]
+      sample_values: ['WEST GARO HILLS', 'NORTH GARO HILLS', 'RI BHOI', 'EASTERN WEST KHASI HILLS', 'EAST KHASI HILLS']
+      business_rules:
+      - "STORED UPPERCASE. Same silent-zero-rows trap as lgd_block. The source spreadsheet is Title Case ('West Garo Hills'), so a value copied from the file will not match."
+      - "NO DISTRICT CODE EXISTS in the curated layer. The source's mapped_district_lgd_code has no equivalent."
+      - "ALL 12 MEGHALAYA DISTRICTS ARE PRESENT. Source payment counts: West Garo Hills 3,493, North Garo Hills 1,476, West Jaintia Hills 1,325, Ri Bhoi 1,233, West Khasi Hills 1,104, East Garo Hills 1,068, South West Garo Hills 1,030, Eastern West Khasi Hills 990, East Khasi Hills 935, East Jaintia Hills 773, South Garo Hills 618, South West Khasi Hills 524. (unverified_in_db)"
+      - "'EASTERN WEST KHASI HILLS' IS A REAL DISTRICT, not a typo for West Khasi Hills. It is a post-bifurcation district (LGD 740) and every one of its 990 source rows belongs to a group whose pg_id still says WKH."
+      - This is the authority on district. Never take the district from the pg_id prefix.
+
+    - name: entity_type
+      source_column: dim_geography.entity_type
+      meaning: Whether the geography row is a real Village, a Ward, or an Unresolved placeholder.
+      type: varchar(10)
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [entity type, geography type, locality type]
+      sample_values: [Village, Ward, Unresolved]
+      business_rules:
+      - "CRITICAL AND EASY TO MISS. 'Unresolved' is a SYNTHETIC PLACEHOLDER - one per district, or a single global one where even the district was unknown - created when a source row's locality could not be matched to any roster entry. It is NEVER a real village."
+      - "Every village count and every village list must carry `entity_type <> 'Unresolved'`."
+      - "Do NOT extend the exclusion to scheme, programme, district or money totals. Placeholder rows carry real payments and are placed under their district on purpose so totals reconcile. Dropping them from a district total understates it."
+      - "Expect roughly 1,101 placeholder rows here - 1,013 that had a block but no village, and 88 that had neither. (unverified_in_db)"
+      - "on_roster is FALSE for every Unresolved row, so on_roster is a weaker test than entity_type. Prefer entity_type."
+
+    - name: on_roster
+      source_column: dim_geography.on_roster
+      meaning: Whether the village appears in the official LGD geography roster.
+      type: boolean
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [on roster, official village, in roster]
+      business_rules:
+      - Shared across all five schemes through dim_geography.
+      - "ALWAYS FALSE for an Unresolved placeholder. Off-roster villages that are not Unresolved are real - do not filter them out unless the question is about roster coverage."
+
+    - name: has_geo_conflict
+      source_column: dim_geography.has_geo_conflict
+      meaning: TRUE when sources disagree on this village's block or district.
+      type: boolean
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [geo conflict, geography conflict, conflicting district]
+      business_rules:
+      - "THE ONLY GEOGRAPHIC QUALITY SIGNAL THIS SCHEME HAS. There is no mapping_category and no mapping_confidence_pct as PMAY has."
+      - "Four village codes are known to conflict database-wide. The stored district and block are the roster's; the conflict is recorded rather than silently resolved."
+      - Add `AND NOT has_geo_conflict` when an answer turns on which block or district a payment landed in, and say the filter was applied.
+      - "Do NOT confuse this with the pg_id-versus-district disagreement, which is a different thing entirely and is not flagged here - see semantic_rules.pg_id_structure_rule."
+
+    # ---- measures ---------------------------------------------------------
+    - name: no_of_pg_members
+      source_column: fact_focus_legacy_disbursement.no_of_pg_members
+      meaning: Number of members in the producer group at the time of this payment.
+      type: integer
+      nullable: false
+      category: membership_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX, WHERE, GROUP BY]
+      synonyms: [members, number of members, group size, PG members, membership]
+      sample_values: [1, 5, 10, 20, 190]
+      business_rules:
+      - "NOT NULL. SUM needs no COALESCE."
+      - "THE DENOMINATOR OF THE ENTITLEMENT. amount_disbursed is exactly 5000 x this column on every row. See semantic_rules.entitlement_identity before answering any money question."
+      - "SUMMING ACROSS PAYMENTS COUNTS MEMBERSHIPS, NOT PEOPLE. A group paid twice contributes its membership twice, and the group's size can differ between the two payments - PG-FOCUS-RB-3210 was paid for 1 member in September 2025 and 12 in January 2026. There is no person identifier, so a distinct-people figure is impossible."
+      - "Source totals: 102,021 member-payments across 14,569 rows. Distribution is dominated by small groups - 2,296 rows at 1 member, and a visible spike at the round numbers 10 (1,569) and 20 (548). Range 1 to 190. (unverified_in_db)"
+      - "ONE EXTREME OUTLIER: PG-FOCUS-WKH-3565 with 190 members and Rs 950,000, against a next-largest of 20 members. It obeys the x5000 rule so it loaded normally. Exclude it explicitly, or mention it, whenever it would dominate an average or a maximum. (unverified_in_db)"
+
+    - name: amount_disbursed
+      source_column: fact_focus_legacy_disbursement.amount_disbursed
+      meaning: Amount remitted to the producer group in this payment.
+      type: numeric(12,2)
+      nullable: false
+      unit: unverified
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [amount, amount disbursed, disbursement, payment, money, funds released, remittance amount]
+      sample_values: [5000, 50000, 100000, 950000]
+      business_rules:
+      - "NOT NULL. SUM needs no COALESCE - the only other money column in megh_db that is NOT NULL is Focus Plus's."
+      - "UNIT UNVERIFIED. Read curated.dim_scheme.money_unit for the Focus Legacy row before formatting. Magnitudes corroborate rupees; nothing in the extract confirms it."
+      - "FULLY DERIVED: = no_of_pg_members x 5000 on every row, zero exceptions, confirmed twice. It carries NO information that no_of_pg_members does not."
+      - "AVG(amount_disbursed) IS NOT AN ENTITLEMENT. It is 5000 x the average group size, and it moves when group sizes move, not when policy does. A 'per member' question has a constant answer of 5,000 - say so rather than computing it."
+      - "Source total: Rs 51,01,05,000 spelled out as 510,105,000 - reconcile to this only after confirming the unit and after excluding the three quarantined rows. (unverified_in_db)"
+      - "Only 21 distinct values exist, all multiples of 5,000. Do not build a histogram of it as if it were continuous."
+
+    # ---- product ----------------------------------------------------------
+    - name: product_raw
+      source_column: fact_focus_legacy_disbursement.product_raw
+      meaning: The commodity or activity the group works on, exactly as recorded.
+      type: varchar(60)
+      nullable: true
+      category: product_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT, ILIKE]
+      synonyms: [product, commodity, crop, activity, produce, value chain]
+      sample_values: [Piggery, Ginger, Vegetables, Broom Grass, Turmeric, Black Pepper, Banana]
+      business_rules:
+      - "RAW AND UNNORMALISED, AS THE NAME SAYS. 62 distinct spellings in the source collapse to 45 case-folded. A bare GROUP BY product_raw reports Piggery, PIGGERY and piggery as three products and can push the true leader out of a top-5. Always fold case and trim - see semantic_rules.product_rule."
+      - "COVERAGE IS A CLIFF, NOT A TREND. Populated on 100% of FY2021-22 (965/965) and 100% of FY2022-23 (2,139/2,139), then 0 of 2,653 in FY2024-25 and 8 of 8,812 in FY2025-26. Overall 3,112 of 14,569 rows - 21%. (unverified_in_db)"
+      - "THEREFORE: any product answer describes FY2021-22 and FY2022-23 only. State that range in the answer. A 'products this year' question for 2024-25 or 2025-26 has no data, and the honest answer is that the field stopped being captured, not that there were no products."
+      - "The capture gap is in the source, not a load defect - the DB column comment says so explicitly."
+      - "Largest case-folded products in the source: piggery (~870 across three spellings), ginger (~425), vegetables (340), broom grass (230), turmeric (167). (unverified_in_db)"
+      - "It describes the GROUP's activity, not a purchase. Do not read it as what the money was spent on."
+
+    # ---- banking ----------------------------------------------------------
+    - name: bank_name
+      source_column: fact_focus_legacy_disbursement.bank_name
+      meaning: Name of the bank the payment was remitted to.
+      type: varchar(100)
+      nullable: true
+      category: banking_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [bank, bank name, banker]
+      sample_values: [Meghalaya Rural Bank, Meghalaya Co-operative Apex Bank, State Bank Of India, Hdfc Bank, North East Small Finance Bank]
+      business_rules:
+      - "USABLE AS-IS, UNLIKE FOCUS PLUS. Focus Plus withholds bank_name_raw from its view because the values are inconsistent between cohorts. Here the view exposes bank_name and the values are clean: 13 distinct banks, consistently Title Case. Bank-wise analysis IS answerable for this scheme."
+      - "TWO BANKS CARRY 92% OF PAYMENTS: Meghalaya Rural Bank 8,174 and Meghalaya Co-operative Apex Bank 5,270 of 14,569. Any 'bank concentration' finding is that one sentence. (unverified_in_db)"
+      - "NULL on 276 source rows even though ifsc_code is present on all of them - so the IFSC can identify the bank where the name is missing. Do not render NULL as 'Other'. (unverified_in_db)"
+      - Casing is Title Case, not uppercase - the dim_geography uppercase rule does NOT apply to this column.
+
+    - name: ifsc_code
+      source_column: fact_focus_legacy_disbursement.ifsc_code
+      meaning: IFSC code of the branch the payment was remitted to.
+      type: varchar(15)
+      nullable: true
+      category: banking_dimension
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT, COUNT DISTINCT]
+      synonyms: [IFSC, IFSC code, branch code, bank code]
+      sample_values: [SBIN0RRMEGB, MCAB0000006, MCAB0000022, HDFC0002265, MCAB0000005]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "113 distinct codes in the source, present on every row. It is the most complete banking column in the partition and the best fallback when bank_name is NULL. (unverified_in_db)"
+      - "ONE IFSC DOMINATES AND IT IS NOT A BRANCH. SBIN0RRMEGB covers 8,328 of 14,569 rows - it is Meghalaya Rural Bank's sponsor-bank-issued code, not a single branch. Do not present IFSC counts as branch counts. (unverified_in_db)"
+      - Not PII on its own - it identifies a branch, not an account. It may still be reported.
+
+    - name: branch_raw
+      source_column: fact_focus_legacy_disbursement.branch_raw
+      meaning: Branch name as recorded in the source.
+      type: varchar(100)
+      nullable: true
+      category: banking_dimension
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [branch, branch name, bank branch]
+      sample_values: [Williamnagar, Nongstoin, Tura, Jowai, Shillong]
+      business_rules:
+      - "RAW AND SPARSE. 182 distinct values on 3,192 of 14,569 rows - 22%. Same coverage cliff as product_raw: 965/965 in FY2021-22, 2,002/2,139 in FY2022-23, 1 of 2,653 in FY2024-25, 224 of 8,812 in FY2025-26. (unverified_in_db)"
+      - "Prefer ifsc_code for branch-level questions - it is complete. Use branch_raw only for display or when the user explicitly asks for the recorded branch name."
+      - Unnormalised free text. Fold case before grouping, as with product_raw.
+
+    - name: account_no_masked
+      source_column: 'derived in the view from fact_focus_legacy_disbursement.account_no'
+      meaning: The group's bank account number with everything but the last four digits replaced by X.
+      type: text
+      nullable: true
+      category: banking_identifier_masked
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [account number, account no, bank account, masked account]
+      sample_values: ['XXXXXXX7549', 'XXXXXXXX4982', 'XXXXXXXX6782']
+      business_rules:
+      - "THIS IS THE ONLY APPROVED FORM OF THE ACCOUNT NUMBER. The full value lives on the fact and on bridge_pg_bank_history; neither may be queried for display. The view computes repeat('X', length-4) || right(value, 4)."
+      - "SAFE TO DISPLAY, but still an account reference - show it only when the user is asking about a specific group's payment record, never in a bulk export."
+      - "USABLE FOR GROUPING, WITH CARE. Masking is not collision-free: two different accounts ending in the same four digits with the same length collapse to one masked string. Never count distinct accounts with it - if an account-count is genuinely needed, it must be computed inside the database over the unmasked column and only the count released."
+      - "ACCOUNTS ARE NOT ONE-TO-ONE WITH GROUPS. In the source 250 account numbers are used by more than one pg_id, and 107 pg_ids use more than one account. Do not treat an account as a group identity. (unverified_in_db)"
+      - "78 source account numbers contain an embedded space - e.g. '20200 1319274', all in the FY2021-22 North Garo Hills run. Whether the loader stripped it is UNVERIFIED, so a masked value may be one character longer than expected. (unverified_in_db)"
+
+    - name: bank_details_current
+      source_column: bridge_pg_bank_history.is_current
+      meaning: Whether the account this payment went to is the one currently flagged as the group's live account.
+      type: boolean
+      nullable: true
+      category: banking_quality
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [current bank details, latest account, active account]
+      business_rules:
+      - "THREE-VALUED AND THE NULL IS THE POINT. The view LEFT JOINs the bridge with `AND bh.is_current`, so the column is TRUE when the payment went to the group's current account and NULL when it did not. It is effectively never FALSE. `WHERE NOT bank_details_current` therefore returns nothing - for 'paid to an old account' write `WHERE bank_details_current IS NULL`."
+      - "IT ALSO RETURNS NULL WHEN account_no IS NULL on the fact, so a NULL does not always mean superseded. Check account_no_masked IS NOT NULL alongside it."
+      - "THE UNDERLYING FLAG IS AN ASSUMPTION, NOT A FACT. The DB comment is explicit: is_current = latest by date_of_remittance, a documented assumption, because no field in the source says which account is authoritative. Never let a payment be re-run off it, and say it is inferred whenever it shapes an answer."
+      - Not a data-quality defect. A group legitimately changing bank produces exactly this pattern.
+
+  # =========================================================================
+  # UNDERLYING FACT - documented for lineage; query v_focus_legacy instead.
+  # NEVER QUERIED DIRECTLY: it carries the unmasked account number and the
+  # account holder's name.
+  # =========================================================================
+  fact_focus_legacy_disbursement:
+    table_name: curated.fact_focus_legacy_disbursement
+    object_type: table
+    column_count: 22
+    grain: one row per payment to one producer group
+    primary_key: focus_legacy_fact_id
+    natural_key: source_row_id
+    approx_row_count_db: 14566
+    query_preference: >
+      Use curated.v_focus_legacy. It pre-joins dim_producer_group, dim_pg_entity_type,
+      dim_geography, dim_year and bridge_pg_bank_history, so the generator never has to
+      emit those joins - and it applies the PII masking that makes the partition
+      releasable at all.
+    foreign_keys:
+    - {column: scheme_key,         references: curated.dim_scheme.scheme_key,               declared: true, nullable: false}
+    - {column: producer_group_key, references: curated.dim_producer_group.producer_group_key, declared: true, nullable: false}
+    - {column: year_key,           references: curated.dim_year.year_key,                   declared: true, nullable: true}
+    - {column: geography_key,      references: curated.dim_geography.geography_key,         declared: true, nullable: false}
+    - {column: raw_id,             references: raw.source_rows.raw_id,                      declared: true, nullable: true}
+    unique_constraints:
+    - {name: uq_focus_legacy_row_id, columns: [source_row_id]}
+    no_fk_note: >
+      village_code is NOT NULL on the fact and carries no foreign key - it is a
+      denormalised copy of dim_geography.village_code kept for export convenience.
+      alias_key does not exist on this fact, so curated.dim_geography_alias is NOT
+      reachable from this partition (MGNREGA is the only scheme that reaches it).
+    columns_not_in_v_focus_legacy:
+    - name: scheme_key
+      type: smallint
+      meaning: FK to dim_scheme. Constant for this partition.
+      business_rules: [Never a grouping key within Focus Legacy - it has one value.]
+    - name: producer_group_key
+      type: integer
+      meaning: FK to dim_producer_group. Resolved into pg_id, pg_name and the entity type by the view.
+      business_rules:
+      - Surrogate key; unstable across a reload. Use pg_id outside the database.
+    - name: village_code
+      type: integer
+      meaning: Denormalised LGD village code on the fact itself.
+      business_rules:
+      - "The view exposes dim_geography's copy instead. The two should agree; if they ever do not, the dimension is authoritative."
+    - name: account_no
+      type: varchar(20)
+      meaning: FULL bank account number.
+      pii: true
+      business_rules:
+      - "NEVER SELECT THIS. Audit and lineage only - the DB column comment says so. Use v_focus_legacy.account_no_masked."
+    - name: name_on_the_account
+      type: text
+      meaning: Name the bank account is held in.
+      pii: true
+      business_rules:
+      - "NEVER SELECT THIS. PII, already excluded from the chatbot-visible layer (semantic_role=audit, is_chatbot_visible=false in 006_semantic_seed.sql)."
+      - "It is frequently the group's own name, but not always - some rows hold a cooperative society's name instead, which makes it a third-party personal/legal identifier as well."
+      - "Absent on 4,216 source rows, every one of them FY2025-26. Even if the boundary were relaxed, it would answer for two-thirds of the scheme. (unverified_in_db)"
+    - name: raw_id
+      type: bigint
+      meaning: FK to raw.source_rows for lineage back to the source cell.
+      business_rules: [Not readable by megh_readonly - raw is outside the read boundary.]
+    - name: source_row_num
+      type: integer
+      meaning: Audit - position in the source file.
+    - name: batch_id
+      type: uuid
+      meaning: Audit - the load batch; joins to meta.ingestion_audit.
+    - name: source_system
+      type: varchar(50)
+      default: "'focus_legacy'"
+      meaning: Audit - constant 'focus_legacy' for this partition.
+      business_rules:
+      - "This is the value to filter on in raw.source_rows, staging.quarantine and bridge_geography_source."
+    - name: ingested_at
+      type: timestamptz
+      meaning: Audit - load time.
+      business_rules:
+      - "NEVER USE AS A PAYMENT DATE. date_of_remittance is the real date and this scheme has one."
+    dropped_at_ingest:
+    - column: mapped_district_lgd_code
+      reason: dim_geography carries the village code only. District exists as a name with no code column.
+    - column: mapped_block_lgd_code
+      reason: As above - block is a name only.
+    - column: mapped_constituency_name
+      reason: >
+        Not carried onto the fact. dim_geography holds ac_name / ac_number for the
+        village, which is a different provenance from the source's own column. See
+        semantic_rules.constituency_rule.
+    - column: mapped_constituency_name_and_number
+      reason: As above. The source form was '41 SONGSAK'; dim_geography splits number and name.
+
+  # =========================================================================
+  # SCHEME-SCOPED DIMENSIONS - unique to this partition
+  # =========================================================================
+  dim_producer_group:
+    table_name: curated.dim_producer_group
+    object_type: table
+    column_count: 12
+    approx_row_count_db: 11904
+    grain: one row per producer group
+    primary_key: producer_group_key
+    natural_key: pg_id
+    scheme_scoped: true
+    columns:
+    - {name: producer_group_key,     type: integer,     nullable: false, meaning: PK. Surrogate; unstable across a reload.}
+    - {name: pg_id,                  type: varchar(50), nullable: false, unique: true, meaning: The group identifier - the natural key.}
+    - {name: pg_entity_type_key,     type: smallint,    nullable: false, meaning: FK to dim_pg_entity_type.}
+    - {name: geography_key,          type: integer,     nullable: false, meaning: FK to dim_geography - the group's village.}
+    - {name: village_code,           type: integer,     nullable: false, meaning: Denormalised LGD village code.}
+    - {name: current_name,           type: text,        nullable: true,  meaning: Best-effort display name. NOT an identifier.}
+    - {name: first_payment_year_key, type: smallint,    nullable: true,  meaning: FY of the group's first payment.}
+    - {name: last_payment_year_key,  type: smallint,    nullable: true,  meaning: FY of the group's most recent payment.}
+    - {name: raw_id,                 type: bigint,      nullable: true,  meaning: Lineage to raw.source_rows.}
+    - {name: batch_id,               type: uuid,        nullable: false, meaning: Audit - load batch.}
+    - {name: source_system,          type: varchar(50), nullable: false, default: "'focus_legacy'", meaning: Audit.}
+    - {name: ingested_at,            type: timestamptz, nullable: false, meaning: Audit.}
+    business_rules:
+    - Pre-joined into v_focus_legacy as pg_id and pg_name. Do not join it yourself for those two.
+    - "GEOGRAPHY IS STABLE PER GROUP. The DB comment records zero conflicts across all 11,906 groups, and the source confirms it: no pg_id maps to more than one village. So a group's district never changes between payments, and the fact's geography and the dimension's must agree."
+    - "first_payment_year_key and last_payment_year_key ARE NOT EXPOSED BY THE VIEW. They are the cheap way to answer 'groups paid in more than one year' or 'groups new this year' without aggregating the fact - join dim_producer_group explicitly for those, and say you did."
+    - "Both are nullable and both are FKs to dim_year. Whether they were populated at load is UNVERIFIED - check for NULLs before relying on them."
+    - "A GROUP-COUNT FROM HERE IS NOT A PAID-GROUP COUNT. Every row here came from a payment row, so the two should coincide at 11,904 - but confirm rather than assume, and prefer COUNT(DISTINCT pg_id) over v_focus_legacy when the question is about payments."
+
+  dim_pg_entity_type:
+    table_name: curated.dim_pg_entity_type
+    object_type: table
+    column_count: 6
+    row_count: 3
+    grain: one row per producer-group entity type
+    primary_key: pg_entity_type_key
+    scheme_scoped: true
+    columns:
+    - {name: pg_entity_type_key, type: smallint,    nullable: false, meaning: PK.}
+    - {name: type_code,          type: varchar(30), nullable: false, unique: true, meaning: Short code - the filterable value.}
+    - {name: type_name,          type: text,        nullable: false, meaning: Human-readable name.}
+    - {name: source_id_prefix,   type: varchar(40), nullable: false, meaning: The pg_id prefix this type is derived from.}
+    - {name: notes,              type: text,        nullable: true,  meaning: Caveats - currently the unconfirmed LAMP hypothesis.}
+    - {name: created_at,         type: timestamptz, nullable: false, meaning: Audit.}
+    business_rules:
+    - Pre-joined into v_focus_legacy as pg_entity_type and pg_entity_type_name.
+    - "EXACTLY 3 ROWS. This is the authority on how many entity types exist, and there is no 'Other'."
+    - "THE STORED CODES ARE UNKNOWN TO THIS FILE. Enumerate the table before writing any filter or chart legend. The source prefixes are PG-FOCUS, PG-LAMP and PG-EXISTING, but the stored type_code may be spelled differently."
+    - "source_id_prefix IS THE DERIVATION RULE, NOT A LOOKUP TO RUN AT QUERY TIME. The mapping was applied at ingest; re-deriving it in SQL from pg_id would re-introduce the malformed-prefix problem the loader already quarantined."
+    - "notes carries an UNCONFIRMED hypothesis about LAMP. Read it before describing the types to a user, and do not harden it into a definition."
+
+  bridge_pg_bank_history:
+    table_name: curated.bridge_pg_bank_history
+    object_type: table
+    column_count: 9
+    approx_row_count_db: 12449
+    grain: one row per distinct (producer group, account_no, bank_name, ifsc_code) combination
+    primary_key: bridge_id
+    scheme_scoped: true
+    contains_pii: true
+    never_query_directly: true
+    columns:
+    - {name: bridge_id,          type: bigint,       nullable: false, meaning: PK.}
+    - {name: producer_group_key, type: integer,      nullable: false, meaning: FK to dim_producer_group.}
+    - {name: account_no,         type: varchar(20),  nullable: false, pii: true, meaning: FULL account number - never select.}
+    - {name: bank_name,          type: varchar(100), nullable: true,  meaning: Bank on that account.}
+    - {name: ifsc_code,          type: varchar(15),  nullable: false, meaning: IFSC on that account.}
+    - {name: first_seen_date,    type: date,         nullable: true,  meaning: Earliest remittance to this account.}
+    - {name: last_seen_date,     type: date,         nullable: true,  meaning: Latest remittance to this account.}
+    - {name: is_current,         type: boolean,      nullable: false, default: false, meaning: Assumed-live account for the group.}
+    - {name: created_at,         type: timestamptz,  nullable: false, meaning: Audit.}
+    business_rules:
+    - "PII BOUNDARY. account_no here is unmasked. The bridge is pre-joined into v_focus_legacy for one column only - bank_details_current - and must not be queried directly by the generator."
+    - "is_current IS A DOCUMENTED ASSUMPTION: latest by date_of_remittance, because no source field says which account is authoritative. A partial unique index (idx_pg_bank_current) enforces at most one current account per group, so the assumption is structurally locked in even though it is unverified."
+    - "12,449 rows for 11,904 groups means roughly 545 groups have banked somewhere more than once - consistent with the source's 107 groups holding multiple account numbers plus groups whose bank name or IFSC changed against the same account."
+    - "first_seen_date / last_seen_date ARE NOT EXPOSED BY THE VIEW. A 'when did this group change bank' question needs them, and answering it means releasing account-level history - do not, unless the request is an authorised audit."
+    - "UNIQUE on (producer_group_key, account_no, bank_name, ifsc_code), so the same account recorded under two bank-name spellings produces two rows. A distinct-account count from this table is an over-count."
+
+  # =========================================================================
+  # CONFORMED DIMENSIONS - shared with the other four schemes
+  # =========================================================================
+  dim_scheme:
+    table_name: curated.dim_scheme
+    object_type: table
+    column_count: 8
+    row_count: 5
+    grain: one row per scheme
+    primary_key: scheme_key
+    shared_across_schemes: true
+    columns:
+    - {name: scheme_key,     type: smallint,     nullable: false, meaning: PK.}
+    - {name: scheme_code,    type: varchar(20),  nullable: false, unique: true, meaning: Short scheme code.}
+    - {name: scheme_name,    type: text,         nullable: false, meaning: Full scheme name.}
+    - {name: ministry,       type: varchar(100), nullable: true,  meaning: Owning ministry.}
+    - {name: grain_note,     type: text,         nullable: false, meaning: What one fact row means for this scheme.}
+    - {name: money_unit,     type: varchar(20),  nullable: false, meaning: The scheme's money unit.}
+    - {name: time_semantics, type: text,         nullable: false, meaning: What the date or year on a row means.}
+    - {name: created_at,     type: timestamptz,  nullable: false, meaning: Audit.}
+    business_rules:
+    - "AUTHORITY ON MONEY UNIT, AND FOR THIS SCHEME IT IS THE ONLY AUTHORITY. Read money_unit for the Focus Legacy row before formatting any figure - unlike PMAY, the fact's own comment does not state the unit."
+    - "NOW 5 ROWS, not the 4 that older annotation files assert. Focus Legacy is the fifth. The exact scheme_code for this partition was not captured in the extract - enumerate before filtering."
+    - "time_semantics matters here: this scheme's date is a REMITTANCE date - money actually left - which is a different event from PMAY's sanction date and from MGNREGA's reporting year. Carry it into any comparative answer."
+    - Only the fact carries scheme_key; the view does not expose it. Read this table separately.
+
+  dim_year:
+    table_name: curated.dim_year
+    object_type: table
+    column_count: 9
+    row_count: 9
+    grain: one row per Indian financial year, April to March
+    primary_key: year_key
+    shared_across_schemes: true
+    coverage_in_this_scheme: ['2021-22', '2022-23', '2024-25', '2025-26']
+    business_rules:
+    - Pre-joined into v_focus_legacy as financial_year, financial_year_short and year_note.
+    - "THE DIMENSION HOLDS 9 YEARS; FOCUS LEGACY OCCUPIES 4 OF THEM. 2023-24 exists as a row and has no payments. A GROUP BY over the fact returns no 2023-24 row at all - it does not return a zero. See semantic_rules.time_gap_rule."
+    - "The view LEFT JOINs it, so a row with an unresolved year survives with NULL time columns rather than disappearing."
+    - "data_quality_note is scheme-blind - do not attach an MGNREGA note to a Focus Legacy answer."
+
+  dim_geography:
+    table_name: curated.dim_geography
+    object_type: table
+    column_count: 13
+    approx_row_count_db: 7377
+    grain: one row per LGD village, ward or Unresolved placeholder
+    primary_key: geography_key
+    natural_key: village_code
+    shared_across_schemes: true
+    business_rules:
+    - "CONFORMED ACROSS ALL FIVE SCHEMES. This is what makes any cross-scheme comparison possible at all, and it is keyed on the LGD village code, a NATIONAL identifier."
+    - Pre-joined into v_focus_legacy. Do not join it yourself except for the documented constituency case.
+    - District and block exist as NAMES only - there is no district or block code column.
+    - "Names are stored UPPERCASE for block and district, mixed case for village."
+    - "entity_type has THREE values: Village, Ward and Unresolved. The third is the easiest-to-miss trap in megh_db."
+    - "IT CARRIES ac_number AND ac_name, which v_focus_legacy does not expose. This is the only route to a constituency answer for this scheme - see semantic_rules.constituency_rule."
+    - "Focus Legacy does NOT use dim_geography_alias - the fact has no alias_key."
+
+  bridge_geography_source:
+    table_name: curated.bridge_geography_source
+    object_type: table
+    column_count: 5
+    approx_row_count_db: 29065
+    grain: one row per (village, source system)
+    primary_key: [geography_key, source_system]
+    shared_across_schemes: true
+    columns:
+    - {name: geography_key,  type: integer,     nullable: false, meaning: FK to dim_geography.}
+    - {name: source_system,  type: varchar(20), nullable: false, meaning: Which source the village appears in.}
+    - {name: first_year_key, type: smallint,    nullable: true,  meaning: First FY that source saw the village.}
+    - {name: last_year_key,  type: smallint,    nullable: true,  meaning: Last FY that source saw the village.}
+    - {name: row_count,      type: integer,     nullable: false, default: 0, meaning: How many source rows that pairing covers.}
+    business_rules:
+    - "THE SANCTIONED WAY TO ASK 'WHICH VILLAGES ARE IN SCHEME A BUT NOT SCHEME B'. It exists precisely so that question never becomes a fact-to-fact join."
+    - "source_system is varchar(20) and the Focus Legacy value is PRESUMED to be 'focus_legacy' - the fact's source_system default - but bridge rows may not have been written for this scheme at all. RUN `SELECT DISTINCT source_system FROM curated.bridge_geography_source` FIRST and say so if Focus Legacy is absent."
+    - "row_count is a COUNT OF SOURCE ROWS, not of groups, members or rupees. Never sum it as if it were a measure."
+    - Read it; never join it to v_focus_legacy for a per-payment answer.
+
+  # =========================================================================
+  # CROSS-SCHEME VIEWS - FOCUS LEGACY IS IN NEITHER
+  # =========================================================================
+  v_cross_scheme_money_district_year:
+    table_name: curated.v_cross_scheme_money_district_year
+    object_type: view
+    column_count: 6
+    grain: one row per scheme x district x financial year
+    money_unit: crore_rupees
+    includes_focus_legacy: false
+    business_rules:
+    - "FOCUS LEGACY IS NOT IN THIS VIEW. Its definition in the 2026-09-21 extract unions MGNREGA expenditure and PMAY amount_released and nothing else - this is verified from the SQL, not assumed."
+    - "So filtering it by a Focus Legacy scheme code returns zero rows, which looks like 'no money' rather than 'not modelled'. Never answer a Focus Legacy money question from here."
+    - "Use it only when the user genuinely wants the MGNREGA-versus-PMAY comparison, and always carry measure_semantics into the answer."
+
+  v_cross_scheme_village_coverage:
+    table_name: curated.v_cross_scheme_village_coverage
+    object_type: view
+    column_count: 4
+    grain: one row per village
+    includes_focus_legacy: false
+    business_rules:
+    - "FOCUS LEGACY IS NOT IN THIS VIEW EITHER. It has exactly two measures - pmay_houses and mgnrega_person_days."
+    - "For 'which villages got Focus Legacy but not PMAY', aggregate v_focus_legacy to village_code yourself and FULL JOIN that aggregate to this view, or use bridge_geography_source. Never join the facts."
+
+# ===========================================================================
+semantic_rules:
+
+  # ---- the fact that governs every money question --------------------------
+  entitlement_identity:
+    critical: true
+    status: MEASURE_IS_FULLY_DERIVED
+    formula: amount_disbursed = no_of_pg_members * 5000
+    verification: >
+      Asserted by the DB table comment as holding on every loaded row with zero
+      exceptions (verified against the source file 2026-09-16), and re-confirmed
+      independently on all 14,569 source rows on 2026-09-21. This is the best-verified
+      claim in the partition.
+    consequences:
+    - "A rupee total and a member total are the same answer at a x5000 scale. SUM(amount_disbursed) = 5000 * SUM(no_of_pg_members), always."
+    - "AVG(amount_disbursed) is 5000 x average group size. It is NOT an average entitlement and it does NOT indicate policy change over time - it moves when group sizes move."
+    - "'How much per member' has the constant answer 5,000. Say the rate rather than computing a ratio that can only return 5,000."
+    - "A correlation, ratio or regression between amount and members is degenerate - it is the same column twice."
+    - "Rankings by amount and by members are IDENTICAL. Do not present them as two findings."
+    runtime_behavior: >
+      Answer money questions with amount_disbursed and membership questions with
+      no_of_pg_members, but never present the two as independent evidence for the same
+      claim, and never describe a change in average amount as a change in entitlement.
+    caveat: >
+      The 5000 rate is an OBSERVED INVARIANT, not a documented policy parameter. Nothing
+      in megh_db states it as a rule. If a future load breaks it, the break is the
+      finding - test the identity before relying on it in a new extract.
+
+  # ---- the group / payment / person distinction ----------------------------
+  beneficiary_term:
+    critical: true
+    status: NO_PERSON_LEVEL_ANSWER_EXISTS
+    reason: >
+      The grain is one payment to one GROUP. There is no person identifier anywhere in
+      this partition - no name, no EPIC id, no member id, no household id. Focus Plus has
+      person rows; Focus Legacy does not.
+    three_different_numbers:
+      payments: "COUNT(*) - every disbursement row. About 14,566."
+      groups: "COUNT(DISTINCT pg_id) - about 11,904. This is the 'how many PGs' answer."
+      memberships: "SUM(no_of_pg_members) - about 102,021 in the source. These are MEMBER-PAYMENTS, not distinct people."
+    runtime_behavior: >
+      Never answer a bare "how many beneficiaries" with one number. If the user means
+      organisations, that is COUNT(DISTINCT pg_id). If they mean people reached, the
+      honest answer is that the data counts memberships and the same person may be
+      counted in two payment years - and that a group's recorded size can differ between
+      its own payments, so even a single-year membership sum is a sum of snapshots.
+    forbidden: >
+      Do NOT present SUM(no_of_pg_members) as a headcount of people, and do not present
+      COUNT(*) as a group count. In the source those two differ by 2,663 rows.
+    name_lookup: >
+      NOT POSSIBLE AND NOT PERMITTED. The only name columns are pg_name, which is an
+      unstable group label, and name_on_the_account, which is PII outside the boundary.
+      There is no individual to look up.
+
+  # ---- pg_id ---------------------------------------------------------------
+  pg_id_structure_rule:
+    critical: true
+    observed_pattern: "PG-<TYPE>-<DISTRICT_ABBR>-<NUMBER>, e.g. PG-FOCUS-WGH-7089"
+    text: >
+      The pg_id is structured and it is tempting to parse. Do not. The type token was
+      already resolved into pg_entity_type at ingest, and the district token is the
+      district AT ENROLMENT, which is not always the district today.
+    district_token_evidence: >
+      1,075 of 14,569 source rows have a district token that disagrees with the mapped
+      LGD district, and every one of those disagreements is explained by district
+      bifurcation: 990 rows whose pg_id says WKH now map to Eastern West Khasi Hills
+      (LGD 740), and 85 whose pg_id says WGH now map to South West Garo Hills. The mapped
+      district is correct and the token is stale. (unverified_in_db)
+    number_token_rule: >
+      The numeric suffix is unique only within a prefix. PG-FOCUS-WKH-5956 and
+      PG-LAMP-WGH-5956 are different groups. Never match on the number alone, and never
+      present it as a 'PG number' the user can quote by itself.
+    runtime_behavior: >
+      Treat pg_id as an opaque string for filtering and joining. Get district from
+      lgd_district, type from pg_entity_type. If a user asks what the parts mean, explain
+      them - and explain that the district part can be out of date.
+
+  # ---- time ----------------------------------------------------------------
+  time_dimension: date_of_remittance
+  time_dimensions_available: [date_of_remittance, financial_year, financial_year_short, year_key]
+  time_dimensions_absent: [sanction_date, application_date, approval_date, month_column, quarter, week]
+  time_runtime_rule: >
+    This scheme has BOTH a real date and a financial year, which only PMAY otherwise
+    matches. Use date_of_remittance for exact-date, date-range and calendar-year
+    questions; use financial_year_short for financial-year filtering and grouping. Never
+    derive the financial year from the date with a CASE expression - and note that the
+    two never disagree in the source, so there is no reason to.
+
+  batch_payment_rule:
+    critical: true
+    text: >
+      date_of_remittance takes only 30 distinct values across the whole scheme, because
+      money moves in bulk runs. A daily or monthly series is therefore a picture of
+      TREASURY BATCHES, not of a payment rate: three dates alone carry 9,193 of 14,569
+      source rows.
+    runtime_behavior: >
+      A monthly or daily breakdown is valid SQL and must be labelled as a batch view.
+      Prefer financial-year grouping for trend questions. Never interpolate between
+      payment dates, never describe a gap between batches as a slowdown, and never
+      present a month with no batch as a month of zero disbursement.
+    largest_batches:
+    - {date: '2025-09-11', source_rows: 3503}
+    - {date: '2025-06-18', source_rows: 3359}
+    - {date: '2024-10-08', source_rows: 2331}
+    unverified_in_db: true
+
+  time_gap_rule:
+    critical: true
+    text: >
+      FY 2023-24 HAS NO FOCUS LEGACY PAYMENTS. The scheme's years are 2021-22, 2022-23,
+      2024-25 and 2025-26. dim_year holds 2023-24, so a GROUP BY returns no row for it
+      rather than a zero row.
+    runtime_behavior: >
+      A four-point series with a hole is not a five-point series. State the gap
+      explicitly, do not draw a connecting line through it, and do not let a
+      year-on-year comparison silently compare 2024-25 against 2022-23 as if they were
+      adjacent. Whether the gap is a programme pause or an extract gap is UNKNOWN - say
+      that rather than choosing.
+    year_distribution_source:
+      '2021-22': 965
+      '2022-23': 2139
+      '2023-24': 0
+      '2024-25': 2653
+      '2025-26': 8812
+    unverified_in_db: true
+
+  time_null_rule: >
+    date_of_remittance is NULL on 171 source rows (170 of them FY2025-26) and year_key is
+    nullable in the DDL though it should never actually be NULL. A GROUP BY on the date
+    drops those 171 rows silently while a GROUP BY on financial_year keeps them - so the
+    two groupings can return different totals for the same question. Prefer the financial
+    year when completeness matters, and count the dateless rows when it does not.
+
+  # ---- geography -----------------------------------------------------------
+  geography_hierarchy:
+  - lgd_district
+  - lgd_block
+  - lgd_village_name
+
+  geography_codes:
+  - village_code
+  geography_codes_note: >
+    Only the village code survives into the curated layer. The source's
+    mapped_district_lgd_code and mapped_block_lgd_code have no equivalent, so a question
+    asking for a district or block LGD code cannot be answered.
+
+  geography_exclusion_rule:
+    critical: true
+    clause: "entity_type <> 'Unresolved'"
+    applies_to: every village count and every village list
+    does_not_apply_to: >
+      Scheme, programme, product, bank, district and block totals, and every money or
+      membership sum. Unresolved rows carry real payments and are deliberately placed
+      under a district so the totals reconcile to the source file. Excluding them from a
+      district total understates it.
+    text: >
+      'Unresolved' is a synthetic placeholder - one per district, or a single global one
+      where the district itself was unknown. Expect about 1,101 such rows here, 7.6% of
+      the scheme. Keep them in a total; drop them from anything that answers 'which
+      villages' or 'how many villages'.
+
+  geography_coverage_caveat: >
+    Village-level answers cover about 92% of payments, block-level answers possibly less
+    (1,013 rows had a block in the source but no village, and whether the placeholder row
+    preserves that block is unverified). Always compare a geography-grouped sum against
+    the ungrouped scheme total before publishing, and report the shortfall.
+
+  geography_case_rule: >
+    lgd_district and lgd_block are stored UPPERCASE; lgd_village_name is not. The source
+    spreadsheet is Title Case throughout, so a value lifted from the file will match the
+    village column and silently fail against district and block. Case-fold both sides in
+    the resolver and emit the stored form.
+
+  constituency_rule:
+    status: ANSWERABLE_ONLY_BY_AN_EXPLICIT_DIMENSION_JOIN
+    text: >
+      The source carries mapped_constituency_name and mapped_constituency_name_and_number
+      (55 values, of the form '41 SONGSAK'). Neither was carried onto the fact, and
+      v_focus_legacy does not expose a constituency column. dim_geography does hold
+      ac_number and ac_name for the village.
+    permitted_query: >
+      Because v_focus_legacy exposes geography_key, joining curated.dim_geography on
+      geography_key to read ac_name / ac_number is a legitimate dimension join on a
+      declared FK - not a fact-to-fact join and not prohibited. It is the ONLY documented
+      reason to join a dimension the view already pre-joins.
+    required_caveats:
+    - "The AC comes from the LGD roster for that village, NOT from the scheme's own constituency column, which was dropped. The two may not agree."
+    - "An Unresolved placeholder has no real village, so it has no meaningful AC. Exclude entity_type = 'Unresolved' from any constituency answer - which means a constituency total will NOT reconcile to the scheme total."
+    - "MGNREGA carries its own constituency columns on its fact. Do not compare an MGNREGA constituency figure with one derived this way without saying they come from different places."
+    runtime_behavior: >
+      Answer the question, emit the join, and state both caveats. Do not silently refuse,
+      and do not silently pretend the coverage is complete.
+
+  # ---- product -------------------------------------------------------------
+  product_rule:
+    critical: true
+    status: RAW_AND_TIME_LIMITED
+    normalisation: >
+      62 distinct spellings collapse to 45 case-folded. ALWAYS GROUP BY
+      UPPER(TRIM(product_raw)) and display the folded label, or resolve to a canonical
+      list in the resolver first. A bare GROUP BY product_raw is wrong, not merely untidy
+      - it splits piggery into three rows and can change which product ranks first.
+    known_case_collisions:
+    - [Piggery, PIGGERY, piggery]
+    - [Ginger, GINGER, ginger]
+    - [Squash, SQUASH, squash]
+    - [Poultry, POULTRY, poultry]
+    - [Banana, BANANA]
+    - [Pineapple, PINEAPPLE]
+    - [Potato, POTATO]
+    - [Mushroom, MUSHROOM]
+    - [Fishery, FISHERY]
+    - [Handloom, HANDLOOM]
+    - [Betel Leaf, Betel leaf]
+    - [Long Pepper, Long pepper, long pepper]
+    coverage:
+      text: >
+        Populated on 3,112 of 14,569 source rows - 21%. By year: FY2021-22 100%,
+        FY2022-23 100%, FY2024-25 0 of 2,653, FY2025-26 8 of 8,812.
+      runtime_behavior: >
+        EVERY product answer must state that it covers FY2021-22 and FY2022-23 only. A
+        product question about 2024-25 or 2025-26 is unanswerable, and the reason is that
+        the field stopped being captured - not that the groups had no products. The DB
+        column comment confirms the gap is in the source, not the load.
+    semantics: >
+      product_raw describes what the GROUP does, not what the money bought. Do not
+      describe it as expenditure by category.
+    unverified_in_db: true
+
+  # ---- banking -------------------------------------------------------------
+  pii_rule:
+    critical: true
+    text: >
+      Two columns on the fact are personal banking data - account_no (full) and
+      name_on_the_account - and bridge_pg_bank_history repeats the full account number.
+      Query curated.v_focus_legacy only. It masks the account to the last four digits and
+      drops the name entirely. Never select the unmasked column into a result, an export
+      or a vector-store payload; keep both out of semantic.column_catalog.sample_values;
+      keep name_on_the_account at is_chatbot_visible = false.
+    masked_column_is_not_a_key: >
+      account_no_masked is safe to display but is NOT collision-free - two accounts of
+      the same length ending in the same four digits collapse to one string. Never
+      COUNT(DISTINCT account_no_masked) and call it an account count.
+    contrast_with_the_other_schemes: >
+      PMAY was de-identified at ingest - names dropped. Focus Plus keeps person columns on
+      the fact and relies on the view to withhold them. Focus Legacy is the third pattern:
+      the identifying columns are loaded AND the view transforms rather than drops one of
+      them. The discipline has to come from querying the view.
+    what_is_still_reportable: >
+      bank_name, ifsc_code and branch_raw are institution-level, not person-level, and may
+      be reported freely. Bank-wise analysis is legitimate for this scheme.
+
+  bank_currency_rule: >
+    bank_details_current is TRUE or NULL, never FALSE - the view's LEFT JOIN carries the
+    is_current predicate. For 'paid into an account no longer current' write
+    `bank_details_current IS NULL AND account_no_masked IS NOT NULL`. And say that
+    'current' is inferred from the latest remittance date, because no source field
+    declares an authoritative account.
+
+  account_sharing_rule: >
+    In the source, 250 account numbers serve more than one pg_id and 107 pg_ids use more
+    than one account. Neither is necessarily wrong - a cooperative can bank for several
+    groups - but neither is a group identity. If a shared-account audit is requested,
+    treat it as an integrity question about the scheme, answer it in aggregate, and do not
+    release the account numbers themselves. (unverified_in_db)
+
+  # ---- money ---------------------------------------------------------------
+  financial_measures:
+    amount_disbursed: SUM(amount_disbursed) - UNIT UNVERIFIED, read dim_scheme.money_unit.
+    measures_absent: >
+      There is no sanctioned, released, pending, target, budget, allocation, administrative
+      or utilisation amount in this scheme. amount_disbursed is the only money column, and
+      it is fully derived from the member count. Do not borrow a money column from PMAY,
+      MGNREGA or Focus Plus to fill a gap.
+    unit_rule: >
+      READ curated.dim_scheme.money_unit FOR THE FOCUS LEGACY ROW BEFORE FORMATTING.
+      Values of 5,000 per member and a 950,000 maximum corroborate rupees but do not
+      settle it. Units already live across megh_db are lakh (MGNREGA), rupees (PMAY),
+      crore (the pre-aggregate and cross-scheme views) and unverified (Focus Plus). Never
+      add across them, and state the unit on every figure.
+    not_null_rule: amount_disbursed is NOT NULL. SUM needs no COALESCE.
+    average_rule: >
+      See semantic_rules.entitlement_identity. An average amount is an average group size
+      in disguise. A 'per member' figure is the constant 5,000.
+
+  # ---- load integrity ------------------------------------------------------
+  load_integrity:
+    reconciliation_view: meta.v_reconciliation_focus_legacy
+    identity: raw_rows = curated_rows + quarantined, exactly
+    arithmetic: >
+      14,569 source rows - 3 quarantined = 14,566 curated, and 11,906 source pg_ids - 2
+      rejected = 11,904 groups. Both match the live extract's planner estimates, which is
+      why this file's source-derived figures are unusually safe to reason with.
+    quarantined_rows:
+    - reason_code: DUPLICATE_DISBURSEMENT
+      count: 1
+      detail: >
+        pg_id PG-FOCUS-WKH-5956, source ids 1148 and 2552 - same 19 members, same
+        Rs 95,000, same HDFC account, but different dates (2022-04-20 and 2022-05-18) and
+        different product (Vegetables and Squash). The DB comment calls it 'the one
+        disputed pair'. It is genuinely ambiguous: two real tranches would look exactly
+        like this. One of the two was held back, so the scheme total is Rs 95,000 lower
+        than the spreadsheet's.
+    - reason_code: BAD_PG_ID_PREFIX
+      count: 2
+      detail: >
+        Source ids 3101 ('PG-FOCUS- RB- 7751') and 14565 ('PG- FOCUS-EKH-12359'). Both are
+        MALFORMED BY STRAY SPACES rather than carrying an unknown prefix - a whitespace
+        normalisation at ingest would recover both. Worth raising with the data owner
+        rather than accepting as permanent loss.
+    runtime_behavior: >
+      Run the reconciliation view before publishing a total. If a user's own spreadsheet
+      figure is slightly higher than the database's, these three rows are the likely
+      difference - explain it rather than disputing their number.
+    unverified_in_db: false
+
+  # ---- general -------------------------------------------------------------
+  quality_flags: NONE
+  quality_flags_rule: >
+    Focus Legacy has no is_placeholder, no completed_underfunded, no mapping_category and
+    no mapping_confidence_pct. THERE IS NO MANDATORY PREDICATE on this partition. Do NOT
+    copy `WHERE NOT is_placeholder` from the PMAY examples - the column does not exist here
+    and the query will error. The only routine filter is the village-count exclusion
+    `entity_type <> 'Unresolved'`.
+
+  status_dimension: NONE
+  status_rule: >
+    There is no application status, no approval status, no verification status and no
+    lifecycle stage in this partition. Every row is a payment that HAPPENED. There is no
+    pending, rejected or in-progress population to report and no way to construct one -
+    do not infer a status from a NULL date or a missing product.
+
+  null_behavior: >
+    NULL is missing; never silently coerce NULL to zero. Note what each NULL means here:
+    a NULL product_raw or branch_raw means the field was not captured that year; a NULL
+    date_of_remittance means the date is unknown, not that the payment did not happen; a
+    NULL bank_details_current means the account is not the current one OR there is no
+    account on the row. Do not render any of them as 'Unknown' categories in a chart
+    without saying which kind of missing they are.
+
+  identifier_behavior:
+  - focus_legacy_fact_id and source_row_id are technical identifiers.
+  - pg_id is the producer-group natural key and the only group identity.
+  - pg_name is display text and must never be used as a key.
+  - village_code and geography_key are geographic identifiers.
+  - ifsc_code is a branch identifier and is reportable.
+  - account_no_masked is a masked banking reference - displayable, not countable.
+  - year_key, scheme_key, producer_group_key and pg_entity_type_key are dimension keys.
+  - Identifiers and keys must never be SUMed or AVGed.
+  - geography_key, producer_group_key and focus_legacy_fact_id are unstable across a reload - never export them.
+
+  # ---- what this scheme simply does not hold -------------------------------
+  not_available:
+    critical: true
+    text: >
+      The following have NO column in this partition. Return "not held in this data" and
+      offer the nearest answerable question. Never improvise, and never borrow a column
+      from another scheme.
+    items:
+    - {topic: individual_beneficiary, detail: "No person name, EPIC id, member id, mobile number or household id. The grain is a group. No person-level answer exists and none can be constructed."}
+    - {topic: account_holder_name, detail: "name_on_the_account exists on the fact but is PII outside the chatbot boundary. Refuse on privacy grounds, not availability grounds."}
+    - {topic: full_account_number, detail: "Masked to the last four digits in the approved surface. The unmasked value is audit-only."}
+    - {topic: application_or_approval, detail: "No application, sanction, approval or rejection record. The fact starts at the payment."}
+    - {topic: status_or_stage, detail: "No status dimension and no lifecycle flags. Nothing corresponds to PMAY's is_completed."}
+    - {topic: repayment_or_outcome, detail: "No repayment, recovery, income, yield, turnover or outcome measure. What the group did with the money is not held."}
+    - {topic: target_or_budget, detail: "No target, allocation, budget or eligible-population column. Coverage as a percentage of eligible groups, per-capita figures and projections cannot be calculated. Offer counts per village, block or district instead."}
+    - {topic: district_block_codes, detail: "Only the village LGD code exists. District and block are names."}
+    - {topic: constituency_from_the_scheme, detail: "The source's own constituency columns were dropped. The roster's ac_name / ac_number are reachable by an explicit dim_geography join - see constituency_rule - but they are a different provenance."}
+    - {topic: product_after_2022_23, detail: "product_raw is effectively unpopulated from FY2024-25 onward. The field stopped being captured; this is not an absence of products."}
+    - {topic: fy_2023_24, detail: "No payments exist for FY2023-24. Report the gap, never a zero."}
+    - {topic: cross_scheme_views, detail: "Focus Legacy is in neither v_cross_scheme_money_district_year nor v_cross_scheme_village_coverage. A comparison must be built by aggregating each side independently."}
+    - {topic: focus_plus_linkage, detail: "There is no key linking a Focus Legacy producer group to a Focus Plus beneficiary, and Focus Plus explicitly holds no producer-group column at all. Do not attempt to relate the two schemes at row level, and do not assume a name similarity is a match."}
+
+# ===========================================================================
+nlp_sql_rules:
+  read_only: true
+  allowed_operations: [SELECT]
+  default_from: curated.v_focus_legacy
+
+  never_query:
+  - curated.fact_focus_legacy_disbursement
+  - curated.bridge_pg_bank_history
+  never_query_reason: >
+    Both carry the unmasked account number, and the fact also carries the account
+    holder's name. Querying either is a privacy-boundary violation, not an optimisation.
+
+  mandatory_predicate: NONE
+  mandatory_predicate_note: >
+    UNLIKE PMAY. There is no is_placeholder column on this partition, so there is no
+    always-on filter. The only conditional filter is `entity_type <> 'Unresolved'` on
+    village counts and village lists.
+
+  aggregation_defaults:
+    payments: COUNT(*)
+    disbursements: COUNT(*)
+    records: COUNT(*)
+    producer_groups: COUNT(DISTINCT pg_id)
+    groups: COUNT(DISTINCT pg_id)
+    members: SUM(no_of_pg_members)
+    amount_disbursed: SUM(amount_disbursed)
+    distinct_villages: COUNT(DISTINCT village_code)
+    distinct_banks: COUNT(DISTINCT bank_name)
+    beneficiaries: ASK_FIRST
+
+  beneficiary_count_behavior: >
+    "Beneficiaries" has three readings here - payments, groups and memberships - and they
+    differ by an order of magnitude. COUNT(*) is a PAYMENT count and must be labelled as
+    one. COUNT(DISTINCT pg_id) is the group count. SUM(no_of_pg_members) counts
+    memberships, not people. Clarify before answering; never pick silently.
+
+  money_behavior: >
+    READ curated.dim_scheme.money_unit FOR FOCUS LEGACY BEFORE FORMATTING. Do not assume
+    rupees and do not convert to crore on an assumption. State the unit on every figure.
+    Remember that any amount answer is a member-count answer x 5000 and never present the
+    two as independent evidence.
+
+  date_behavior: >
+    A financial-year request filters or groups financial_year_short. A calendar-year or
+    exact-date request filters date_of_remittance on a range. A monthly request groups
+    date_of_remittance by month AND is labelled as a batch view. Never derive the
+    financial year from the date with a CASE expression, and never report a month with no
+    batch as a month of zero disbursement.
+
+  product_behavior: >
+    Always fold case - GROUP BY UPPER(TRIM(product_raw)) - and always state that product
+    answers cover FY2021-22 and FY2022-23 only. Never answer a product question for
+    FY2024-25 or FY2025-26 with a count over eight rows.
+
+  geography_behavior: >
+    Add `entity_type <> 'Unresolved'` to village counts and village lists only. Compare
+    any geography-grouped total against the ungrouped total and report the shortfall.
+    District and block literals must be UPPERCASE; village names must not be.
+
+  entity_behavior: >
+    Resolve district, block, village, bank, product and programme values against the
+    canonical stored values and approved aliases before SQL generation. District and block
+    are stored UPPERCASE in dim_geography; village name and bank name are Title Case;
+    product_raw is uncontrolled and must be folded. pg_entity_type and programme_variant
+    values are NOT known to this file - enumerate them from the database before building
+    a filter or a legend.
+
+  unknown_entity: Do not guess; return not-found/did-you-mean.
+
+  group_lookup_behavior: >
+    A user naming a group gives an unstable name, not a key. Search pg_name with ILIKE,
+    show the matching pg_id values with their district, ask which one is meant if more
+    than one returns, then query on pg_id. Never answer a named-group question by
+    grouping on pg_name.
+
+  ranking: >
+    ORDER BY the requested aggregate and default to top 5 when N is omitted for plural
+    "top" requests; singular "highest/lowest" uses LIMIT 1. If fewer rows exist than N
+    were asked for, return what there is and say how many. Remember that a ranking by
+    amount and a ranking by members are the same ranking.
+
+  comparison: >
+    Filter the requested scope and GROUP BY the requested dimension. Preserve the
+    payment / group / membership distinction - comparing a payment count against a group
+    count compares two different things.
+
+  join_behavior: >
+    v_focus_legacy pre-joins dim_producer_group, dim_pg_entity_type, dim_geography,
+    dim_year and bridge_pg_bank_history, so the generator should emit no joins for
+    ordinary questions. Three documented exceptions, all dimension joins on declared FKs:
+    read dim_scheme for the money unit; join dim_geography on geography_key for
+    constituency; join dim_producer_group for first_payment_year_key /
+    last_payment_year_key. NEVER join this fact to fact_pmay_house,
+    fact_focus_plus_disbursement, fact_cm_elevate_application or either MGNREGA fact -
+    every fact pair in megh_db is prohibited. See
+    focuslegacy_foreign_key_augmentation.yaml.
+
+  cross_scheme_behavior: >
+    Focus Legacy is in NEITHER cross-scheme view - verified from their definitions. Do not
+    filter v_cross_scheme_money_district_year by a Focus Legacy scheme code and report the
+    empty result as zero money. For a genuine cross-scheme question, aggregate
+    v_focus_legacy to district and financial year yourself, aggregate the other scheme
+    from its own view, and join the two aggregates - never the facts. Say that the
+    measures mean different things: a Focus Legacy rupee is money remitted, a PMAY rupee
+    is money released against a sanction, an MGNREGA rupee is expenditure incurred.
+
+  pii_behavior: >
+    Never SELECT account_no or name_on_the_account, and never query the fact or the bank
+    bridge. account_no_masked may be displayed for a specific group's payment history but
+    not in a bulk export. Refuse account-holder-name requests on privacy grounds.
+
+  unverified_totals_behavior: >
+    Row counts in the live extract are planner estimates, and every distinct count and
+    distribution in this file is a source-workbook observation. Run
+    meta.v_reconciliation_focus_legacy before quoting a total, and prefer stating the
+    measurement gap to publishing an unverified number.
+
+# ===========================================================================
+few_shot_examples:
+
+- question: How many Focus Legacy payments are there?
+  explanation: One row is one payment. No mandatory predicate exists on this partition, unlike PMAY.
+  sql: |
+    SELECT COUNT(*) AS payments
+    FROM curated.v_focus_legacy;
+
+- question: How many producer groups received money under Focus Legacy?
+  explanation: Groups are counted on pg_id, never on pg_name - 1,634 groups have more than one spelling on file.
+  sql: |
+    SELECT COUNT(DISTINCT pg_id) AS producer_groups
+    FROM curated.v_focus_legacy;
+
+- question: How many groups were paid more than once?
+  explanation: A payment count and a group count differ here, so the repeat-payment population is worth naming explicitly.
+  sql: |
+    SELECT COUNT(*) AS groups_paid_more_than_once
+    FROM (
+      SELECT pg_id
+      FROM curated.v_focus_legacy
+      GROUP BY pg_id
+      HAVING COUNT(*) > 1
+    ) repeat_groups;
+
+- question: What is the total amount disbursed under Focus Legacy?
+  explanation: >
+    The unit is not documented on the fact, so the scheme row of dim_scheme is read
+    alongside the total rather than the figure being formatted on an assumption.
+  sql: |
+    SELECT SUM(f.amount_disbursed) AS total_disbursed,
+           SUM(f.no_of_pg_members) AS total_memberships,
+           (SELECT money_unit FROM curated.dim_scheme WHERE scheme_name ILIKE '%focus%legacy%') AS money_unit
+    FROM curated.v_focus_legacy f;
+
+- question: What is the average amount disbursed per group?
+  explanation: >
+    Answerable, but it must be framed. amount_disbursed is exactly 5000 x members on every
+    row, so the average amount is 5000 x the average group size - it is a membership
+    statistic, not an entitlement.
+  sql: |
+    SELECT ROUND(AVG(amount_disbursed), 2) AS avg_amount_per_payment,
+           ROUND(AVG(no_of_pg_members), 2) AS avg_members_per_payment,
+           5000 AS rate_per_member
+    FROM curated.v_focus_legacy;
+
+- question: How much was disbursed in FY 2025-26?
+  explanation: Financial year is a stored column; filter the short form, which is the form the source file used.
+  sql: |
+    SELECT SUM(amount_disbursed) AS disbursed,
+           SUM(no_of_pg_members) AS memberships,
+           COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    WHERE financial_year_short = '2025-26';
+
+- question: Show Focus Legacy disbursement by financial year
+  explanation: >
+    Four years exist and FY2023-24 is absent from the data, not zero in it. The result has
+    a hole and the answer must say so rather than drawing a line through it.
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*) AS payments,
+           COUNT(DISTINCT pg_id) AS groups,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+
+- question: Show Focus Legacy payments by month
+  explanation: >
+    Valid SQL, but only 30 distinct remittance dates exist, so this is a chart of treasury
+    batches rather than a payment rate. The dateless rows are excluded by the GROUP BY and
+    must be counted separately.
+  sql: |
+    SELECT DATE_TRUNC('month', date_of_remittance)::date AS remittance_month,
+           COUNT(*) AS payments,
+           SUM(amount_disbursed) AS disbursed
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance IS NOT NULL
+    GROUP BY remittance_month
+    ORDER BY remittance_month;
+
+- question: On which dates did Focus Legacy money actually go out?
+  explanation: The batch structure is the finding. Listing the distinct dates says more than a time series would.
+  sql: |
+    SELECT date_of_remittance,
+           COUNT(*) AS payments,
+           SUM(amount_disbursed) AS disbursed
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance IS NOT NULL
+    GROUP BY date_of_remittance
+    ORDER BY date_of_remittance;
+
+- question: How many payments have no remittance date?
+  explanation: These rows vanish from any date-grouped answer but survive a financial-year grouping. Count them before reporting either.
+  sql: |
+    SELECT COUNT(*) AS payments_without_a_date,
+           SUM(amount_disbursed) AS disbursed_without_a_date
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance IS NULL;
+
+- question: How much was disbursed in West Garo Hills?
+  explanation: District is stored UPPERCASE in dim_geography; the Title Case form from the source spreadsheet would return zero rows silently.
+  sql: |
+    SELECT COUNT(*) AS payments,
+           COUNT(DISTINCT pg_id) AS groups,
+           SUM(amount_disbursed) AS disbursed
+    FROM curated.v_focus_legacy
+    WHERE lgd_district = 'WEST GARO HILLS';
+
+- question: Top 5 districts by amount disbursed
+  explanation: >
+    No N supplied, so the ranking rule defaults to 5. Unresolved rows stay in - they carry
+    real payments and are placed under their district so the totals reconcile.
+  sql: |
+    SELECT lgd_district,
+           SUM(amount_disbursed) AS disbursed,
+           COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district
+    ORDER BY disbursed DESC
+    LIMIT 5;
+
+- question: How many villages received Focus Legacy money in Ri Bhoi?
+  explanation: >
+    A village count, so the Unresolved placeholders are excluded and identity is the LGD
+    code, never the name.
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_focus_legacy
+    WHERE lgd_district = 'RI BHOI'
+      AND entity_type <> 'Unresolved';
+
+- question: How many payments could not be matched to a real village?
+  explanation: >
+    The placeholder population is a coverage statement about every village-level answer, so
+    it is worth reporting on its own.
+  sql: |
+    SELECT COUNT(*) AS unresolved_payments,
+           SUM(amount_disbursed) AS unresolved_amount,
+           ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM curated.v_focus_legacy), 1) AS pct_of_payments
+    FROM curated.v_focus_legacy
+    WHERE entity_type = 'Unresolved';
+
+- question: Break Focus Legacy down by producer group type
+  explanation: >
+    The stored type codes are not known to the annotation, so the breakdown enumerates them
+    rather than filtering on a guessed string.
+  sql: |
+    SELECT pg_entity_type,
+           pg_entity_type_name,
+           COUNT(*) AS payments,
+           COUNT(DISTINCT pg_id) AS groups,
+           SUM(amount_disbursed) AS disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY pg_entity_type, pg_entity_type_name
+    ORDER BY payments DESC;
+
+- question: Compare FOCUS and Focus (Addnl)
+  explanation: >
+    The two variants are not two eras - the additional variant appears only in FY2025-26 -
+    so the year is carried into the breakdown to stop it reading as a trend.
+  sql: |
+    SELECT programme_variant,
+           financial_year_short,
+           COUNT(*) AS payments,
+           SUM(amount_disbursed) AS disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY programme_variant, financial_year_short
+    ORDER BY programme_variant, financial_year_short;
+
+- question: Which products do Focus Legacy groups work on?
+  explanation: >
+    product_raw holds 62 spellings for 45 products, so case is folded before grouping, and
+    the FY range is reported because the field is only populated for two years.
+  sql: |
+    SELECT UPPER(TRIM(product_raw)) AS product,
+           COUNT(*) AS payments,
+           SUM(amount_disbursed) AS disbursed,
+           MIN(financial_year_short) AS first_fy,
+           MAX(financial_year_short) AS last_fy
+    FROM curated.v_focus_legacy
+    WHERE product_raw IS NOT NULL
+    GROUP BY UPPER(TRIM(product_raw))
+    ORDER BY payments DESC;
+
+- question: How complete is the product field by year?
+  explanation: >
+    The honest framing of any product question. The collapse after FY2022-23 is a capture
+    gap in the source, not an absence of products.
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*) AS payments,
+           COUNT(product_raw) AS payments_with_product,
+           ROUND(100.0 * COUNT(product_raw) / COUNT(*), 1) AS pct_populated
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+
+- question: Which banks handle Focus Legacy payments?
+  explanation: >
+    Bank name is institution-level, not personal, and is clean here - unlike Focus Plus,
+    where the view withholds it. Two banks carry most of the scheme.
+  sql: |
+    SELECT bank_name,
+           COUNT(*) AS payments,
+           SUM(amount_disbursed) AS disbursed,
+           COUNT(DISTINCT pg_id) AS groups
+    FROM curated.v_focus_legacy
+    GROUP BY bank_name
+    ORDER BY payments DESC;
+
+- question: Show the payment history of PG-FOCUS-WGH-7089
+  explanation: >
+    A specific group, so the masked account is appropriate detail. The name on the account
+    is PII and is not in the view at all.
+  sql: |
+    SELECT financial_year_short, date_of_remittance, programme_variant,
+           no_of_pg_members, amount_disbursed, bank_name, ifsc_code,
+           account_no_masked, bank_details_current
+    FROM curated.v_focus_legacy
+    WHERE pg_id = 'PG-FOCUS-WGH-7089'
+    ORDER BY date_of_remittance;
+
+- question: Find the producer group called Muskan
+  explanation: >
+    Group names are unstable - the same group appears as 'Muskan Producer Group' and
+    'Muskan Pg' - so the search returns candidate pg_id values to choose from rather than
+    grouping on the name.
+  sql: |
+    SELECT DISTINCT pg_id, pg_name, lgd_district, lgd_block, lgd_village_name
+    FROM curated.v_focus_legacy
+    WHERE pg_name ILIKE '%muskan%'
+    ORDER BY pg_id
+    LIMIT 25;
+
+- question: Which payments went to an account that is no longer the group's current one?
+  explanation: >
+    bank_details_current is TRUE or NULL, never FALSE, so the superseded population is found
+    with IS NULL - and the account_no_masked test separates 'superseded' from 'no account on
+    the row'.
+  sql: |
+    SELECT pg_id, date_of_remittance, bank_name, account_no_masked, amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE bank_details_current IS NULL
+      AND account_no_masked IS NOT NULL
+    ORDER BY date_of_remittance DESC
+    LIMIT 100;
+
+- question: Which assembly constituencies did Focus Legacy money reach?
+  explanation: >
+    The scheme's own constituency column was dropped at ingest, but dim_geography holds the
+    roster's ac_name for the village. This is a permitted dimension join on a declared FK.
+    Unresolved rows have no real village, so they are excluded and the total will not
+    reconcile to the scheme total.
+  sql: |
+    SELECT g.ac_number, g.ac_name,
+           COUNT(*) AS payments,
+           SUM(f.amount_disbursed) AS disbursed
+    FROM curated.v_focus_legacy f
+    JOIN curated.dim_geography g ON g.geography_key = f.geography_key
+    WHERE f.entity_type <> 'Unresolved'
+    GROUP BY g.ac_number, g.ac_name
+    ORDER BY disbursed DESC;
+
+- question: Which groups were paid in more than one financial year?
+  explanation: >
+    dim_producer_group stores the first and last payment year, so this needs no aggregation
+    over the fact - but the columns are nullable and unverified, so the query guards for NULL.
+  sql: |
+    SELECT pg.pg_id, pg.current_name,
+           pg.first_payment_year_key, pg.last_payment_year_key
+    FROM curated.dim_producer_group pg
+    WHERE pg.first_payment_year_key IS NOT NULL
+      AND pg.last_payment_year_key IS NOT NULL
+      AND pg.last_payment_year_key > pg.first_payment_year_key
+    ORDER BY pg.pg_id
+    LIMIT 100;
+
+- question: Did the Focus Legacy load lose any rows?
+  explanation: The reconciliation view is the first thing to run before quoting any total.
+  sql: |
+    SELECT dataset, raw_rows, curated_rows, quarantined,
+           raw_rows - curated_rows - quarantined AS should_be_zero
+    FROM meta.v_reconciliation_focus_legacy;
+
+- question: What is the largest single Focus Legacy payment?
+  explanation: >
+    One extreme outlier exists - 190 members against a next-largest of 20 - so the top rows
+    are shown rather than a bare maximum that would misrepresent the distribution.
+  sql: |
+    SELECT pg_id, pg_name, lgd_district, no_of_pg_members, amount_disbursed,
+           date_of_remittance
+    FROM curated.v_focus_legacy
+    ORDER BY amount_disbursed DESC
+    LIMIT 10;
+
+# ---- questions that must be refused or reframed -------------------------
+- question: Who is the account holder for PG-FOCUS-WGH-7089?
+  explanation: >
+    name_on_the_account is personal data held on the fact for audit only, marked
+    is_chatbot_visible = false, and the approved query surface does not expose it. Refuse on
+    privacy grounds - not on availability grounds - and offer the masked account instead.
+  sql: null
+
+- question: Give me the full bank account numbers for all Focus Legacy groups
+  explanation: >
+    The unmasked account number exists on fact_focus_legacy_disbursement and on
+    bridge_pg_bank_history, and neither may be queried. v_focus_legacy.account_no_masked is
+    the only releasable form, and it is not appropriate in a bulk export either.
+  sql: null
+
+- question: How many individual beneficiaries did Focus Legacy reach?
+  explanation: >
+    The grain is a payment to a GROUP and there is no person identifier in the partition.
+    SUM(no_of_pg_members) counts memberships, and a group paid in two years contributes its
+    members twice - its recorded size can even differ between the two. Explain the three
+    available numbers and ask which is meant.
+  sql: null
+
+- question: How much was disbursed in FY 2023-24?
+  explanation: >
+    No Focus Legacy payments exist for FY2023-24. The correct answer is that the scheme has
+    a one-year gap between FY2022-23 and FY2024-25, not that disbursement was zero, and
+    whether the gap is a programme pause or an extract gap is not known.
+  sql: null
+
+- question: What did the groups spend the money on in 2025-26?
+  explanation: >
+    product_raw describes the group's activity, not expenditure, and it is populated on 8 of
+    8,812 FY2025-26 rows. Answering from those 8 would be a fabricated national picture.
+    Offer the FY2021-22 and FY2022-23 product profile instead.
+  sql: null
+
+- question: Which district is PG-FOCUS-WKH-5956 in, based on its ID?
+  explanation: >
+    The district token in a pg_id is the district at enrolment and is stale on 1,075 source
+    rows - 990 WKH groups now sit in Eastern West Khasi Hills. Answer from lgd_district and
+    explain why the ID says something different.
+  sql: null
+
+- question: Compare Focus Legacy and PMAY spending by district using the cross-scheme view
+  explanation: >
+    v_cross_scheme_money_district_year unions MGNREGA and PMAY only - Focus Legacy is not in
+    it, so a filter would return zero rows and read as 'no money'. Aggregate each scheme
+    independently and join the aggregates, and state that a remitted rupee and a released
+    rupee are different measures.
+  sql: null
+
+- question: Show me the Focus Plus beneficiaries belonging to these producer groups
+  explanation: >
+    A row-level join between Focus Legacy and Focus Plus is prohibited, and there is no key
+    to join on: Focus Plus holds no producer-group column at all, which its own annotation
+    records explicitly. Name similarity is not a match.
+  sql: null
+
+- question: What is the total of all village LGD codes reached by Focus Legacy?
+  explanation: >
+    LGD codes are identifiers, not measures. SUM on village_code is semantically invalid.
+    Decline and offer COUNT(DISTINCT village_code) instead.
+  sql: null
+
+- question: Update the member count for a producer group
+  explanation: The read role permits SELECT only. Refuse rather than translating into write SQL.
+  sql: null
+
+- question: How many groups are still pending payment?
+  explanation: >
+    There is no status dimension and no application record in this partition - every row is
+    a payment that happened. A pending population cannot be derived from a NULL date or a
+    missing product, and inventing one would be a fabrication.
+  sql: null

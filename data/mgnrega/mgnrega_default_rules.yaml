@@ -1,0 +1,178 @@
+# mgnrega_default_rules.yaml
+#
+# Default rules for MGNREGA - node 5.5. Runs after the clarification gate.
+# Each rule fills a missing detail silently and hands the response composer an
+# assumption line, so the user can correct it without being interrupted first.
+# Editable by analysts - no code change needed.
+#
+# A condition must live in EITHER the clarification file OR this one. The gate runs
+# first, so any condition present in both will always ask and never default.
+# {placeholders} are filled from the resolved query at runtime.
+
+default_rules:
+
+  # ---- time -------------------------------------------------------------
+  - condition: "missing_time_period"
+    default_value: "2025-2026"
+    assumption_text: "Showing FY 2025-26, the latest year available."
+
+  - condition: "relative_year_latest"
+    default_value: "2025-2026"
+    assumption_text: "Taking the latest year as FY 2025-26."
+
+  - condition: "relative_year_previous"
+    default_value: "2024-2025"
+    assumption_text: "Taking last year as FY 2024-25."
+
+  - condition: "relative_year_earliest"
+    default_value: "2022-2023"
+    assumption_text: "Taking the earliest year as FY 2022-23."
+
+  - condition: "multi_year_request_without_years"
+    default_value: "all_available_years"
+    assumption_text: "Covering all four years, FY 2022-23 to FY 2025-26."
+
+  - condition: "trend_without_period"
+    default_value: "all_available_years"
+    assumption_text: "Trend shown across all four years, FY 2022-23 to FY 2025-26."
+
+  - condition: "comparison_without_second_period"
+    default_value: "preceding_financial_year"
+    assumption_text: "Compared against the preceding year, FY {previous_year}."
+
+  - condition: "year_range_partly_outside_data"
+    default_value: "clamp_to_available_range"
+    assumption_text: "Data starts at FY 2022-23 and ends at FY 2025-26, so the period has been trimmed to {applied_range}."
+
+  - condition: "job_cards_without_year"
+    default_value: "2025-2026"
+    assumption_text: "Job cards issued is a running total, so this is the stock as at FY 2025-26."
+
+  - condition: "year_carries_quality_note"
+    default_value: "include_with_note"
+    assumption_text: "{year_note}"
+
+  # ---- geography --------------------------------------------------------
+  - condition: "missing_geography"
+    default_value: "all_districts"
+    assumption_text: "Covering all 12 districts of Meghalaya."
+
+  - condition: "whole_state_reference"
+    default_value: "no_district_filter"
+    assumption_text: "Figures are statewide."
+
+  - condition: "missing_breakdown_level"
+    default_value: "district"
+    assumption_text: "Broken down by district."
+
+  - condition: "region_group_named"
+    default_value: "expand_to_member_districts"
+    assumption_text: "{region} covers {districts}."
+
+  - condition: "colliding_name_without_level"
+    default_value: "block"
+    assumption_text: "Reading {value} as a block, which is the level MGNREGA is administered at."
+
+  - condition: "geography_source_conflict"
+    default_value: "roster"
+    assumption_text: "Sources disagree on where {value} sits; using the official roster's {block}."
+
+  - condition: "constituency_unassigned_rows"
+    default_value: "exclude"
+    assumption_text: "1,240 records with no constituency recorded are excluded from constituency totals."
+
+  - condition: "wards_alongside_villages"
+    default_value: "include"
+    assumption_text: "164 wards are counted alongside villages."
+
+  - condition: "inactive_roster_villages"
+    default_value: "exclude"
+    assumption_text: "Counting only villages with recorded MGNREGA activity."
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "missing_scheme"
+    default_value: "mgnrega"
+    assumption_text: "Answering for MGNREGA, the only scheme currently loaded."
+
+  - condition: "bare_expenditure_term"
+    default_value: "total_exp"
+    assumption_text: "Using total expenditure."
+
+  - condition: "bare_wages_term"
+    default_value: "unskilled_wage_exp"
+    assumption_text: "Using unskilled wages, the larger of the two wage components."
+
+  - condition: "bare_work_days_term"
+    default_value: "person_days"
+    assumption_text: "Using person-days of employment generated."
+
+  - condition: "cost_efficiency_term"
+    default_value: "cost_per_person_day_rupees"
+    assumption_text: "Measured as expenditure per person-day."
+
+  - condition: "wage_share_formula_unspecified"
+    default_value: "unskilled_over_total"
+    assumption_text: "Wage share is unskilled wages over total expenditure, the statutory 60:40 formula."
+
+  - condition: "cross_measure_request"
+    default_value: "v_district_year_summary"
+    assumption_text: "Expenditure and employment are combined at district and year level."
+
+  - condition: "women_count_requested"
+    default_value: "recorded_count_only"
+    assumption_text: "Showing the recorded count only; the column's definition is unconfirmed, so no share is derived from it."
+
+  # ---- units ------------------------------------------------------------
+  - condition: "expenditure_unit_unspecified"
+    default_value: "crore"
+    assumption_text: "Amounts are in crore rupees."
+
+  - condition: "expenditure_below_one_crore"
+    default_value: "lakh"
+    assumption_text: "Amounts are in lakh rupees, as the figures are below one crore."
+
+  - condition: "percentage_precision_unspecified"
+    default_value: 2
+    assumption_text: "Percentages are rounded to two decimal places."
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_function"
+    default_value: "SUM"
+    assumption_text: "Figures are summed across the selected period."
+
+  - condition: "village_count_requested"
+    default_value: "count_distinct_village_code"
+    assumption_text: "Villages are counted by village code, since one village can hold more than one record."
+
+  - condition: "missing_top_n"
+    default_value: 5
+    assumption_text: "Showing the top 5."
+
+  - condition: "singular_superlative_without_n"
+    default_value: 1
+    assumption_text: "Showing the single highest."
+
+  - condition: "ranking_direction_unspecified"
+    default_value: "descending"
+    assumption_text: "Ranked highest first."
+
+  - condition: "missing_sort_column"
+    default_value: "requested_metric"
+    assumption_text: "Sorted by {metric}."
+
+  - condition: "missing_result_limit"
+    default_value: 10
+    assumption_text: "Showing the first 10 rows."
+
+  - condition: "chart_type_unspecified"
+    default_value: "auto_by_result_shape"
+    assumption_text: "Chart type chosen to suit the shape of the result."
+
+  # ---- nulls and zeros --------------------------------------------------
+  - condition: "null_measure_values"
+    default_value: "exclude_from_average"
+    assumption_text: "Records with no value recorded are left out of the average rather than counted as zero."
+
+  - condition: "zero_measure_values"
+    default_value: "include"
+    assumption_text: "Recorded zeros are genuine and are included in the figures."

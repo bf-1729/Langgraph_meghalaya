@@ -1,0 +1,510 @@
+# focusplus_foreign_key_augmentation.yaml
+#
+# Join edges and the materialised join graph for Focus Plus - node 5.9.
+#
+#   nodes       what each object is, its grain, and whether it may be aggregated
+#   edges       every join, with the exact ON clause the generator must emit
+#   join_graph  adjacency list, listed from the many side, traversed undirected
+#
+# declared: true       the edge is a real constraint in information_schema
+# declared: inferred   the edge is read off column naming - see the warning below
+# declared: false      the edge exists only here
+# is_prohibited: true  the generator must refuse this join and use `use_instead`
+#
+# ===========================================================================
+# v1.0 - 2026-09-03 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Plus was loaded straight into curated on 2026-09-02, so there is no
+# flat-table ancestor, no embedded-dimension fiction to retire, and no
+# retired_edges section - nothing here replaces an earlier edge.
+#
+# *** NOT ONE FOREIGN KEY IN THIS FILE IS A VERIFIED CONSTRAINT. ***
+# The 2026-09-02 extract carries STRUCTURE ONLY - schema, table, ordinal,
+# column, type, length, nullability, default. It carries no PK, no FK, no
+# index and no check constraint. PMAY's five edges are marked declared: true
+# because they were carried forward from the 2026-08-24 extract, which did
+# hold constraint data. Focus Plus has no such prior extract, so every edge
+# below is `declared: inferred`, read off column naming alone. Confirm each
+# against information_schema before relying on one.
+#
+# TWO THINGS SET THIS SCHEME APART FROM PMAY:
+#
+#   1. QUERY THE VIEW, NOT THE FACT. PMAY's node notes say "reach for the
+#      fact when you need a column the view does not expose" - that does not
+#      apply here: v_focus_plus carries every fact column, including
+#      bank_name_raw, plus pre-joined year/geography, so the fact never has
+#      anything the view lacks.
+#
+#   2. THERE IS NO PRE-AGGREGATE. PMAY has v_pmay_monthly_sanctions and a
+#      prohibition against joining detail to its own rollup. Focus Plus has
+#      no monthly view and no summary object of any kind, so that edge simply
+#      does not exist. It also has no status dimension and no alias table.
+#
+# What Focus Plus shares with PMAY: the generator emits NO JOINS for ordinary
+# questions, because curated.v_focus_plus already pre-joins dim_year and
+# dim_geography. dim_scheme is the one thing it does not pre-join, and that is
+# read on its own rather than joined per row.
+#
+# Authority: SCHEMA_FOR_DEVELOPERS.md, rewritten 2026-09-02 from the live
+# five-schema information_schema extract.
+# ===========================================================================
+
+foreign_key_augmentation:
+
+  version: '1.0'
+  database: megh_db
+  schema: curated
+  read_role: megh_readonly
+  structure_verified: '2026-09-02'
+  primary_query_surface: curated.v_focus_plus
+  constraints_verified: false
+  constraints_note: >
+    Every key below is INFERRED FROM COLUMN NAMING. Run a pg_constraint query before
+    treating any of them as declared.
+
+  # =======================================================================
+  nodes:
+
+    curated.v_focus_plus:
+      role: fact_view
+      object_type: view
+      over: curated.fact_focus_plus_disbursement
+      primary_key: focus_plus_fact_id
+      natural_key: none
+      grain: one row per disbursement - one payment, to one member, in one tranche
+      column_count: 23
+      aggregate_before_reporting: false
+      unit: unverified
+      unit_authority: curated.dim_scheme.money_unit
+      person_level: true
+      row_count: unverified_in_db
+      note: >
+        THE DEFAULT AND ONLY FROM CLAUSE FOR EVERY FOCUS PLUS QUESTION. Pre-joins
+        dim_year and dim_geography, so the generator emits WHERE and GROUP BY only.
+        COUNT(*) is a PAYMENT count, not a person count - a legacy member appears on four
+        rows. There is NO placeholder predicate on this partition; do not carry PMAY's
+        WHERE NOT is_placeholder across, because the column does not exist and the query
+        will error. member_id is NULL on the whole legacy cohort, so it is not a key
+        either - focus_plus_fact_id is.
+
+    curated.fact_focus_plus_disbursement:
+      role: fact
+      object_type: table
+      primary_key: focus_plus_fact_id
+      primary_key_declared: false
+      natural_key: "(source_row_id, source_sl_no, tranche_label) - looks like one, no constraint shown"
+      grain: one disbursement - one payment, to one member, in one tranche
+      column_count: 22
+      aggregate_before_reporting: false
+      unit: unverified
+      person_level: true
+      row_count: unverified_in_db
+      query_directly: false
+      note:
+        critical: true
+        text: >
+          DO NOT QUERY THIS TABLE. This is the opposite of the advice PMAY's file gives
+          for fact_pmay_house: there, the fact has columns the view lacks; here,
+          curated.v_focus_plus carries everything the fact does, including
+          bank_name_raw, plus pre-joined year/geography, so the fact table adds
+          nothing. The only legitimate reason to name this table is lineage, and
+          lineage is a DBA task.
+
+    curated.dim_scheme:
+      role: dimension
+      object_type: table
+      primary_key: scheme_key
+      grain: one row per scheme
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      pre_joined_into_view: false
+      note: >
+        NOT PRE-JOINED. v_focus_plus does not expose scheme_key, so this is the one
+        dimension the generator may need to touch - and it is READ ON ITS OWN, never
+        joined per row. It is the authority on money_unit, which for Focus Plus is
+        UNVERIFIED and is the highest-priority unknown in the partition. Constant within
+        the Focus Plus partition, so never a grouping key for a Focus-Plus-only question.
+
+    curated.dim_year:
+      role: dimension
+      object_type: table
+      primary_key: year_key
+      row_count: 4
+      grain: one row per financial year
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      pre_joined_into_view: true
+      note: >
+        Covers FY 2022-23 to 2025-26. Focus Plus occupies only TWO of those four rows -
+        2022-23 and 2025-26 - so a year-over-year series is two points with a three-year
+        gap. fact.year_key is NULLABLE, making this an OUTER relationship in principle;
+        in practice both Focus Plus years fall inside the window, so an unresolved row
+        here is a LOAD DEFECT rather than the expected case it is for PMAY. Pre-joined
+        into v_focus_plus as financial_year and financial_year_short.
+        data_quality_note on this dimension is scheme-blind - do not surface MGNREGA's
+        notes on a Focus Plus answer.
+
+    curated.dim_geography:
+      role: dimension
+      object_type: table
+      primary_key: geography_key
+      natural_key: village_code
+      row_count: 7364
+      grain: one row per LGD village or ward
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      pre_joined_into_view: true
+      note: >
+        The conformed dimension all three schemes share, and the only reason cross-scheme
+        comparison is possible at all. NOT NULL on the fact side. District and block are
+        NAMES here, stored UPPERCASE, with no code column. Pre-joined into v_focus_plus,
+        which is also the ONLY view in megh_db exposing has_geo_conflict - use it, since
+        Focus Plus has no mapping_category and no mapping_confidence_pct.
+
+    curated.dim_pmay_house_status:
+      role: dimension
+      object_type: table
+      primary_key: status_key
+      scheme_scoped: pmay
+      reachable_from_focus_plus: false
+      note: >
+        PMAY ONLY. fact_focus_plus_disbursement has no status_key and there is no
+        dim_focus_plus_status. focus_status and verification_status are uncontrolled
+        varchars on the fact, with no roll-up flag corresponding to is_completed. Listed
+        here so the prohibited edge below has a node to point at.
+
+    curated.dim_geography_alias:
+      role: dimension
+      object_type: table
+      primary_key: alias_key
+      row_count: 18959
+      scheme_scoped: mgnrega
+      reachable_from_focus_plus: false
+      note: >
+        MGNREGA ONLY. fact_focus_plus_disbursement has no alias_key - Focus Plus resolved
+        its geography at ingest and carries village_code denormalised. Listed here so the
+        prohibited edge below has a node to point at.
+
+    curated.v_cross_scheme_money_district_year:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per scheme x district x financial year
+      unit: crore_rupees
+      aggregate_before_reporting: false
+      focus_plus_presence: UNCONFIRMED
+      note: >
+        The sanctioned way to compare scheme spending, and the only one. READ ALONE,
+        NEVER JOINED. Whether Focus Plus appears in it is NOT KNOWABLE FROM STRUCTURE -
+        scheme_code is a text column. Run SELECT DISTINCT scheme_code first, and say so
+        if Focus Plus is absent rather than answering for two schemes and calling it
+        three. Carry measure_semantics into every answer: the amounts mean money
+        disbursed to individuals, money released against sanctions, and expenditure
+        incurred - three different things.
+
+    curated.v_cross_scheme_village_coverage:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per village
+      column_count: 4
+      focus_plus_presence: ABSENT
+      note: >
+        HAS NO FOCUS PLUS COLUMN. Its four columns are village_code, lgd_district,
+        pmay_houses and mgnrega_person_days. A Focus Plus coverage question cannot be
+        answered by reading it. The supported workaround is to aggregate v_focus_plus to
+        village_code first and FULL JOIN that aggregate on - see the edges below. Adding
+        a focus_plus_disbursements column is an open roadmap item.
+
+    curated.fact_pmay_house:
+      role: fact
+      object_type: table
+      grain: one row per sanctioned PMAY-G house
+      reachable_from_focus_plus: false
+      note: A different scheme at a different grain. See the prohibited edges.
+
+    curated.fact_mgnrega_employment:
+      role: fact
+      object_type: table
+      row_count: 26375
+      grain: one row per source row of the employment workbook
+      reachable_from_focus_plus: false
+      note: A different scheme at a different grain. See the prohibited edges.
+
+    curated.fact_mgnrega_expenditure:
+      role: fact
+      object_type: table
+      row_count: 18818
+      grain: one row per source row of the expenditure workbook
+      unit: lakh_rupees
+      reachable_from_focus_plus: false
+      note: A different scheme, a different grain AND a different money unit.
+
+    raw.source_rows:
+      role: lineage
+      object_type: table
+      primary_key: raw_id
+      readable_by_read_role: false
+      note: >
+        Outside the megh_readonly boundary. The generator must never emit a join to it.
+        Lineage is a DBA task.
+
+  # =======================================================================
+  edges:
+
+    # ---- INFERRED FOREIGN KEYS ------------------------------------------
+    # All four are read off column naming. NONE is a verified constraint -
+    # the 2026-09-02 extract carries no constraint data at all. All are
+    # already resolved inside curated.v_focus_plus except dim_scheme, so the
+    # generator should emit them ONLY when querying the fact directly, which
+    # it should not be doing (see the node note).
+
+    - from_table: curated.fact_focus_plus_disbursement
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: inferred
+      nullable: false
+      join_type: INNER
+      on_clause: "curated.fact_focus_plus_disbursement.geography_key = curated.dim_geography.geography_key"
+      prefer_instead: curated.v_focus_plus
+      reason: >
+        The conformed geography join and the backbone of Focus Plus geography. NOT NULL
+        on the fact side, so an inner join loses nothing - but note that 26.7% of SOURCE
+        rows carried no village code while this column is NOT NULL, so how those rows
+        resolved at ingest is UNKNOWN. Establish that before publishing any village- or
+        block-level figure. v_focus_plus already carries village_code, lgd_village_name,
+        lgd_block, lgd_district, on_roster, has_geo_conflict and entity_type.
+
+    - from_table: curated.fact_focus_plus_disbursement
+      from_column: year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: inferred
+      nullable: true
+      join_type: LEFT
+      on_clause: "curated.fact_focus_plus_disbursement.year_key = curated.dim_year.year_key"
+      prefer_instead: curated.v_focus_plus
+      reason: >
+        NULLABLE ON THE FACT SIDE, so an INNER join would silently delete unresolved rows.
+        Use LEFT. The difference from PMAY is that here the null bucket should be EMPTY -
+        both Focus Plus financial years fall inside dim_year's window - so a non-zero
+        count is a load defect to investigate rather than a caveat to footnote.
+
+    - from_table: curated.fact_focus_plus_disbursement
+      from_column: scheme_key
+      to_table: curated.dim_scheme
+      to_column: scheme_key
+      cardinality: many_to_one
+      declared: inferred
+      nullable: false
+      join_type: INNER
+      on_clause: "curated.fact_focus_plus_disbursement.scheme_key = curated.dim_scheme.scheme_key"
+      prefer_instead: read curated.dim_scheme on its own
+      reason: >
+        Constant within the Focus Plus partition, so joining it per row buys nothing.
+        v_focus_plus does not expose scheme_key at all, which makes reading dim_scheme
+        separately the only available route as well as the right one. Do this whenever
+        the answer carries a money figure - money_unit for Focus Plus is UNVERIFIED.
+
+    - from_table: curated.fact_focus_plus_disbursement
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: inferred
+      nullable: true
+      traversable_by_read_role: false
+      on_clause: "curated.fact_focus_plus_disbursement.raw_id = raw.source_rows.raw_id"
+      reason: >
+        Unreachable in practice. `raw` is outside the megh_readonly boundary, so the
+        generator must never emit this join. For this scheme the raw payload also holds
+        beneficiary_name, mobile_number and epic_id - columns deliberately dropped at
+        ingest - so reaching it would recover exactly the identifiers the curated layer
+        was built to shed.
+
+    # ---- THE JOINS THAT MUST NEVER BE MADE -------------------------------
+    # Rule 6 of SCHEMA_FOR_DEVELOPERS.md: there are four facts and all six
+    # pairs are prohibited. Three of those six involve Focus Plus.
+
+    - from_table: curated.v_focus_plus
+      from_column: [village_code, year_key]
+      to_table: curated.fact_pmay_house
+      to_column: [village_code, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_village_coverage
+      on_clause: null
+      reason: >
+        CROSS-SCHEME ROW-LEVEL JOIN. One row per PAYMENT against one row per HOUSE - two
+        different grains, so the join multiplies both sides. No foreign key exists between
+        them and none will. The columns are the most seductive case in the database
+        because both facts genuinely carry village_code and year_key, so the join will
+        RUN and return a plausible-looking inflated number. Aggregate each side to
+        village_code first, or use the coverage view - though note it has no Focus Plus
+        column yet, so the aggregate-then-join pattern below is the real answer.
+
+    - from_table: curated.v_focus_plus
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_employment
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_village_coverage
+      on_clause: null
+      reason: >
+        Payment grain against source-row grain. Note the columns do not even mean the
+        same thing: Focus Plus carries village_code, an LGD code, while the MGNREGA facts
+        key on geography_key, an unstable surrogate that is not comparable across a
+        reload. Use the coverage view, which aggregates each side independently.
+
+    - from_table: curated.v_focus_plus
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_expenditure
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_money_district_year
+      on_clause: null
+      reason: >
+        Same grain mismatch, plus a unit mismatch that is worse than PMAY's. MGNREGA
+        expenditure is LAKH; Focus Plus amount_disbursed is UNVERIFIED. Adding a known
+        unit to an unknown one produces a number with no meaning at all. The cross-scheme
+        money view normalises to CRORE and carries measure_semantics - but confirm Focus
+        Plus is actually in it first.
+
+    - from_table: curated.v_focus_plus
+      from_column: geography_key
+      to_table: curated.dim_geography_alias
+      to_column: geography_key
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.dim_geography
+      on_clause: null
+      reason: >
+        FOCUS PLUS HAS NO alias_key. The alias table holds MGNREGA source spellings only
+        and it fans out - 18,959 aliases over 7,364 villages - so joining it multiplies
+        Focus Plus rows by the alias count. Focus Plus geography was resolved at ingest
+        and the names on v_focus_plus are already canonical. For name lookup go to
+        dim_geography directly.
+
+    - from_table: curated.v_focus_plus
+      from_column: none
+      to_table: curated.dim_pmay_house_status
+      to_column: status_key
+      cardinality: none
+      declared: false
+      is_prohibited: true
+      use_instead: focus_status and verification_status on curated.v_focus_plus
+      on_clause: null
+      reason: >
+        THERE IS NO JOIN COLUMN. fact_focus_plus_disbursement has no status_key, and that
+        dimension is PMAY-only. This edge is listed because the vocabulary tempts it -
+        both schemes have a "status", and PMAY's is a dimension with precomputed
+        is_completed / is_in_progress roll-ups. Focus Plus has two free varchars and no
+        roll-up. Enumerate them with SELECT DISTINCT; never borrow PMAY's status values.
+
+    - from_table: curated.v_focus_plus
+      from_column: member_id
+      to_table: curated.v_focus_plus
+      to_column: member_id
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: GROUP BY member_id on a single scan
+      on_clause: null
+      reason: >
+        SELF-JOIN ON A PERSON IDENTIFIER. Two distinct problems. First it fans out: the
+        legacy cohort has four rows per member, so a self-join squares that within each
+        member. Second and worse, member_id is PII on the only person-level fact in
+        megh_db, and a self-join is how a "find members who appear more than once" or
+        "Member-360" query gets built - both of which rule 7 forbids. Duplicate and
+        repeat-payment questions are answered with GROUP BY and HAVING on one scan, and
+        the answer reports the shape of the pattern, never the people in it.
+
+    - from_table: curated.v_focus_plus
+      from_column: village_code
+      to_table: curated.v_cross_scheme_village_coverage
+      to_column: village_code
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: aggregate v_focus_plus to village_code first, then FULL JOIN the aggregate
+      on_clause: null
+      reason: >
+        Joining the payment detail directly to a per-village rollup repeats every village
+        figure once per payment and inflates any SUM by that village's payment count. The
+        coverage view is already aggregated. The supported pattern is:
+          WITH fp AS (SELECT village_code, COUNT(*) AS focus_plus_payments
+                      FROM curated.v_focus_plus GROUP BY village_code)
+          SELECT ... FROM curated.v_cross_scheme_village_coverage c
+          FULL JOIN fp USING (village_code);
+        This is the Focus Plus analogue of PMAY's detail-to-monthly-rollup prohibition.
+        Focus Plus has no pre-aggregate of its own, so this is the only rollup it can
+        wrongly join to.
+
+  # =======================================================================
+  # OBJECTS PMAY HAS AND FOCUS PLUS DOES NOT
+  # Listed so their absence is a recorded fact rather than an oversight.
+  # =======================================================================
+  absent_objects:
+
+  - object: a scheme pre-aggregate
+    pmay_equivalent: curated.v_pmay_monthly_sanctions
+    consequence: >
+      No monthly or summary view exists for Focus Plus, so PMAY's detail-to-rollup
+      prohibition has no direct counterpart. The nearest risk is the cross-scheme village
+      coverage view, which is covered by its own prohibited edge above.
+
+  - object: a status dimension
+    pmay_equivalent: curated.dim_pmay_house_status
+    consequence: >
+      No status_key, no join, and no precomputed roll-up flags. Status is two free
+      varchars on the fact.
+
+  - object: an alias table edge
+    pmay_equivalent: none - PMAY has no alias_key either
+    consequence: >
+      Both newer facts resolve geography at ingest. Only the two MGNREGA facts carry
+      alias_key.
+
+  - object: a date column
+    pmay_equivalent: fact_pmay_house.sanction_date
+    consequence: >
+      No time join finer than the financial year is possible. batch_label and
+      tranche_label are labels, not time, and must never be ordered as a series.
+
+  # =======================================================================
+  join_graph:
+
+    # v_focus_plus pre-joins dim_year and dim_geography, so ordinary questions
+    # emit WHERE and GROUP BY only. dim_scheme is read separately, not joined.
+    curated.v_focus_plus: []
+
+    # the raw fact is the only Focus Plus node with outbound edges, and the
+    # generator should not be querying it - see the node note.
+    curated.fact_focus_plus_disbursement:
+    - {to: curated.dim_geography, on: geography_key, join_type: INNER, declared: inferred}
+    - {to: curated.dim_year,      on: year_key,      join_type: LEFT,  declared: inferred}
+    - {to: curated.dim_scheme,    on: scheme_key,    join_type: INNER, declared: inferred}
+
+    # dimensions are terminal
+    curated.dim_geography: []
+    curated.dim_year: []
+    curated.dim_scheme: []
+
+    # cross-scheme views are read alone, never joined to the detail
+    curated.v_cross_scheme_money_district_year: []
+    curated.v_cross_scheme_village_coverage: []
+
+    # reachable in megh_db but closed to this scheme - see the prohibited edges
+    curated.dim_pmay_house_status: []
+    curated.dim_geography_alias: []
+    curated.fact_pmay_house: []
+    curated.fact_mgnrega_employment: []
+    curated.fact_mgnrega_expenditure: []
+    raw.source_rows: []

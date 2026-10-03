@@ -1,0 +1,1104 @@
+# focuslegacy_foreign_key_augmentation.yaml
+#
+# Join edges and the materialised join graph for Focus Legacy - node 5.9.
+#
+#   nodes                what each object is, its grain, and whether it may be aggregated
+#   edges                every join, with the exact ON clause the generator must emit
+#   absent_edges         joins a generator will expect and that do not exist
+#   sanctioned_patterns  the joins that ARE allowed, written out in full
+#   join_graph           adjacency list, listed from the many side, traversed undirected
+#   prohibited_fact_pairs every fact-to-fact combination, all refused
+#
+# declared: true      the edge is a real constraint in information_schema
+# declared: false     the edge exists only here
+# is_prohibited: true the generator must refuse this join and use `use_instead`
+#
+# ===========================================================================
+# v1.0 - 2026-09-21 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Legacy was loaded straight into curated, so there is no flat-table
+# ancestor, no embedded-dimension fiction to retire and no retired_edges section.
+# Every edge below is read from the live information_schema extract of
+# 2026-09-21 - unlike Focus Plus, whose FK markings are all inferred.
+#
+# THREE THINGS MAKE THIS GRAPH DIFFERENT FROM PMAY'S:
+#
+#   1. IT IS THE ONLY SNOWFLAKE IN megh_db. PMAY, Focus Plus and CM Elevate are
+#      flat stars - fact joins dimension, dimension is terminal. Here
+#      dim_producer_group is itself a fact-like node with FOUR outbound foreign
+#      keys of its own, to dim_pg_entity_type, dim_geography and dim_year twice.
+#      The generator must not assume dimensions are terminal in this partition.
+#
+#   2. ELEVEN DECLARED FOREIGN KEYS, NOT FIVE. Five on the fact, five on
+#      dim_producer_group, one on bridge_pg_bank_history - plus three more on
+#      bridge_geography_source, which is shared. All real constraints.
+#
+#   3. ONE EDGE CARRIES A PREDICATE, NOT JUST A KEY. The view's join to
+#      bridge_pg_bank_history is a three-part LEFT JOIN that includes
+#      `AND bh.is_current`. That predicate is what makes bank_details_current
+#      TRUE-or-NULL rather than TRUE-or-FALSE. Reproducing the join without it
+#      changes the answer.
+#
+# AND ONE THING THAT IS A PRIVACY BOUNDARY, NOT A PREFERENCE: two nodes in this
+# graph hold unmasked account numbers - curated.fact_focus_legacy_disbursement
+# and curated.bridge_pg_bank_history. The generator must never traverse to
+# either. That is stricter than PMAY, where the fact is merely inconvenient.
+#
+# Structure is from the live extract and is trustworthy. Every ROW COUNT and
+# distribution quoted in a reason is a source-workbook observation (2026-09-21)
+# and is not re-verified against megh_db.
+# ===========================================================================
+
+foreign_key_augmentation:
+
+  version: '1.0'
+  database: megh_db
+  schema: curated
+  read_role: megh_readonly
+  structure_verified: '2026-09-21'
+  primary_query_surface: curated.v_focus_legacy
+  declared_edge_count: 11
+  prohibited_edge_count: 16
+
+  # =======================================================================
+  nodes:
+
+    curated.v_focus_legacy:
+      role: fact_view
+      object_type: view
+      over: curated.fact_focus_legacy_disbursement
+      primary_key: focus_legacy_fact_id
+      natural_key: source_row_id
+      grain: one row per payment to one producer group
+      column_count: 28
+      aggregate_before_reporting: false
+      unit: unverified
+      approx_row_count_db: 14566
+      note: >
+        THE DEFAULT FROM CLAUSE FOR EVERY FOCUS LEGACY QUESTION. Pre-joins
+        dim_producer_group, dim_pg_entity_type, dim_geography, dim_year and
+        bridge_pg_bank_history, so the generator emits WHERE and GROUP BY only. COUNT(*)
+        is a PAYMENT count, not a group count - groups can be paid up to three times.
+        There is NO always-on predicate: PMAY's WHERE NOT is_placeholder has no
+        counterpart here and emitting it errors.
+
+    curated.fact_focus_legacy_disbursement:
+      role: fact
+      object_type: table
+      primary_key: focus_legacy_fact_id
+      natural_key: source_row_id
+      grain: one row per payment to one producer group
+      column_count: 22
+      aggregate_before_reporting: false
+      unit: unverified
+      approx_row_count_db: 14566
+      contains_pii: true
+      never_traverse: true
+      note:
+        critical: true
+        text: >
+          NEVER QUERIED AND NEVER JOINED TO. It carries account_no unmasked and
+          name_on_the_account, which the view masks and drops respectively. Unlike PMAY -
+          where reaching for the fact is merely a missed optimisation - reaching for this
+          fact is a privacy-boundary violation. There is no column on it worth the
+          breach: the view exposes everything except the audit trail and the two PII
+          columns.
+
+    curated.dim_producer_group:
+      role: dimension
+      object_type: table
+      primary_key: producer_group_key
+      natural_key: pg_id
+      approx_row_count_db: 11904
+      grain: one row per producer group
+      scheme_scoped: true
+      safe_to_aggregate: false
+      terminal: false
+      note:
+        critical: true
+        text: >
+          THE SNOWFLAKE NODE, AND THE ONLY ONE IN megh_db. It is a dimension of the fact
+          AND a fact-like node with four outbound foreign keys of its own -
+          pg_entity_type_key, geography_key, first_payment_year_key and
+          last_payment_year_key. A generator that has learned "dimensions are terminal"
+          from the PMAY graph will be wrong here.
+          Pre-joined into v_focus_legacy for pg_id and current_name only. Its
+          first_payment_year_key and last_payment_year_key are NOT exposed by the view
+          and are the one routine reason to join it explicitly.
+
+    curated.dim_pg_entity_type:
+      role: dimension
+      object_type: table
+      primary_key: pg_entity_type_key
+      row_count: 3
+      grain: one row per producer-group entity type
+      scheme_scoped: true
+      safe_to_aggregate: false
+      reached_via: curated.dim_producer_group
+      note: >
+        A SECOND-LEVEL DIMENSION - it hangs off dim_producer_group, not off the fact.
+        Pre-joined into v_focus_legacy as pg_entity_type and pg_entity_type_name, so the
+        two-hop path is already resolved for ordinary questions. Its three type_code
+        values are NOT known to the annotation layer; enumerate before filtering.
+
+    curated.bridge_pg_bank_history:
+      role: bridge
+      object_type: table
+      primary_key: bridge_id
+      approx_row_count_db: 12449
+      grain: one row per (producer group, account, bank, IFSC) combination
+      safe_to_aggregate: false
+      contains_pii: true
+      never_traverse: true
+      note:
+        critical: true
+        text: >
+          NEVER QUERIED DIRECTLY - account_no is unmasked here. The view already joins it
+          for exactly one column, bank_details_current, and does so with the is_current
+          predicate inside the ON clause. Joining it yourself both breaches the PII
+          boundary and fans out: 12,449 rows over 11,904 groups, so a group that changed
+          bank multiplies its payments.
+
+    curated.dim_geography:
+      role: dimension
+      object_type: table
+      primary_key: geography_key
+      natural_key: village_code
+      approx_row_count_db: 7377
+      grain: one row per LGD village, ward or Unresolved placeholder
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        The conformed dimension, keyed on the national LGD village code, and what makes
+        any cross-scheme comparison possible. Pre-joined into v_focus_legacy. District
+        and block are NAMES here with no code column. It also carries ac_number and
+        ac_name, which the view does NOT expose - that gap is the one documented reason
+        to re-join a dimension the view already joined. See sanctioned_patterns.
+
+    curated.dim_year:
+      role: dimension
+      object_type: table
+      primary_key: year_key
+      row_count: 9
+      grain: one row per financial year
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        Reached from the fact once and from dim_producer_group TWICE - first and last
+        payment year. Focus Legacy occupies 4 of the 9 rows; FY2023-24 exists in the
+        dimension and holds no payments. The fact's year_key is nullable in the DDL, so
+        the view LEFT-joins it, but every source row carries a financial year - a NULL
+        here is a load defect rather than an expected case.
+
+    curated.dim_scheme:
+      role: dimension
+      object_type: table
+      primary_key: scheme_key
+      row_count: 5
+      grain: one row per scheme
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        Authority on money_unit and time_semantics, and the ONLY authority for this
+        scheme - the fact's own comment does not state a unit, unlike PMAY's. Constant
+        within the partition, so never a grouping key for a Focus Legacy-only question
+        and never worth joining per row. Read it on its own.
+
+    curated.bridge_geography_source:
+      role: bridge
+      object_type: table
+      primary_key: [geography_key, source_system]
+      approx_row_count_db: 29065
+      grain: one row per (village, source system)
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        The join-free route to "villages in Focus Legacy but not scheme X". Read it with
+        dim_geography; never join it to v_focus_legacy for a per-payment answer. Whether
+        it holds focus_legacy rows at all is UNVERIFIED - run
+        SELECT DISTINCT source_system first.
+
+    curated.dim_geography_alias:
+      role: dimension
+      object_type: table
+      approx_row_count_db: 34450
+      grain: one row per source spelling of a village
+      reachable: true
+      used_by_focus_legacy: false
+      note: >
+        REACHABLE BUT NOT PART OF THIS GRAPH. fact_focus_legacy_disbursement has NO
+        alias_key - geography was resolved at ingest, as it was for PMAY, Focus Plus and
+        CM Elevate. Only the two MGNREGA facts reference this table. It fans out badly -
+        34,450 aliases over 7,377 villages - so joining it multiplies Focus Legacy rows.
+
+    curated.fact_pmay_house:
+      role: fact
+      object_type: table
+      grain: one row per sanctioned house
+      aggregate_before_reporting: false
+      unit: rupees
+      note: PMAY partition. Declared here only as the far end of a prohibited edge.
+
+    curated.fact_focus_plus_disbursement:
+      role: fact
+      object_type: table
+      grain: one row per beneficiary x tranche payment
+      aggregate_before_reporting: false
+      unit: unverified
+      note: >
+        Focus Plus partition. Declared here only as the far end of a prohibited edge -
+        and it is the most tempting one, because the two schemes share a name. They share
+        NO KEY: Focus Plus holds no producer-group column at all.
+
+    curated.fact_cm_elevate_application:
+      role: fact
+      object_type: table
+      grain: one row per application
+      aggregate_before_reporting: false
+      note: CM Elevate partition. Declared here only as the far end of a prohibited edge.
+
+    curated.fact_mgnrega_employment:
+      role: fact
+      object_type: table
+      grain: one row per source row of the employment workbook
+      aggregate_before_reporting: true
+      note: MGNREGA partition. Declared here only as the far end of a prohibited edge.
+
+    curated.fact_mgnrega_expenditure:
+      role: fact
+      object_type: table
+      grain: one row per source row of the expenditure workbook
+      aggregate_before_reporting: true
+      unit: lakh_rupees
+      note: >
+        MGNREGA partition, and in a different money unit again - lakh, against PMAY's
+        rupees, the cross-scheme views' crore and this scheme's unverified unit.
+
+    curated.v_cross_scheme_money_district_year:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per scheme x district x financial year
+      unit: crore_rupees
+      includes_focus_legacy: false
+      note: >
+        FOCUS LEGACY IS NOT IN IT - verified from the view definition, which unions
+        MGNREGA expenditure and PMAY amount_released and nothing else. Filtering it by a
+        Focus Legacy scheme code returns zero rows, which reads as "no money" rather than
+        "not modelled".
+
+    curated.v_cross_scheme_village_coverage:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per village
+      includes_focus_legacy: false
+      note: >
+        FOCUS LEGACY IS NOT IN IT EITHER - it has exactly two measures, pmay_houses and
+        mgnrega_person_days. It can still be USED, by aggregating Focus Legacy to
+        village_code first and joining the aggregate on. See sanctioned_patterns.
+
+    curated.v_pmay_monthly_sanctions:
+      role: pre_aggregate
+      object_type: view
+      grain: one row per sanction month, statewide
+      unit: crore_rupees
+      belongs_to: PMAY
+      note: >
+        Another scheme's pre-aggregate. Focus Legacy has no equivalent object - see
+        absent_edges. Never joined to anything here.
+
+    meta.v_reconciliation_focus_legacy:
+      role: control
+      object_type: view
+      grain: one row, the whole scheme
+      note: >
+        raw_rows = curated_rows + quarantined, exactly. Read before publishing a total.
+        Not a join target - it has no key in common with anything.
+
+    staging.quarantine:
+      role: control
+      object_type: table
+      readable_by_read_role: false
+      note: >
+        Holds the 3 held-back Focus Legacy rows with their reason codes. `staging` is
+        outside the megh_readonly boundary, so the application may not be able to read it.
+
+    raw.source_rows:
+      role: lineage
+      object_type: table
+      primary_key: raw_id
+      readable_by_read_role: false
+      note: >
+        Both fact_focus_legacy_disbursement.raw_id and dim_producer_group.raw_id are real
+        declared FKs to this table, but `raw` is outside the megh_readonly boundary. The
+        edges exist and the application cannot traverse them. Lineage is a DBA task.
+
+  # =======================================================================
+  edges:
+
+    # ---- REAL DECLARED FOREIGN KEYS ON THE FACT -------------------------
+    # Five constraints in information_schema as of 2026-09-21. All five are
+    # already resolved inside curated.v_focus_legacy - and the fact must not be
+    # queried anyway, so these are documentation, not instructions.
+
+    - from_table: curated.fact_focus_legacy_disbursement
+      from_column: producer_group_key
+      to_table: curated.dim_producer_group
+      to_column: producer_group_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      constraint: fact_focus_legacy_disbursement_producer_group_key_fkey
+      on_clause: "curated.fact_focus_legacy_disbursement.producer_group_key = curated.dim_producer_group.producer_group_key"
+      prefer_instead: curated.v_focus_legacy
+      reason: >
+        The edge that makes this partition group-grained. NOT NULL on the fact side, so
+        an inner join loses nothing. v_focus_legacy already carries pg_id, pg_name and
+        both entity-type columns through it.
+
+    - from_table: curated.fact_focus_legacy_disbursement
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      constraint: fact_focus_legacy_disbursement_geography_key_fkey
+      on_clause: "curated.fact_focus_legacy_disbursement.geography_key = curated.dim_geography.geography_key"
+      prefer_instead: curated.v_focus_legacy
+      reason: >
+        The conformed geography join. NOT NULL, so every payment has a geography key -
+        but about 1,101 of them point at an Unresolved placeholder rather than a real
+        village. The join never loses a row; the DATA is what needs filtering, with
+        entity_type <> 'Unresolved' on village answers only.
+
+    - from_table: curated.fact_focus_legacy_disbursement
+      from_column: year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      join_type: LEFT
+      constraint: fact_focus_legacy_disbursement_year_key_fkey
+      on_clause: "curated.fact_focus_legacy_disbursement.year_key = curated.dim_year.year_key"
+      prefer_instead: curated.v_focus_legacy
+      reason: >
+        Nullable in the DDL, which is why the view LEFT-joins it - but every source row
+        carries a financial year and all four values exist in dim_year, so in practice
+        nothing is unresolved. A NULL here is a load defect worth reporting, not an
+        expected case. This is the opposite of PMAY, where the same nullable edge hides a
+        third of the scheme.
+
+    - from_table: curated.fact_focus_legacy_disbursement
+      from_column: scheme_key
+      to_table: curated.dim_scheme
+      to_column: scheme_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      constraint: fact_focus_legacy_disbursement_scheme_key_fkey
+      on_clause: "curated.fact_focus_legacy_disbursement.scheme_key = curated.dim_scheme.scheme_key"
+      prefer_instead: read curated.dim_scheme on its own
+      reason: >
+        Constant within the partition, so joining it per row buys nothing. Read dim_scheme
+        separately - and for this scheme you MUST, because money_unit is the only
+        authority on the unit and the fact's own comment does not state one.
+
+    - from_table: curated.fact_focus_legacy_disbursement
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      traversable_by_read_role: false
+      constraint: fact_focus_legacy_disbursement_raw_id_fkey
+      on_clause: "curated.fact_focus_legacy_disbursement.raw_id = raw.source_rows.raw_id"
+      reason: >
+        Real constraint, unreachable in practice. `raw` is outside the megh_readonly
+        boundary, so the generator must never emit this join.
+
+    # ---- REAL DECLARED FOREIGN KEYS ON THE DIMENSION --------------------
+    # The snowflake. dim_producer_group has FOUR outbound keys plus a lineage
+    # key - no other dimension in megh_db has any.
+
+    - from_table: curated.dim_producer_group
+      from_column: pg_entity_type_key
+      to_table: curated.dim_pg_entity_type
+      to_column: pg_entity_type_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      constraint: dim_producer_group_pg_entity_type_key_fkey
+      on_clause: "curated.dim_producer_group.pg_entity_type_key = curated.dim_pg_entity_type.pg_entity_type_key"
+      prefer_instead: curated.v_focus_legacy
+      reason: >
+        The second hop of the snowflake. The view resolves the whole two-hop path -
+        fact -> dim_producer_group -> dim_pg_entity_type - into pg_entity_type and
+        pg_entity_type_name, so an ordinary question never emits either join.
+
+    - from_table: curated.dim_producer_group
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      constraint: dim_producer_group_geography_key_fkey
+      on_clause: "curated.dim_producer_group.geography_key = curated.dim_geography.geography_key"
+      reason: >
+        A SECOND PATH TO GEOGRAPHY, and a trap. The fact reaches dim_geography directly,
+        and the group reaches it again. Geography is stable per group - zero groups map to
+        more than one village in the source - so the two paths agree today. Do NOT join
+        both: it is a diamond, and a generator that traverses fact -> group -> geography
+        AND fact -> geography produces a self-join on the dimension. v_focus_legacy uses
+        the FACT's path. Use that one.
+
+    - from_table: curated.dim_producer_group
+      from_column: first_payment_year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      join_type: LEFT
+      constraint: dim_producer_group_first_payment_year_key_fkey
+      on_clause: "curated.dim_producer_group.first_payment_year_key = curated.dim_year.year_key"
+      reason: >
+        Not exposed by the view. This is the cheap route to "groups new this year" and
+        "groups paid in more than one year" without aggregating the fact. Nullable, and
+        whether the loader populated it is UNVERIFIED - guard for NULL before relying on
+        it. See sanctioned_patterns.group_history.
+
+    - from_table: curated.dim_producer_group
+      from_column: last_payment_year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      join_type: LEFT
+      constraint: dim_producer_group_last_payment_year_key_fkey
+      on_clause: "curated.dim_producer_group.last_payment_year_key = curated.dim_year.year_key"
+      reason: >
+        The second of the two year keys on the dimension - dim_year is therefore reached
+        THREE times in this graph, once from the fact and twice from the group. Alias the
+        dimension explicitly whenever more than one of these is in play.
+
+    - from_table: curated.dim_producer_group
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      traversable_by_read_role: false
+      constraint: dim_producer_group_raw_id_fkey
+      on_clause: "curated.dim_producer_group.raw_id = raw.source_rows.raw_id"
+      reason: Real constraint, outside the read boundary. Never emitted.
+
+    # ---- THE DECLARED EDGE WITH A PREDICATE IN IT -----------------------
+
+    - from_table: curated.bridge_pg_bank_history
+      from_column: producer_group_key
+      to_table: curated.dim_producer_group
+      to_column: producer_group_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      constraint: bridge_pg_bank_history_producer_group_key_fkey
+      on_clause: "curated.bridge_pg_bank_history.producer_group_key = curated.dim_producer_group.producer_group_key"
+      traversable_by_generator: false
+      reason: >
+        Declared and real, but the generator must never traverse it - the bridge carries
+        unmasked account numbers. It is listed so the graph is complete, not so it can be
+        used.
+
+    - from_table: curated.v_focus_legacy
+      from_column: [producer_group_key, account_no, is_current]
+      to_table: curated.bridge_pg_bank_history
+      to_column: [producer_group_key, account_no, is_current]
+      cardinality: many_to_one
+      declared: false
+      performed_by_the_view: true
+      join_type: LEFT
+      on_clause: >
+        bh.producer_group_key = f.producer_group_key
+        AND bh.account_no = f.account_no
+        AND bh.is_current
+      reason:
+        critical: true
+        text: >
+          THE ONLY EDGE IN megh_db WITH A PREDICATE INSIDE THE ON CLAUSE, and the reason
+          bank_details_current is TRUE-or-NULL rather than TRUE-or-FALSE. Because
+          `AND bh.is_current` sits in the join rather than a WHERE, a payment to a
+          superseded account matches nothing and yields NULL. Reproducing this join
+          without the predicate would produce FALSE rows and change every
+          "paid to an old account" answer. The view has already done it - do not redo it,
+          and remember the join reads the UNMASKED account_no on both sides, which is
+          another reason the fact is out of bounds.
+
+    # ---- THE JOINS THAT MUST NEVER BE MADE ------------------------------
+
+    - from_table: any
+      from_column: any
+      to_table: curated.fact_focus_legacy_disbursement
+      to_column: any
+      cardinality: any
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_focus_legacy
+      on_clause: null
+      reason:
+        critical: true
+        text: >
+          PRIVACY BOUNDARY, NOT A PREFERENCE. The fact carries account_no unmasked and
+          name_on_the_account. Every column a question could legitimately need is on the
+          view. Reaching the fact through a join is the same breach as querying it
+          directly.
+
+    - from_table: any
+      from_column: any
+      to_table: curated.bridge_pg_bank_history
+      to_column: any
+      cardinality: any
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_focus_legacy.bank_details_current
+      on_clause: null
+      reason: >
+        Same privacy boundary, plus a fan-out: 12,449 bridge rows over 11,904 groups, so
+        a group that has banked at two accounts doubles its payments. The one column worth
+        having is already on the view.
+
+    - from_table: curated.v_focus_legacy
+      from_column: [village_code, year_key]
+      to_table: curated.fact_pmay_house
+      to_column: [village_code, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: sanctioned_patterns.cross_scheme_money
+      on_clause: null
+      reason: >
+        CROSS-SCHEME ROW-LEVEL JOIN. One row per PAYMENT against one row per HOUSE - the
+        join multiplies both sides, and there is no key between them beyond a shared
+        village. The units differ too: PMAY is rupees, this scheme's unit is unverified.
+        Aggregate each side independently first.
+
+    - from_table: curated.v_focus_legacy
+      from_column: [village_code, year_key]
+      to_table: curated.fact_focus_plus_disbursement
+      to_column: [village_code, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason:
+        critical: true
+        text: >
+          THE MOST TEMPTING PROHIBITED EDGE IN THE DATABASE, because the two schemes share
+          a name. They share NOTHING ELSE. Focus Plus is person-grained and holds no
+          producer-group column at all - its own annotation records that explicitly - so
+          there is no key to join on and no way to tell whether a Focus Plus beneficiary
+          belongs to a Focus Legacy group. Name similarity between a person and a group is
+          not a match. Report the two schemes separately.
+
+    - from_table: curated.v_focus_legacy
+      from_column: village_code
+      to_table: curated.fact_cm_elevate_application
+      to_column: village_code
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: sanctioned_patterns.cross_scheme_coverage
+      on_clause: null
+      reason: >
+        Payment grain against application grain. CM Elevate also has no time dimension at
+        all, so even a year-scoped join is impossible. Compare coverage by village
+        instead, with each side aggregated first.
+
+    - from_table: curated.v_focus_legacy
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_employment
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: sanctioned_patterns.cross_scheme_coverage
+      on_clause: null
+      reason: >
+        Payment grain against village-year source-row grain, and MGNREGA allows multiple
+        rows per village-year, so both sides fan out. The columns do not even mean the
+        same thing - village_code is an LGD code, geography_key is an unstable surrogate.
+
+    - from_table: curated.v_focus_legacy
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_expenditure
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: sanctioned_patterns.cross_scheme_money
+      on_clause: null
+      reason: >
+        Same grain mismatch, plus a unit mismatch: MGNREGA expenditure is LAKH and this
+        scheme's unit is unverified. Any combined figure would be both inflated and
+        meaningless.
+
+    - from_table: curated.v_focus_legacy
+      from_column: pg_id
+      to_table: curated.v_focus_legacy
+      to_column: pg_id
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: GROUP BY pg_id
+      on_clause: null
+      reason: >
+        Self-join on the group id. 2,647 groups hold two payments and 8 hold three, so
+        this squares those groups - a three-payment group becomes nine rows. Every
+        question it seems to answer is a GROUP BY pg_id with HAVING, or a window function.
+
+    - from_table: curated.v_focus_legacy
+      from_column: account_no_masked
+      to_table: curated.v_focus_legacy
+      to_column: account_no_masked
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: GROUP BY account_no_masked HAVING COUNT(DISTINCT pg_id) > 1
+      on_clause: null
+      reason: >
+        Self-join on the masked account. Masking is not collision-free - two different
+        accounts of the same length ending in the same four digits collapse to one string -
+        so the join creates false matches between unrelated groups. 250 accounts are
+        genuinely shared by more than one group in the source; finding them is an
+        aggregate, and the answer is a count, never a list of accounts.
+
+    - from_table: curated.v_focus_legacy
+      from_column: pg_name
+      to_table: curated.v_focus_legacy
+      to_column: pg_name
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: GROUP BY pg_id
+      on_clause: null
+      reason: >
+        Self-join on the group NAME. 11,906 groups carry 10,678 distinct names, so a name
+        join both merges unrelated groups and misses the 1,634 groups spelled more than
+        one way. Names are search terms, never keys.
+
+    - from_table: curated.v_focus_legacy
+      from_column: village_code
+      to_table: curated.dim_geography_alias
+      to_column: geography_key
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_focus_legacy
+      on_clause: null
+      reason: >
+        FOCUS LEGACY HAS NO alias_key. The alias table holds MGNREGA source spellings and
+        fans out - 34,450 aliases over 7,377 villages. Geography was resolved at ingest;
+        the names on the view are already canonical.
+
+    - from_table: curated.v_focus_legacy
+      from_column: any
+      to_table: curated.v_cross_scheme_money_district_year
+      to_column: any
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: sanctioned_patterns.cross_scheme_money
+      on_clause: null
+      reason: >
+        The view contains no Focus Legacy rows at all, so a join returns nothing and a
+        filter returns zero - which reads as "no money" rather than "not modelled". Build
+        the comparison by aggregating each scheme separately.
+
+    - from_table: curated.v_focus_legacy
+      from_column: village_code
+      to_table: curated.v_cross_scheme_village_coverage
+      to_column: village_code
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: sanctioned_patterns.cross_scheme_coverage
+      on_clause: null
+      reason: >
+        Prohibited AT ROW LEVEL only. The coverage view is one row per village; joining it
+        to unaggregated payments repeats each village's PMAY and MGNREGA figures once per
+        payment and inflates any SUM. Aggregate Focus Legacy to village_code FIRST, then
+        join the aggregate - that pattern is sanctioned.
+
+    - from_table: curated.v_focus_legacy
+      from_column: any
+      to_table: curated.v_pmay_monthly_sanctions
+      to_column: any
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        A different scheme's pre-aggregate, already in crore and already statewide. There
+        is nothing to join on and nothing to gain.
+
+    - from_table: curated.v_focus_legacy
+      from_column: any
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        The view does not expose raw_id, and `raw` is outside the read boundary. A lineage
+        request is answered by telling the user it is a DBA task.
+
+    - from_table: curated.dim_producer_group
+      from_column: producer_group_key
+      to_table: curated.v_focus_legacy
+      to_column: any
+      cardinality: one_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: query one or the other
+      on_clause: null
+      reason: >
+        Re-joining the group dimension to the view that already contains it. The view
+        carries pg_id and pg_name THROUGH this dimension, so the join is a self-join in
+        disguise: it repeats first_payment_year_key once per payment, and any aggregate
+        over those columns double-counts every group paid more than once. If the question
+        needs the first/last payment year, query dim_producer_group ALONE - see
+        sanctioned_patterns.group_history.
+
+  # =======================================================================
+  # EDGES A GENERATOR WILL EXPECT AND THAT DO NOT EXIST
+  # =======================================================================
+  absent_edges:
+
+  - expected_edge: fact_focus_legacy_disbursement.status_key -> a status dimension
+    status: column_does_not_exist
+    exists_for: [fact_pmay_house]
+    replacement: none
+    note:
+      critical: true
+      text: >
+        THERE IS NO STATUS DIMENSION AND NO STATUS COLUMN. Every row is a payment that
+        happened - there is no pending, approved, rejected or in-progress population, and
+        none can be constructed. Nothing here corresponds to dim_pmay_house_status,
+        is_completed or is_in_progress.
+
+  - expected_edge: fact_focus_legacy_disbursement.alias_key -> dim_geography_alias.alias_key
+    status: column_does_not_exist
+    exists_for: [fact_mgnrega_employment, fact_mgnrega_expenditure]
+    replacement: none needed - geography was resolved at ingest
+    note: >
+      The same absence as PMAY, Focus Plus and CM Elevate. The four newer facts carry a
+      denormalised village_code and never need the alias table.
+
+  - expected_edge: an is_placeholder or mapping_category column on the fact
+    status: column_does_not_exist
+    exists_for: [fact_pmay_house]
+    replacement: "entity_type <> 'Unresolved' on dim_geography, for village answers only"
+    note:
+      critical: true
+      text: >
+        Not a join edge, recorded here because it governs which predicates are valid.
+        There is NO always-on filter on this partition. Emitting PMAY's
+        WHERE NOT is_placeholder does not merely mislead - the column does not exist and
+        the query ERRORS. There is also no mapping_category and no mapping_confidence_pct;
+        has_geo_conflict is the only geographic quality signal.
+
+  - expected_edge: a constituency column on the fact
+    status: column_dropped_at_ingest
+    exists_for: [fact_mgnrega_employment]
+    replacement: curated.dim_geography.ac_number / ac_name, via geography_key
+    note: >
+      The source workbook carried mapped_constituency_name and
+      mapped_constituency_name_and_number; neither reached the fact. MGNREGA keeps its own
+      constituency columns on its fact, so a generator may expect one here. The roster's
+      AC is reachable by an explicit dimension join - see sanctioned_patterns.constituency -
+      but it is a different provenance and will not reconcile to the scheme total.
+
+  - expected_edge: curated.v_focus_legacy -> a monthly or financial-year pre-aggregate
+    status: object_does_not_exist
+    exists_for: [curated.v_pmay_monthly_sanctions]
+    replacement: GROUP BY date_of_remittance or financial_year_short on the view
+    note: >
+      Focus Legacy has a real date, so a monthly pre-aggregate is conceivable - but none
+      was built, and with only 30 payment dates across five years it would have little to
+      aggregate. Group the view directly, and label the result a batch view.
+
+  - expected_edge: curated.v_focus_legacy -> curated.v_cross_scheme_money_district_year
+    status: focus_legacy_absent_from_view
+    exists_for: [curated.v_pmay, curated.v_expenditure]
+    replacement: sanctioned_patterns.cross_scheme_money
+    note: >
+      The view is a two-branch UNION ALL over MGNREGA and PMAY. Focus Plus and CM Elevate
+      are absent too, so a cross-scheme money answer built from it covers two of the five
+      schemes in megh_db - say so.
+
+  - expected_edge: a Focus Legacy measure column on curated.v_cross_scheme_village_coverage
+    status: column_does_not_exist
+    exists_for: [pmay_houses, mgnrega_person_days]
+    replacement: sanctioned_patterns.cross_scheme_coverage
+    note: >
+      The view has exactly two measures. Focus Legacy must be aggregated to village_code
+      and joined on as a third.
+
+  - expected_edge: any key between Focus Legacy and Focus Plus
+    status: no_shared_key_exists
+    exists_for: []
+    replacement: none
+    note:
+      critical: true
+      text: >
+        There is no producer-group column in Focus Plus and no person column in Focus
+        Legacy. The two schemes overlap only in geography and in the word "Focus". This is
+        the absence most likely to be papered over with a name match - do not.
+
+  # =======================================================================
+  # THE PATTERNS THAT ARE ALLOWED
+  # Six patterns in this partition are sanctioned - two dimension joins, two
+  # read-alone queries and two cross-scheme aggregate-then-join shapes. All six
+  # are written out so the generator has a shape to copy rather than inventing one.
+  # =======================================================================
+  sanctioned_patterns:
+
+    constituency:
+      purpose: Answer an MLA or constituency question for Focus Legacy.
+      why_needed: >
+        The scheme's own constituency columns were dropped at ingest, and v_focus_legacy
+        does not expose ac_number or ac_name. The view DOES expose geography_key, so
+        re-joining dim_geography for those two columns is a dimension join on a declared
+        FK - not a fact-to-fact join and not prohibited.
+      sql: |
+        SELECT g.ac_number, g.ac_name,
+               COUNT(*)                AS payments,
+               SUM(f.amount_disbursed) AS amount_disbursed
+        FROM curated.v_focus_legacy f
+        JOIN curated.dim_geography g ON g.geography_key = f.geography_key
+        WHERE f.entity_type <> 'Unresolved'
+        GROUP BY g.ac_number, g.ac_name
+        ORDER BY amount_disbursed DESC;
+      rules:
+      - Select ONLY ac_number and ac_name from the re-joined dimension. Every other column it holds is already on the view, and taking it twice invites a mismatch.
+      - "Exclude entity_type = 'Unresolved' - a placeholder has no real village and therefore no meaningful constituency."
+      - State that the AC comes from the geography registry, not from the scheme's own record, and that the total will not reconcile to the scheme total.
+
+    money_unit:
+      purpose: Establish the unit before formatting any Focus Legacy money figure.
+      why_needed: >
+        The fact's table comment does not state a unit, unlike PMAY's. dim_scheme is the
+        only authority, and it is constant within the partition - so it is READ, not
+        joined per row.
+      sql: |
+        SELECT scheme_code, scheme_name, money_unit, time_semantics
+        FROM curated.dim_scheme
+        WHERE scheme_name ILIKE '%focus%legacy%';
+      rules:
+      - Read it alone. Never join dim_scheme to the view for a Focus Legacy-only question - it has one value and buys nothing.
+      - If it does not answer, say the unit is unconfirmed rather than assuming rupees.
+
+    group_history:
+      purpose: Answer "groups new this year" or "groups paid in more than one year".
+      why_needed: >
+        dim_producer_group stores first_payment_year_key and last_payment_year_key, which
+        the view does not expose. Reading them from the dimension avoids aggregating
+        14,566 payment rows to get an 11,904-row answer.
+      sql: |
+        SELECT pg.pg_id, pg.current_name,
+               pg.first_payment_year_key, pg.last_payment_year_key
+        FROM curated.dim_producer_group pg
+        WHERE pg.first_payment_year_key IS NOT NULL
+          AND pg.last_payment_year_key  IS NOT NULL
+          AND pg.last_payment_year_key > pg.first_payment_year_key
+        ORDER BY pg.pg_id;
+      rules:
+      - "QUERY THE DIMENSION ALONE. Joining it back to v_focus_legacy repeats these columns once per payment and double-counts every group paid more than once."
+      - Both columns are nullable and whether the loader populated them is UNVERIFIED. Guard for NULL and check before relying on the answer.
+      - "A year gap matters here: last > first does not mean consecutive years, because FY2023-24 holds no payments."
+
+    entity_types_including_zero:
+      purpose: Show all three producer-group types even where a scoped question empties one.
+      why_needed: >
+        PG-EXISTING-COOPERATIVE covers only 53 payments in two districts, so a
+        district-scoped breakdown routinely produces an empty type. A missing row and a
+        zero row read very differently.
+      sql: |
+        SELECT t.type_code, t.type_name, COUNT(f.focus_legacy_fact_id) AS payments
+        FROM curated.dim_pg_entity_type t
+        LEFT JOIN curated.v_focus_legacy f
+               ON f.pg_entity_type = t.type_code
+              AND f.lgd_district = 'SOUTH GARO HILLS'
+        GROUP BY t.type_code, t.type_name
+        ORDER BY payments DESC;
+      rules:
+      - "COUNT(f.focus_legacy_fact_id), not COUNT(*) - COUNT(*) returns 1 for an empty type because the LEFT JOIN produces one all-NULL row."
+      - "The scope predicate belongs in the ON clause, not a WHERE - a WHERE would filter away the all-NULL rows and defeat the pattern."
+      - "Confirm the stored type_code values first. This join matches on them, and they are not known to the annotation layer."
+
+    cross_scheme_coverage:
+      purpose: Compare which villages Focus Legacy reaches against PMAY and MGNREGA.
+      why_needed: >
+        Focus Legacy has no column in v_cross_scheme_village_coverage, so it has to be
+        aggregated and joined on as a third measure.
+      sql: |
+        WITH fl AS (
+          SELECT village_code, COUNT(*) AS focus_legacy_payments
+          FROM curated.v_focus_legacy
+          WHERE entity_type <> 'Unresolved'
+          GROUP BY village_code
+        )
+        SELECT c.village_code, c.lgd_district,
+               c.pmay_houses, c.mgnrega_person_days,
+               COALESCE(fl.focus_legacy_payments, 0) AS focus_legacy_payments
+        FROM curated.v_cross_scheme_village_coverage c
+        FULL JOIN fl ON fl.village_code = c.village_code;
+      rules:
+      - AGGREGATE FOCUS LEGACY FIRST. The CTE collapses payments to one row per village before the join.
+      - "Exclude entity_type = 'Unresolved' inside the CTE - the placeholder would create a phantom village_code."
+      - "FULL JOIN, not LEFT - a village that Focus Legacy reached and the other two did not must still appear."
+      - "bridge_geography_source answers the same question without any join, if it holds focus_legacy rows. Check first."
+
+    cross_scheme_money:
+      purpose: Compare Focus Legacy money against another scheme by district and year.
+      why_needed: >
+        Focus Legacy is absent from v_cross_scheme_money_district_year, so both sides must
+        be aggregated independently and the aggregates joined.
+      sql: |
+        WITH fl AS (
+          SELECT lgd_district, financial_year_short,
+                 SUM(amount_disbursed) AS focus_legacy_amount
+          FROM curated.v_focus_legacy
+          GROUP BY lgd_district, financial_year_short
+        ), other AS (
+          SELECT lgd_district, financial_year_short, scheme_code,
+                 amount_crore, measure_semantics
+          FROM curated.v_cross_scheme_money_district_year
+        )
+        SELECT COALESCE(fl.lgd_district, other.lgd_district)                 AS lgd_district,
+               COALESCE(fl.financial_year_short, other.financial_year_short) AS financial_year_short,
+               fl.focus_legacy_amount,
+               other.scheme_code,
+               other.amount_crore,
+               other.measure_semantics
+        FROM fl
+        FULL JOIN other
+               ON other.lgd_district = fl.lgd_district
+              AND other.financial_year_short = fl.financial_year_short;
+      rules:
+      - "NEVER ADD THE TWO AMOUNT COLUMNS. The other scheme's is CRORE; Focus Legacy's unit is unverified and its figure is as stored."
+      - Carry measure_semantics into the answer. A remitted rupee, a released rupee and an incurred rupee are three different measures.
+      - "FY2023-24 exists for the other schemes and not for Focus Legacy. The FULL JOIN will produce rows with a NULL Focus Legacy amount - that is the gap, not a defect."
+      - Do not filter the cross-scheme view by a Focus Legacy scheme code. It has none.
+
+  # =======================================================================
+  join_graph:
+
+    # v_focus_legacy pre-joins every dimension including the second hop of the
+    # snowflake, so ordinary questions emit WHERE and GROUP BY only. The two
+    # entries below are the documented exceptions, both to dim_geography and
+    # dim_pg_entity_type and both covered in sanctioned_patterns.
+    curated.v_focus_legacy:
+    - {to: curated.dim_geography,      on: geography_key,    join_type: INNER, only_for: constituency}
+    - {to: curated.dim_pg_entity_type, on: pg_entity_type,   join_type: LEFT,  only_for: entity_types_including_zero}
+
+    # the fact's real edges - documented, never traversed (PII boundary)
+    curated.fact_focus_legacy_disbursement:
+    - {to: curated.dim_producer_group, on: producer_group_key, join_type: INNER, traversable: false}
+    - {to: curated.dim_geography,      on: geography_key,      join_type: INNER, traversable: false}
+    - {to: curated.dim_year,           on: year_key,           join_type: LEFT,  traversable: false}
+    - {to: curated.dim_scheme,         on: scheme_key,         join_type: INNER, traversable: false}
+
+    # THE SNOWFLAKE - the only dimension in megh_db with outbound edges
+    curated.dim_producer_group:
+    - {to: curated.dim_pg_entity_type, on: pg_entity_type_key,       join_type: INNER}
+    - {to: curated.dim_geography,      on: geography_key,            join_type: INNER, note: "diamond - do not traverse alongside the fact's own geography edge"}
+    - {to: curated.dim_year,           on: first_payment_year_key,   join_type: LEFT,  alias_required: true}
+    - {to: curated.dim_year,           on: last_payment_year_key,    join_type: LEFT,  alias_required: true}
+
+    # the bank bridge is declared but closed
+    curated.bridge_pg_bank_history:
+    - {to: curated.dim_producer_group, on: producer_group_key, join_type: INNER, traversable: false}
+
+    # dimensions are terminal
+    curated.dim_pg_entity_type: []
+    curated.dim_geography: []
+    curated.dim_year: []
+    curated.dim_scheme: []
+
+    # bridges, pre-aggregates and cross-scheme views are read, never joined to the view
+    curated.bridge_geography_source: []
+    curated.v_cross_scheme_money_district_year: []
+    curated.v_cross_scheme_village_coverage: []
+    curated.v_pmay_monthly_sanctions: []
+    meta.v_reconciliation_focus_legacy: []
+
+    # reachable in megh_db but closed to this scheme - see the prohibited edges
+    curated.dim_geography_alias: []
+    curated.fact_pmay_house: []
+    curated.fact_focus_plus_disbursement: []
+    curated.fact_cm_elevate_application: []
+    curated.fact_mgnrega_employment: []
+    curated.fact_mgnrega_expenditure: []
+    staging.quarantine: []
+    raw.source_rows: []
+
+  # =======================================================================
+  prohibited_fact_pairs:
+    rule: >
+      EVERY fact-to-fact pair in megh_db is prohibited, without exception. Focus Legacy
+      participates in five of them. The grains never match, the units rarely match, and no
+      foreign key exists between any two facts. Aggregate each side independently, then
+      join the aggregates on a conformed key - village_code, lgd_district or
+      financial_year_short.
+    pairs:
+    - {a: fact_focus_legacy_disbursement, b: fact_pmay_house,               grains: "payment vs house",              units: "unverified vs rupees"}
+    - {a: fact_focus_legacy_disbursement, b: fact_focus_plus_disbursement,  grains: "payment to a group vs payment to a person", units: "unverified vs unverified", note: "no shared key of any kind"}
+    - {a: fact_focus_legacy_disbursement, b: fact_cm_elevate_application,   grains: "payment vs application",        units: "unverified vs none", note: "CM Elevate has no measure and no time dimension"}
+    - {a: fact_focus_legacy_disbursement, b: fact_mgnrega_employment,       grains: "payment vs village-year source row", units: "unverified vs person-days"}
+    - {a: fact_focus_legacy_disbursement, b: fact_mgnrega_expenditure,      grains: "payment vs village-year source row", units: "unverified vs lakh rupees"}
+
+  # =======================================================================
+  maintenance:
+    schema_authority: SCHEMA_FOR_DEVELOPERS.md   # live extract, 2026-09-21
+    source_for_distributions: "datasets/Focus legacy/Focus Legacy to share to BLH.xlsx"
+    last_generated: '2026-09-21'
+
+    open_verification_tasks:
+    - "semantic.join_graph: confirm the Focus Legacy edges are seeded and that all five
+       fact pairs carry is_prohibited = true."
+    - "meta.v_access_matrix: confirm megh_readonly can read curated.v_focus_legacy and
+       CANNOT read fact_focus_legacy_disbursement or bridge_pg_bank_history. This file
+       assumes the boundary holds; if it does not, the PII rules here are advisory only."
+    - "dim_producer_group.first_payment_year_key / last_payment_year_key: confirm they were
+       populated. sanctioned_patterns.group_history depends on it."
+    - "dim_pg_entity_type.type_code: the entity_types_including_zero pattern joins on these
+       values and they are not known to the annotation layer."
+    - "bridge_geography_source: SELECT DISTINCT source_system - whether focus_legacy rows
+       exist is unverified."
+    - "Confirm the diamond is harmless: that dim_producer_group.geography_key always equals
+       the fact's geography_key for the same row. Zero conflicts in the source, unverified
+       in the database."
+
+    regeneration_rules:
+    - Re-read the live extract and diff the declared edges. A new constraint is a new node in this graph.
+    - "If a status dimension, an alias_key or a placeholder flag is ever added, the matching absent_edges entry must be promoted to a real edge - not left to contradict the DDL."
+    - "If Focus Legacy is ever added to either cross-scheme view, the two prohibited edges become sanctioned and the CTE patterns become redundant. Check before assuming."
+    - APPEND new edges. Never delete one - a prohibition that disappears silently is how a bad join gets emitted.
+    - Bump the version.
+
+    companion_files:
+    - Annotations/Focus_Legacy/focuslegacy_schema_partitions.yaml
+    - Annotations/Focus_Legacy/focuslegacy_entity_resolver.yaml
+    - Annotations/Focus_Legacy/focuslegacy_few_shot.yaml
+    - Annotations/Focus_Legacy/README.md
+    - SCHEMA_FOR_DEVELOPERS.md
+    - Annotations/PMAY/pmay_foreign_key_augmentation.yaml   # the file format this one follows

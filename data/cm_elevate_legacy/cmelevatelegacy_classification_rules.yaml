@@ -1,0 +1,465 @@
+# cmelevatelegacy_classification_rules.yaml
+#
+# ===========================================================================
+# v1.0 - 2026-09-23 - WRITTEN AGAINST THE LIVE DATABASE
+#
+# Clarification rules for CM Elevate Legacy (the scheme the database calls CM
+# Elevate Disbursement). First rule that fires wins; its question is asked and
+# the pipeline pauses. Editable by analysts - no code change needed.
+# {placeholders} are filled from the user's query at runtime.
+#
+# Order matters: requests the source cannot answer are caught before missing
+# detail is asked for, so the bot never collects details for a question it
+# cannot answer. Conditions already filled silently by
+# cmelevatelegacy_default_rules.yaml are absent here - a condition must live in
+# EITHER this file OR that one, never both.
+#
+# THE FIRST SECTION IS UNIQUE TO THIS SCHEME. Two different schemes in megh_db
+# are called "CM Elevate", and the wrong one answers money questions with a
+# fact table that has no money. Scheme disambiguation therefore runs before
+# every other rule in this file.
+#
+# Every count in a question below is a source-workbook figure
+# (`Cm Elevate to share to BLH.xlsx`, profiled 2026-09-23, 2,823 rows) and has
+# NOT been re-measured against megh_db, which holds 2,822 after one quarantine.
+# ===========================================================================
+
+clarification_rules:
+
+  # ---- WHICH CM ELEVATE - runs before everything else --------------------
+  - condition: "cm_elevate_scheme_ambiguous"
+    question: "Two different datasets are called CM Elevate. This one records sanctions and disbursements for 13 schemes, with amounts and financial years. The other records applications for 15 schemes, with no money and no dates. Which did you mean?"
+    note:
+      critical: true
+      text: >
+        THE MOST IMPORTANT RULE IN THIS FILE. curated.fact_cm_elevate_disbursement and
+        curated.fact_cm_elevate_application are separate schemes with no shared
+        identifier, confirmed by the client, and the join between them is prohibited.
+        A money question routed to the application partition returns COUNT(*) dressed
+        as an answer. Never guess between them.
+
+  - condition: "cm_elevate_application_fields_requested"
+    question: "Application status, applicant category, on-hold and withdrawal are recorded in the other CM Elevate dataset, not in this one. Shall I answer from the disbursement records instead, or switch datasets?"
+
+  - condition: "link_applications_to_disbursements_requested"
+    question: "The application records and these disbursement records come from two separate files with no shared identifier, so they cannot be linked. Shall I answer from the disbursement records alone?"
+    note:
+      critical: true
+      text: >
+        There is no bridge to offer and none may be invented. Do not fall back on a
+        name match - names are not in the query surface, and the same person can hold
+        records under two schemes.
+
+  # ---- the source cannot answer this at all -----------------------------
+  # 2026-09-25 use-case QA: sanction_rate / unsanctioned / constituency are now ANSWERED (few-shot
+  # X01 / X02 / X07 / X08); the entries below are kept as the reviewed history.
+  - condition: "sanction_rate_requested"
+    superseded: "Answered as COUNT(sanctioned_amount) / COUNT(*) of this dataset, with the separate-applications caveat."
+    question: "A sanction rate cannot be calculated here - every record in this dataset is already a sanctioned case, and the total number of applications sits in the separate CM Elevate applications dataset with no way to link the two. Shall I report the number of sanctioned records instead?"
+    note:
+      critical: true
+      text: >
+        Use cases TC-15 and TC-16 ask for exactly this. The 83 desanctioned rows must
+        NEVER be offered as "not sanctioned" - they are a post-sanction outcome, not a
+        rejected application, and that substitution is the most misleading answer
+        available in this partition.
+
+  - condition: "unsanctioned_applications_requested"
+    superseded: "Answered as records with no sanctioned amount; desanctioned shown separately as withdrawn sanctions."
+    question: "Unsanctioned applications are not held here - this dataset begins at sanction. Did you mean the records whose sanction was later withdrawn, which is a different thing?"
+
+  - condition: "programme_description_requested"
+    question: "This dataset holds sanction and disbursement records only - it has no description of the CM Elevate programme, its objectives, eligibility or application process. Shall I answer on the records held: schemes, amounts, districts and financial years?"
+    note: >
+      Use cases TC-01 to TC-10 are all of this kind - 10 of the 36. There is no scheme
+      document in this folder, unlike MGNREGA. Do not answer them from general
+      knowledge and present it as data.
+
+  - condition: "application_process_or_eligibility_requested"
+    question: "Eligibility rules and the application process are not held in this data. Shall I answer on the sanctioned records instead?"
+
+  - condition: "target_or_allocation_requested"
+    question: "Programme targets, budgets and allocations are not held - only amounts actually sanctioned and disbursed. Shall I report the sanctioned total?"
+
+  - condition: "constituency_requested"
+    superseded: "Answered through the geography_key -> dim_geography.ac_name join."
+    question: "Constituency is not carried on this scheme's records, although it exists in the source file and in the geography dimension. Shall I answer by district, block or village instead?"
+    note:
+      critical: true
+      text: >
+        Use cases TC-31 and TC-32 ask for this. It is a VIEW LIMITATION, not a data gap -
+        dim_geography holds ac_name and ac_number, and v_cm_elevate_disbursement simply
+        does not expose them. Say "not available on this scheme's query surface", and
+        log it as a fix rather than a refusal in principle.
+
+  - condition: "applicant_name_requested"
+    question: "Applicant names are not available in the query surface - they are held for audit only and are excluded from everything the bot can read. Shall I identify records by application number instead?"
+    note:
+      critical: true
+      text: >
+        first_name, middle_name and last_name are dropped by the view and excluded from
+        semantic.v_embedding_documents. There is no join that recovers them and no
+        did-you-mean to offer.
+
+  - condition: "personal_contact_details_requested"
+    question: "Aadhaar, mobile numbers, bank accounts and addresses are not held. I can show application number, scheme, village and amounts - shall I?"
+
+  - condition: "applicant_demographics_requested"
+    question: "Gender, age, caste, income and category are not held for this scheme. Shall I answer by scheme, district or amount instead?"
+    note: >
+      Unlike the CM Elevate application partition, this fact has NO applicant_category
+      column. The letter inside application_number is not one - see
+      applicant_type_from_application_number below.
+
+  - condition: "applicant_type_from_application_number"
+    question: "Individual and group applicants are not recorded as a field in this dataset. The letter inside the application number looks like one but is unreliable - two schemes use it as part of their code. Shall I answer without that split?"
+    note:
+      critical: true
+      text: >
+        I = 2,542, R = 225, U = 14 and S = 42 across the file, but S belongs to the
+        acronyms of Any Business Venture and Sports & Wellness rather than to a type.
+        Do not parse it, and do not borrow applicant_category from the other CM Elevate
+        scheme.
+
+  - condition: "loan_repayment_requested"
+    question: "Repayment is not recorded in this data - the source column holds the same value on every row and was not loaded. Shall I answer on loans disbursed instead?"
+    note: >
+      loan_repaid = 0 on all 2,823 source rows. Answering "none have been repaid" would
+      present an empty column as a finding.
+
+  - condition: "bank_name_requested"
+    question: "Individual bank names are not held - the only lender values recorded are Bank and LIFCOM. Shall I use those?"
+
+  - condition: "employment_or_wages_requested"
+    question: "Person-days, workers and wages belong to MGNREGA, which is a separate scheme and cannot be joined to this one. Shall I answer for CM Elevate Legacy alone?"
+
+  - condition: "other_state_comparison_requested"
+    question: "Only Meghalaya is held here, so other states cannot be compared. Shall I compare districts within Meghalaya instead?"
+
+  - condition: "below_village_geography_requested"
+    question: "Geography runs down to village only - there is no habitation, ward or household location. Which village should I report on?"
+
+  - condition: "per_capita_or_saturation_requested"
+    question: "Population and eligible-household figures are not held, so per-capita and coverage cannot be calculated. Would records per village or per district work instead?"
+
+  - condition: "business_outcome_requested"
+    question: "Business outcomes - jobs created, income, turnover, whether the venture survived - are not held. Shall I answer on amounts sanctioned and disbursed?"
+
+  # ---- cross-scheme - no path exists for this scheme ---------------------
+  - condition: "cross_scheme_comparison_requested"
+    question: "CM Elevate Legacy is not included in the cross-scheme comparison views, which cover MGNREGA and PMAY only, so a like-for-like comparison cannot be produced. Shall I report CM Elevate Legacy on its own?"
+    note:
+      critical: true
+      text: >
+        UNLIKE PMAY. PMAY can be compared through
+        curated.v_cross_scheme_money_district_year. This scheme appears in no
+        cross-scheme view at all. Do not stitch two independent aggregates together
+        and present them as a sanctioned comparison.
+
+  - condition: "cross_scheme_row_level_request"
+    question: "Records from two schemes cannot be listed side by side - there is no shared key and every fact-to-fact join is prohibited. Shall I answer for CM Elevate Legacy alone?"
+
+  # ---- measures that exist but must not be reported as asked -------------
+  - condition: "bare_disbursement_measure_ambiguous"
+    question: "Disbursement is recorded three ways here - subsidy (Rs 52.57 Cr), loan (Rs 30.33 Cr), and the two together (Rs 82.90 Cr). Which did you mean?"
+    note:
+      critical: true
+      text: >
+        THE MOST COMMON WRONG ANSWER IN THIS SCHEME. A subsidy is a grant; a loan is
+        credit the applicant carries. Adding them silently, or reporting one as if it
+        were the whole, misstates the answer by up to 64%.
+
+  - condition: "sanctioned_reported_as_disbursed"
+    question: "Sanctioned and disbursed are different figures here - Rs 142.74 Cr was sanctioned and Rs 82.90 Cr disbursed, 58.1% of it. Which did you mean?"
+
+  - condition: "bank_sanctioned_amount_requested"
+    question: "There is a second sanctioned figure in the data whose meaning has not been confirmed - it is zero on half the records and its ratio to the sanctioned amount varies within a single scheme. I can show it with that caveat, or answer on the sanctioned amount. Which?"
+    note:
+      critical: true
+      text: >
+        The database's own comment says do not build a metric on this column without
+        flagging the uncertainty. Never present it as a bank's share of the sanction,
+        and never compute a percentage from it.
+
+  - condition: "average_sanctioned_for_constant_scheme"
+    question: "{scheme} pays a fixed entitlement of Rs {amount} to every applicant, so an average only restates that figure. Shall I report the entitlement and the number of records instead?"
+    note: >
+      Fixed for 6 of the 13 schemes - Piggery 125,000, Poultry 120,000, Dairy 300,000,
+      Goat 100,000, Motorcaravan 5,000,000, and Sericulture spinning near-constant. The
+      same situation as PMAY's flat 130,000 per house.
+
+  - condition: "refusal_measure_ambiguous"
+    question: "Refusal is recorded in three fields that disagree with each other - a desanction reason on 83 records, a refused flag on 8, and a written reason on 7. Only 4 records carry all three. Which should I count?"
+    note:
+      critical: true
+      text: >
+        NO FIELD IS AUTHORITATIVE and the database says to surface the disagreement
+        rather than picking one. Every refusal count must name the field it came from.
+
+  - condition: "exclude_desanctioned_from_money_unclear"
+    question: "Some desanctioned records still received money - 9 of the 52 refused and 23 of the 31 duplicates. Shall I include them in the total, or leave them out?"
+    note:
+      critical: true
+      text: >
+        Excluding them is a CHOICE that changes the answer. It must be asked, or stated,
+        never applied silently.
+
+  - condition: "duplicate_flag_as_confirmed_duplicate"
+    question: "The 'Duplicate' marking is weakly evidenced - only 6 of the 31 records so marked have another record with the same name under the same scheme. Shall I report it as recorded, with that caveat?"
+
+  - condition: "loan_disbursed_status_as_independent_evidence"
+    question: "The loan status field simply restates whether a loan amount is present, so it cannot confirm the amount. Shall I answer on the loan amount itself?"
+
+  - condition: "zero_disbursement_as_missing"
+    question: "449 records have a sanctioned amount and no disbursement at all - that is a recorded zero, not missing data, and 195 of them are in one scheme. Shall I report them as a distinct group?"
+
+  - condition: "disbursement_exceeds_sanction"
+    question: "Four records show more disbursed than sanctioned. Shall I include them as recorded and flag them, or leave them out of the comparison?"
+
+  # ---- time -------------------------------------------------------------
+  - condition: "monthly_trend_requested"
+    question: "A monthly trend is not available for this scheme - the source records only a batch label with four values across two years, and it was not loaded. Shall I show the two financial years instead?"
+    note:
+      critical: true
+      text: >
+        PMAY is the only scheme in megh_db with a real monthly grain. Do not synthesise
+        one here from the disbursement dates without saying that those dates disagree
+        with the stated financial year.
+
+  - condition: "financial_year_vs_disbursement_date"
+    question: "The financial year recorded on a record and the year implied by its disbursement date disagree on 114 records. Shall I use the recorded financial year, which is what the database groups by, or filter on the disbursement dates?"
+    note:
+      critical: true
+      text: >
+        UNLIKE FOCUS LEGACY, where the same check found zero mismatches. The two time
+        signals are not interchangeable here, and an FY answer and a date-range answer
+        over the same period will not reconcile.
+
+  - condition: "multi_year_trend_requested"
+    question: "Only two financial years are held, 2024-25 and 2025-26, and 395 records carry no year at all. A trend across two points is thin - shall I show the two years as a comparison instead?"
+
+  - condition: "records_with_no_financial_year"
+    question: "395 records have no financial year recorded, so they disappear from any year-based figure. Shall I report them as a separate 'no financial year' group?"
+    note:
+      critical: true
+      text: >
+        14% of the file. year_key is nullable and the view reaches dim_year by LEFT JOIN,
+        so these rows are present until the moment someone groups or filters on time.
+
+  - condition: "calendar_year_vs_financial_year"
+    question: "'{value}' could mean the calendar year or financial year {value}-{next_short}. Which one? Note that the two are measured differently here - the financial year is a recorded label, the calendar year has to come from the disbursement dates."
+
+  - condition: "vague_recency"
+    question: "'{value}' is not a fixed period. Did you mean FY 2025-26, the later of the two years held?"
+
+  - condition: "quarter_or_month_requested"
+    question: "Quarters and months cannot be reported for this scheme. Shall I use the financial year instead?"
+
+  - condition: "reversed_date_range"
+    question: "'{value}' runs backwards. Did you mean {corrected_range}?"
+
+  - condition: "date_extremum_requested"
+    question: "The earliest and latest disbursement dates in this data include values that look wrong - one loan dated 1985 and two payments dated after the file was produced. Shall I report the dates as recorded and flag them?"
+    note: >
+      source_row_id 532 (1985-07-22), 1602 and 1696 (2026-09-04, after the extract's own
+      created_date). None of the three is recorded in the database's column comments.
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "missing_metric_for_ranking"
+    question: "Top by what - number of records, amount sanctioned, amount disbursed, or the share of the sanction actually paid?"
+
+  - condition: "missing_metric_for_trend"
+    question: "Which measure should the comparison show - records, amount sanctioned, or amount disbursed?"
+
+  - condition: "vague_qualifier"
+    question: "What should '{value}' be measured by - records, amount disbursed, or the share of the sanction paid out?"
+
+  - condition: "performance_term_unclear"
+    question: "What counts as performance here - the number of records, the amount disbursed, or how much of the sanctioned amount has actually been paid?"
+
+  - condition: "ambiguous_count_subject"
+    question: "A count of what - records, schemes, villages, or districts?"
+
+  - condition: "pending_term_unclear"
+    question: "There is no pending-amount column in this scheme. Did you mean the difference between sanctioned and disbursed, which I would have to calculate and label as such?"
+    note: >
+      UNLIKE PMAY, which stores amount_pending. Here it can only be derived, so it must
+      be named as a derivation in the answer.
+
+  - condition: "beneficiary_vs_record_unclear"
+    question: "Each row is one applicant's record under one scheme, and the same person can appear under two schemes without anything linking them. Shall I count records?"
+
+  # ---- geography --------------------------------------------------------
+  - condition: "village_count_with_unresolved_rows"
+    question: "404 records could not be matched to a village, though their district is known. Shall I exclude them from the village figures and report how many were set aside?"
+    note:
+      critical: true
+      text: >
+        14.3% of the file. These rows MUST stay in district and state totals so the
+        figures reconcile to the source, and MUST be excluded from any village count or
+        village list.
+
+  - condition: "missing_geography_level_for_breakdown"
+    question: "Broken down by which level - district, block, or village?"
+
+  - condition: "ambiguous_geography_level"
+    question: "'{value}' is both a block and a village name. Which level did you mean?"
+
+  - condition: "ambiguous_village_needs_district"
+    question: "'{value}' exists in {districts}. Which district?"
+
+  - condition: "shared_village_name"
+    question: "More than one village is called '{value}' - 17 village names in this data are shared. Which district or block did you mean?"
+
+  - condition: "unmatched_geography_name"
+    question: "I could not match '{value}' to any district, block or village in the CM Elevate Legacy data. Did you mean {suggestions}?"
+
+  - condition: "district_or_block_code_requested"
+    question: "District and block are held as names only - there is no district or block code in the database. Shall I use the name, or the village LGD code?"
+
+  - condition: "urban_block_in_rural_framing"
+    question: "Some records sit in Municipal Board areas rather than villages - Resubelpara, William Nagar and Tura. Include them, or restrict the answer to rural blocks?"
+
+  - condition: "village_level_breakdown_size"
+    question: "A village-level breakdown returns over a thousand rows. Shall I show the top 10, or restrict it to one district or block?"
+
+  # ---- schemes ----------------------------------------------------------
+  - condition: "sericulture_spelling_ambiguous"
+    question: "Sericulture is recorded as two separate schemes - spinning and weaving. Which did you mean, or both together?"
+    note:
+      critical: true
+      text: >
+        They are stored as two distinct names that differ only by a space before the
+        bracket: 'Meghalaya Sericulture & Weaving Scheme (spinning)' and
+        'Meghalaya Sericulture & Weaving Scheme(weaving)'. An exact match on the wrong
+        spelling returns zero rows silently.
+
+  - condition: "unmatched_scheme_name"
+    question: "'{value}' is not one of the 13 schemes recorded here. Did you mean {suggestions}?"
+
+  - condition: "scheme_comparison_with_singleton"
+    question: "{scheme} holds only {record_count} records, so comparing it with the larger schemes will not be meaningful. Include it anyway, or restrict the comparison to the larger schemes?"
+    note: >
+      Motorcaravan has 1 record, Sports & Wellness 9, Common Facility Center 27.
+      Piggery alone is 48% of the file.
+
+  - condition: "statewide_average_dominated_by_one_scheme"
+    question: "A single average across all schemes is dominated by Piggery, which is 48% of the records and pays a fixed Rs 1,25,000. Shall I break the figure down by scheme instead?"
+
+  - condition: "sector_term_unclear"
+    question: "'{value}' is not recorded as a sector here - the schemes are named individually. Did you mean one of the livestock schemes, or all 13?"
+
+  # ---- identifiers and values -------------------------------------------
+  - condition: "unmatched_application_number"
+    question: "No record carries application number '{value}'. Shall I search by scheme and village instead?"
+
+  - condition: "application_number_prefix_search"
+    question: "The letters at the start of an application number do not reliably identify a scheme - 7 of the 13 schemes use more than one prefix, and one Poultry record carries Piggery's. Shall I filter by scheme name instead?"
+    note:
+      critical: true
+      text: >
+        The database's comment on application_id_prefixes says the prefixes are observed,
+        not enforced. Never derive a scheme from an application number.
+
+  - condition: "unmatched_loan_entity_or_status"
+    question: "'{value}' is not a recorded {dimension}. Did you mean {suggestions}?"
+
+  - condition: "records_with_no_loan_entity"
+    question: "401 records have no lender recorded, and 19 of them still carry loan money. Shall I show them as a separate 'not recorded' group?"
+
+  # ---- scheme shape: questions a single number would answer badly --------
+  - condition: "biggest_scheme_unqualified"
+    question: "Biggest by which measure? Piggery has the most records (1,353 of 2,823); Agriculture Warehouse has the most money (Rs 44.34 Cr of Rs 142.74 Cr sanctioned). The two answers name different schemes."
+    note:
+      critical: true
+      text: >
+        Never resolve this silently. A record-count reading and a money reading disagree
+        for almost every superlative in this scheme, because the large-money schemes are
+        the small-record ones.
+
+  - condition: "sericulture_zero_disbursement_framing"
+    question: "Sericulture spinning has no subsidy payments at all - 0 of its 198 records - and its Rs 26,000 of disbursement comes from two loans. Shall I report it as 'nothing disbursed' rather than as a low percentage?"
+    note: >
+      A 0.1% disbursement rate reads as underperformance. The truth is that the scheme
+      paid nothing out at all and two loans account for the whole figure.
+
+  - condition: "loan_breakdown_includes_goat"
+    question: "Goat Farming has no loans at all - 0 of its 48 records. Shall I keep it in the loan breakdown as a zero row, or leave it out?"
+
+  - condition: "subsidy_and_loan_on_same_records"
+    question: "In the two vehicle schemes, subsidy and loan are paid on the same records - they are two halves of one package rather than alternatives. Shall I report them together for those schemes?"
+
+  - condition: "single_record_scheme_percentage"
+    question: "{scheme} holds one record, so a percentage or a rate for it is not meaningful. Shall I report the record itself instead?"
+
+  - condition: "entitlement_ladder_question"
+    question: "Payments in this scheme move in fixed steps - Piggery pays Rs 31,250 a time against a Rs 1,25,000 entitlement, so most records sit at exactly half. Did you want the step amounts, or the totals?"
+
+  # ---- data-quality questions the user may be walking into ---------------
+  - condition: "date_range_over_corrupted_rows"
+    question: "Four Piggery records have no usable disbursement date - their date was unrecoverable in the source - so a date filter leaves them out while their Rs 31,250 payments stay in the untimed totals. Continue?"
+
+  - condition: "completeness_question"
+    question: "One source record was held back at load as a corrupted identity, so 2,822 of 2,823 are available. Shall I report the figure as it stands, or explain the gap?"
+
+  - condition: "sports_wellness_total_requested"
+    question: "The held-back record belongs to Sports & Wellness, and its name looks like a real team name rather than corrupt data - so that scheme may be short one record. Shall I report the nine records held with that caveat?"
+    note: >
+      source_row_id 2392, name fields "4" / "For" / "All". The quarantine is probably
+      wrong. Do not reverse it in SQL; flag it.
+
+  - condition: "negative_pending_amount"
+    question: "Four records were disbursed more than they were sanctioned, so a pending figure that includes them goes negative. Shall I show the negative as recorded, or exclude those four and say so?"
+
+  - condition: "duplicate_records_requested"
+    question: "There are no duplicate rows here - every application number is unique. Did you mean the 31 records marked 'Duplicate' as an outcome, which is a different thing?"
+
+  # ---- comparisons that are not like for like ----------------------------
+  - condition: "compare_schemes_with_different_entitlements"
+    question: "These schemes pay very different entitlements - from Rs 1,00,000 for Goat Farming to Rs 50,00,000 for Motorcaravan - so comparing their totals mostly compares their unit costs. Compare record counts as well?"
+
+  - condition: "compare_districts_by_money_only"
+    question: "District money totals are driven by which schemes happen to sit there - East Khasi Hills has few records but large ones. Shall I show record counts alongside the money?"
+
+  - condition: "mixed_geography_levels_compared"
+    question: "{value_a} is a {level_a} and {value_b} is a {level_b}, so comparing them is not like-for-like. Compare at {level_b} level instead?"
+
+  - condition: "fy_comparison_across_all_schemes"
+    question: "Only three schemes appear in both financial years - Prime Tourism Vehicle, Agriculture Warehouse and Prime Agriculture Response Vehicle. A year-on-year comparison across all schemes is really about those three. Restrict it to them?"
+
+  - condition: "rate_from_small_denominator"
+    question: "{scope} holds only {records} records, so a percentage will swing on one or two cases. Report the counts instead, or show both?"
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_level"
+    question: "At what level - statewide, by scheme, by district, by block, or by village?"
+
+  - condition: "ambiguous_total_vs_average"
+    question: "Total across all records, or an average per record?"
+
+  - condition: "ambiguous_average_denominator"
+    question: "Average per what - per record, per scheme, per village, or per financial year?"
+
+  - condition: "ranking_direction_unclear"
+    question: "Highest or lowest?"
+
+  - condition: "missing_comparison_target"
+    question: "Compare {value} with which other district, scheme, or financial year?"
+
+  - condition: "share_denominator_missing"
+    question: "As a share of what - the scheme total, the district total, or the statewide total?"
+
+  - condition: "percentage_vs_count"
+    question: "As percentages, or as counts?"
+
+  - condition: "scheme_by_district_grid"
+    question: "Scheme by district gives up to 156 rows. Shall I show it as a chart, or restrict it to one scheme or one district?"
+
+  - condition: "multi_measure_table"
+    question: "Which measures should the table carry - records, sanctioned, subsidy, loan, total disbursed?"
+
+  - condition: "columns_for_record_listing"
+    question: "Which fields do you need - application number, scheme, village, sanctioned amount, disbursed amount and outcome are the usual set?"
+
+  - condition: "list_vs_aggregate"
+    question: "Do you want the individual records listed, or a summary count?"

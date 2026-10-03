@@ -1,0 +1,1141 @@
+# focuslegacy_few_shot.yaml
+#
+# Validated question-to-SQL pairs for Focus Legacy - node 5.10.
+#
+# ===========================================================================
+# v1.0 - 2026-09-21 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Legacy was loaded straight into curated, so there is no flat-table
+# ancestor and no retired v1 SQL to keep as a negative example.
+#
+# House rules encoded in every example below:
+#   FROM curated.v_focus_legacy     never fact_focus_legacy_disbursement and
+#                                   never bridge_pg_bank_history - both carry
+#                                   unmasked account numbers
+#   NO placeholder predicate        Focus Legacy has no is_placeholder column.
+#                                   Copying PMAY's WHERE NOT is_placeholder
+#                                   here does not just mislead - it ERRORS.
+#   COUNT(*) is aliased `payments`  one row is one payment to one GROUP
+#   COUNT(DISTINCT pg_id)           for groups - never COUNT(DISTINCT pg_name),
+#                                   which both splits and merges groups
+#   SUM(no_of_pg_members)           aliased `memberships`, never `people`
+#   amount AND members together     amount = members x 5000 on every row, so a
+#                                   money answer carries the membership column
+#                                   beside it and never stands as a separate finding
+#   amount_disbursed left AS STORED never /1e7 - the unit is unverified, read
+#                                   curated.dim_scheme.money_unit before formatting
+#   entity_type <> 'Unresolved'     on village counts and village lists ONLY -
+#                                   never on a money, district or block total
+#   lgd_district / lgd_block        UPPERCASE literals - dim_geography stores them so
+#   lgd_village_name                NOT uppercased - do not fold all three alike
+#   village_code                    for counting villages, never a name
+#   financial_year_short            for FY questions; date_of_remittance for
+#                                   calendar and exact-date questions
+#   UPPER(TRIM(product_raw))        always - 62 raw spellings, 45 products
+#   account_no_masked               never account_no, and never in a bulk listing
+#   bank_details_current IS NULL    for "paid to an old account" - the column is
+#                                   TRUE or NULL, never FALSE
+#   no pg_id parsing                geography comes from lgd_district, never from
+#                                   the district letters inside a PG id
+#
+# Questions that must be REFUSED live in focuslegacy_schema_partitions.yaml,
+# which carries 11 of them with sql: null. They are not repeated here, the same
+# way PMAY and Focus Plus keep their refusals in stage2.
+#
+# NOT ONE OF THESE QUERIES HAS BEEN EXECUTED against megh_db. They are correct
+# against the structure in SCHEMA_FOR_DEVELOPERS.md (2026-09-21) and unverified
+# against the data. Every expected figure quoted in a note is a source-workbook
+# observation (2026-09-21). Run meta.v_reconciliation_focus_legacy first.
+# ===========================================================================
+
+sql_generation_examples:
+
+# ---- the three counting subjects --------------------------------------
+- question: How many Focus Legacy payments are there?
+  sql: |
+    SELECT COUNT(*) AS payments
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'No always-on predicate exists on this partition. Expect about 14,566.'
+
+- question: How many producer groups received Focus Legacy money?
+  sql: |
+    SELECT COUNT(DISTINCT pg_id) AS producer_groups
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Groups are counted on pg_id. Expect about 11,904 - lower than the payment count because groups can be paid more than once.'
+
+- question: How many memberships did Focus Legacy pay for?
+  sql: |
+    SELECT SUM(no_of_pg_members) AS memberships
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Memberships, not people. A group paid in two years contributes twice, and its recorded size can differ between the two.'
+
+- question: Give me payments, groups and memberships together
+  sql: |
+    SELECT COUNT(*)                  AS payments,
+           COUNT(DISTINCT pg_id)     AS producer_groups,
+           SUM(no_of_pg_members)     AS memberships,
+           SUM(amount_disbursed)     AS amount_disbursed
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The default shape for a bare "how many" question - it makes the three readings visible instead of picking one silently.'
+
+- question: How many groups were paid more than once?
+  sql: |
+    SELECT COUNT(*) AS groups_paid_more_than_once
+    FROM (
+      SELECT pg_id
+      FROM curated.v_focus_legacy
+      GROUP BY pg_id
+      HAVING COUNT(*) > 1
+    ) repeat_groups;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Source distribution: 9,251 groups paid once, 2,647 twice, 8 three times.'
+
+- question: How many payments did each group receive?
+  sql: |
+    SELECT payments_per_group, COUNT(*) AS groups
+    FROM (
+      SELECT pg_id, COUNT(*) AS payments_per_group
+      FROM curated.v_focus_legacy
+      GROUP BY pg_id
+    ) g
+    GROUP BY payments_per_group
+    ORDER BY payments_per_group;
+  tables:
+  - curated.v_focus_legacy
+
+# ---- money, and the x5000 identity -------------------------------------
+- question: What is the total amount disbursed under Focus Legacy?
+  sql: |
+    SELECT SUM(amount_disbursed) AS amount_disbursed,
+           SUM(no_of_pg_members) AS memberships,
+           COUNT(*)              AS payments
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The membership column travels with the money column because amount = members x 5000. Source total: 510,105,000 across 102,021 memberships.'
+
+- question: What money unit is Focus Legacy recorded in?
+  sql: |
+    SELECT scheme_code, scheme_name, money_unit, time_semantics
+    FROM curated.dim_scheme
+    WHERE scheme_name ILIKE '%focus%legacy%';
+  tables:
+  - curated.dim_scheme
+  note: 'Run this before formatting any Focus Legacy money figure. The fact table comment does not state a unit, unlike PMAY.'
+
+- question: What is the average payment?
+  sql: |
+    SELECT ROUND(AVG(amount_disbursed), 2) AS avg_amount,
+           ROUND(AVG(no_of_pg_members), 2) AS avg_members,
+           5000                            AS rate_per_member
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The average amount is the average group size multiplied by 5,000. Showing all three columns stops it reading as an entitlement.'
+
+- question: What is the distribution of payment sizes?
+  sql: |
+    SELECT no_of_pg_members, amount_disbursed, COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    GROUP BY no_of_pg_members, amount_disbursed
+    ORDER BY no_of_pg_members;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Only 21 distinct values exist, all multiples of 5,000. The two columns move together by construction.'
+
+- question: Does every payment follow the Rs 5,000 per member rule?
+  sql: |
+    SELECT COUNT(*) AS payments_breaking_the_rule
+    FROM curated.v_focus_legacy
+    WHERE amount_disbursed <> no_of_pg_members * 5000;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Expected to return 0. A non-zero result is the headline finding and invalidates every money rule in this partition.'
+
+- question: What is the largest single payment?
+  sql: |
+    SELECT pg_id, pg_name, lgd_district, no_of_pg_members, amount_disbursed,
+           date_of_remittance
+    FROM curated.v_focus_legacy
+    ORDER BY amount_disbursed DESC
+    LIMIT 10;
+  tables:
+  - curated.v_focus_legacy
+  note: 'One outlier at 190 members / 950,000 against a next-largest of 20 members. Show the top rows rather than a bare MAX.'
+
+- question: What is the average group size excluding the outlier?
+  sql: |
+    SELECT ROUND(AVG(no_of_pg_members), 2) AS avg_members,
+           COUNT(*)                        AS payments
+    FROM curated.v_focus_legacy
+    WHERE no_of_pg_members <= 20;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The 190-member payment is the only one above 20. Say the exclusion was applied.'
+
+# ---- geography ---------------------------------------------------------
+- question: How much was disbursed in West Garo Hills?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_focus_legacy
+  note: 'The district literal is UPPERCASE. A Title Case literal copied from the source spreadsheet returns zero rows silently.'
+
+- question: Payments by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district
+    ORDER BY payments DESC
+    LIMIT 12;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Unresolved rows stay in - they carry real payments and are held under their district so the totals reconcile.'
+
+- question: Payments by block in West Khasi Hills
+  sql: |
+    SELECT lgd_block,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE lgd_district = 'WEST KHASI HILLS'
+      AND lgd_block IS NOT NULL
+    GROUP BY lgd_block
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The NULL guard matters: a block total can fall short of the district total by the payments whose village never resolved.'
+
+- question: How many villages received Focus Legacy money?
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_focus_legacy
+    WHERE entity_type <> 'Unresolved';
+  tables:
+  - curated.v_focus_legacy
+  note: 'The Unresolved exclusion is mandatory for a village count and only for a village count. Expect about 3,384.'
+
+- question: How many villages in Ri Bhoi received Focus Legacy money?
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_focus_legacy
+    WHERE lgd_district = 'RI BHOI'
+      AND entity_type <> 'Unresolved';
+  tables:
+  - curated.v_focus_legacy
+
+- question: Top 10 villages by amount disbursed
+  sql: |
+    SELECT village_code, lgd_village_name, lgd_block, lgd_district,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE entity_type <> 'Unresolved'
+    GROUP BY village_code, lgd_village_name, lgd_block, lgd_district
+    ORDER BY amount_disbursed DESC
+    LIMIT 10;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Grouped on village_code, not the name - 94 village names are shared by more than one village.'
+
+- question: How many payments could not be matched to a real village?
+  sql: |
+    SELECT COUNT(*)              AS unresolved_payments,
+           SUM(amount_disbursed) AS unresolved_amount,
+           ROUND(100.0 * COUNT(*) / (SELECT COUNT(*) FROM curated.v_focus_legacy), 1) AS pct_of_payments
+    FROM curated.v_focus_legacy
+    WHERE entity_type = 'Unresolved';
+  tables:
+  - curated.v_focus_legacy
+  note: 'Expect about 1,101 - 7.6%. This is the coverage statement that belongs with every village-level answer.'
+
+- question: Unresolved payments by district
+  sql: |
+    SELECT lgd_district, COUNT(*) AS unresolved_payments
+    FROM curated.v_focus_legacy
+    WHERE entity_type = 'Unresolved'
+    GROUP BY lgd_district
+    ORDER BY unresolved_payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Placeholders are created per district, so this shows where the geography matching struggled.'
+
+- question: Payments in the Garo Hills region
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE lgd_district IN ('WEST GARO HILLS','NORTH GARO HILLS','EAST GARO HILLS',
+                           'SOUTH WEST GARO HILLS','SOUTH GARO HILLS')
+    GROUP BY lgd_district
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Regions are not a column - expand to an IN list and state which districts were included. Garo Hills covers 7,685 payments.'
+
+- question: Show West Khasi Hills and Eastern West Khasi Hills separately
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE lgd_district IN ('WEST KHASI HILLS','EASTERN WEST KHASI HILLS')
+    GROUP BY lgd_district;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Post-bifurcation districts are kept apart. Every Eastern West Khasi Hills payment belongs to a group whose PG id still says WKH.'
+
+- question: Which villages have conflicting geography records?
+  sql: |
+    SELECT village_code, lgd_village_name, lgd_block, lgd_district,
+           COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    WHERE has_geo_conflict
+    GROUP BY village_code, lgd_village_name, lgd_block, lgd_district
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The only geographic quality signal this scheme has. The stored district and block are the roster values.'
+
+# ---- time: financial year ----------------------------------------------
+- question: How much was disbursed in FY 2025-26?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE financial_year_short = '2025-26';
+  tables:
+  - curated.v_focus_legacy
+  note: 'financial_year_short is the form the source file used, so it is the form users type. Expect 8,812 payments.'
+
+- question: Focus Legacy disbursement by financial year
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Four rows come back, not five. FY2023-24 holds no payments, so it is absent rather than zero - say so with the result.'
+
+- question: Compare FY 2024-25 with the year before it
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE financial_year_short IN ('2022-23','2024-25')
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The preceding year WITH PAYMENTS is FY2022-23, not FY2023-24. State that a year with no data sits between them.'
+
+- question: Which financial year had the most disbursement?
+  sql: |
+    SELECT financial_year_short, SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY amount_disbursed DESC
+    LIMIT 1;
+  tables:
+  - curated.v_focus_legacy
+
+- question: How many groups were paid in each financial year?
+  sql: |
+    SELECT financial_year_short, COUNT(DISTINCT pg_id) AS producer_groups
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Summing this column across years double-counts groups paid in more than one year - it is a per-year figure only.'
+
+- question: Are there any payments with no financial year?
+  sql: |
+    SELECT COUNT(*) AS payments_without_a_financial_year
+    FROM curated.v_focus_legacy
+    WHERE year_key IS NULL;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Expected to return 0. Every source row carries a financial year, so a non-zero result is a load defect, not missing data.'
+
+# ---- time: dates and batches -------------------------------------------
+- question: On which dates did Focus Legacy money go out?
+  sql: |
+    SELECT date_of_remittance,
+           financial_year_short,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance IS NOT NULL
+    GROUP BY date_of_remittance, financial_year_short
+    ORDER BY date_of_remittance;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Thirty rows come back. The batch structure is the finding - this is the honest answer to most "over time" questions.'
+
+- question: Show Focus Legacy payments by month
+  sql: |
+    SELECT DATE_TRUNC('month', date_of_remittance)::date AS remittance_month,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance IS NOT NULL
+    GROUP BY remittance_month
+    ORDER BY remittance_month;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Valid SQL, but label it a batch view: money moves in 30 bulk runs, so most months are empty and the peaks are treasury dates.'
+
+- question: What was disbursed in calendar year 2022?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance >= DATE '2022-01-01'
+      AND date_of_remittance <  DATE '2023-01-01';
+  tables:
+  - curated.v_focus_legacy
+  note: 'Calendar 2022 spans two financial years - 665 payments in FY2021-22 and 2,139 in FY2022-23, so 2,804 in all. State that calendar year was assumed.'
+
+- question: What was disbursed between October 2024 and March 2025?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_disbursed,
+           MIN(date_of_remittance) AS first_payment,
+           MAX(date_of_remittance) AS last_payment
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance >= DATE '2024-10-01'
+      AND date_of_remittance <  DATE '2025-04-01';
+  tables:
+  - curated.v_focus_legacy
+  note: 'Half-open range. All of FY2024-25 falls on two days in October, so the window returns the whole year.'
+
+- question: How many payments have no remittance date?
+  sql: |
+    SELECT COUNT(*)              AS payments_without_a_date,
+           SUM(amount_disbursed) AS amount_without_a_date
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance IS NULL;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Expect about 171, of which 170 are FY2025-26. They vanish from any date-grouped answer but survive a financial-year grouping.'
+
+- question: What was the biggest single disbursement batch?
+  sql: |
+    SELECT date_of_remittance,
+           COUNT(*)              AS payments,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance IS NOT NULL
+    GROUP BY date_of_remittance
+    ORDER BY payments DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Source top three: 2025-09-11 (3,503), 2025-06-18 (3,359), 2024-10-08 (2,331).'
+
+- question: How many payment dates were there in each financial year?
+  sql: |
+    SELECT financial_year_short,
+           COUNT(DISTINCT date_of_remittance) AS payment_dates,
+           COUNT(*)                           AS payments
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+  tables:
+  - curated.v_focus_legacy
+  note: 'FY2024-25 is two days; FY2022-23 is seven; FY2021-22 is fifteen. This is the clearest way to show the batch structure.'
+
+# ---- producer groups ---------------------------------------------------
+- question: Show the payment history of PG-FOCUS-WGH-7089
+  sql: |
+    SELECT financial_year_short, date_of_remittance, programme_variant,
+           no_of_pg_members, amount_disbursed, bank_name, ifsc_code,
+           account_no_masked, bank_details_current
+    FROM curated.v_focus_legacy
+    WHERE pg_id = 'PG-FOCUS-WGH-7089'
+    ORDER BY date_of_remittance;
+  tables:
+  - curated.v_focus_legacy
+  note: 'A single named group, so the masked account is appropriate detail. The account holder name is not in the view at all.'
+
+- question: Find the producer group called Muskan
+  sql: |
+    SELECT DISTINCT pg_id, pg_name, lgd_district, lgd_block, lgd_village_name
+    FROM curated.v_focus_legacy
+    WHERE pg_name ILIKE '%muskan%'
+    ORDER BY pg_id
+    LIMIT 25;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Names are unstable - the same group appears as "Muskan Producer Group" and "Muskan Pg". Return candidate ids, then query on pg_id.'
+
+- question: Which groups received the most money?
+  sql: |
+    SELECT pg_id,
+           MAX(pg_name)          AS pg_name,
+           lgd_district,
+           COUNT(*)              AS payments,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY pg_id, lgd_district
+    ORDER BY amount_disbursed DESC
+    LIMIT 10;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Grouped on pg_id with MAX(pg_name) for display, because one group can carry two spellings. This ranking is identical to ranking by memberships.'
+
+# ---- group SIZE vs memberships paid for (added 2026-09-25, use-case QA) --
+# A group's member count is recorded on EACH payment. "How many members does
+# X have" is the group's SIZE - MAX(no_of_pg_members) per pg_id - never a SUM
+# across its payments: Umtyrkhow Pg has 20 members and was paid twice, and
+# SUM reported it as 40 (TC-14b); top groups "with more than 15 members"
+# came back as 201 and 40 for groups of 190 and 20 (TC-15).
+- question: How many members are there in Umtyrkhow Pg?
+  sql: |
+    SELECT pg_id,
+           MAX(pg_name)          AS pg_name,
+           lgd_district,
+           MAX(no_of_pg_members) AS group_size,
+           COUNT(*)              AS payments
+    FROM curated.v_focus_legacy
+    WHERE pg_name ILIKE '%umtyrkhow%'
+    GROUP BY pg_id, lgd_district
+    ORDER BY pg_id;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Group size is MAX(no_of_pg_members) per pg_id. Never SUM it across the group''s own payments - PG-FOCUS-EKH-2613 has 20 members and 2 payments, so a SUM says 40.'
+
+- question: List top 5 PGs which have more than 15 members
+  sql: |
+    SELECT pg_id,
+           MAX(pg_name)          AS pg_name,
+           lgd_district,
+           MAX(no_of_pg_members) AS group_size
+    FROM curated.v_focus_legacy
+    GROUP BY pg_id, lgd_district
+    HAVING MAX(no_of_pg_members) > 15
+    ORDER BY group_size DESC, pg_id
+    LIMIT 5;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Filter and rank on MAX(no_of_pg_members), the group size. PG-FOCUS-WKH-3565 (190 members) is an extreme outlier against a next-largest of 20 - mention it. 1,047 groups have more than 15 members.'
+
+- question: Which Producer Groups received more than Rs 1,00,000?
+  sql: |
+    SELECT pg_id,
+           MAX(pg_name)          AS pg_name,
+           lgd_district,
+           COUNT(*)              AS payments,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed,
+           COUNT(*) OVER ()      AS groups_qualifying
+    FROM curated.v_focus_legacy
+    GROUP BY pg_id, lgd_district
+    HAVING SUM(amount_disbursed) > 100000
+    ORDER BY amount_disbursed DESC
+    LIMIT 25;
+  tables:
+  - curated.v_focus_legacy
+  note: 'COUNT(*) OVER () carries the TOTAL number of qualifying groups (541) on every row, so the answer states it even though only the top rows are listed. memberships here are memberships PAID FOR across payments, not group size.'
+
+- question: How many records of beneficiaries are available for each financial year?
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*) AS records
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+  tables:
+  - curated.v_focus_legacy
+  note: 'A RECORD is one payment row, so records = COUNT(*) per year - no other measure. Expect 965 / 2,139 / 2,653 / 8,812; FY 2023-24 returns no row (absent, not zero). Adding SUM(no_of_pg_members) here made the verifier reject the query as the wrong metric (bulk QA, 2026-09-25).'
+
+- question: Are there any duplicate Producer Groups?
+  sql: |
+    SELECT COUNT(DISTINCT pg_id) AS producer_groups,
+           COUNT(*)              AS payments,
+           (SELECT COUNT(*) FROM (SELECT pg_id FROM curated.v_focus_legacy
+                                  GROUP BY pg_id HAVING COUNT(*) > 1) r) AS groups_paid_more_than_once,
+           (SELECT COUNT(*) FROM (SELECT pg_id, date_of_remittance FROM curated.v_focus_legacy
+                                  GROUP BY pg_id, date_of_remittance HAVING COUNT(*) > 1) d) AS duplicate_payment_records
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'A group paid more than once is a REPEAT PAYMENT in a later tranche, not a duplicate group. Duplicate records (same pg_id, same date) are 0. Expect 11,906 groups, 14,569 payments, 2,655 paid more than once.'
+
+- question: Which groups were paid in more than one financial year?
+  sql: |
+    SELECT pg_id,
+           MAX(pg_name)                       AS pg_name,
+           COUNT(DISTINCT financial_year_short) AS years_paid,
+           SUM(amount_disbursed)              AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY pg_id
+    HAVING COUNT(DISTINCT financial_year_short) > 1
+    ORDER BY years_paid DESC, amount_disbursed DESC
+    LIMIT 100;
+  tables:
+  - curated.v_focus_legacy
+
+- question: Which groups first received money in FY 2025-26?
+  sql: |
+    SELECT pg.pg_id, pg.current_name, pg.village_code,
+           pg.first_payment_year_key, pg.last_payment_year_key
+    FROM curated.dim_producer_group pg
+    WHERE pg.first_payment_year_key = 2025
+    ORDER BY pg.pg_id
+    LIMIT 100;
+  tables:
+  - curated.dim_producer_group
+  note: 'The group dimension stores the first and last payment year, so this needs no aggregation over the fact. Both columns are nullable and unverified - check for NULLs first.'
+
+- question: Did any group change its recorded member count between payments?
+  sql: |
+    SELECT pg_id,
+           MAX(pg_name)              AS pg_name,
+           COUNT(*)                  AS payments,
+           MIN(no_of_pg_members)     AS smallest_recorded,
+           MAX(no_of_pg_members)     AS largest_recorded
+    FROM curated.v_focus_legacy
+    GROUP BY pg_id
+    HAVING MIN(no_of_pg_members) <> MAX(no_of_pg_members)
+    ORDER BY (MAX(no_of_pg_members) - MIN(no_of_pg_members)) DESC
+    LIMIT 25;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Member counts are per payment, not a tracked attribute. PG-FOCUS-RB-3210 went from 1 member to 12 between two payments.'
+
+- question: How many groups are there in each district?
+  sql: |
+    SELECT lgd_district, COUNT(DISTINCT pg_id) AS producer_groups
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district
+    ORDER BY producer_groups DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Geography is stable per group - no group maps to more than one village - so a group is never split across districts.'
+
+# ---- programme variant and group type ----------------------------------
+- question: Break Focus Legacy down by producer group type
+  sql: |
+    SELECT pg_entity_type,
+           pg_entity_type_name,
+           COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY pg_entity_type, pg_entity_type_name
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Enumerate rather than filter - the three stored type codes are not known to the annotation layer. Source split: 12,722 / 1,794 / 53 payments.'
+
+- question: What group types exist in Focus Legacy?
+  sql: |
+    SELECT pg_entity_type_key, type_code, type_name, source_id_prefix, notes
+    FROM curated.dim_pg_entity_type
+    ORDER BY pg_entity_type_key;
+  tables:
+  - curated.dim_pg_entity_type
+  note: 'Run this before writing any entity-type filter. The notes column carries an unconfirmed hypothesis about LAMP - do not harden it into a definition.'
+
+- question: Compare FOCUS and Focus (Addnl)
+  sql: |
+    SELECT programme_variant,
+           financial_year_short,
+           COUNT(*)              AS payments,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY programme_variant, financial_year_short
+    ORDER BY programme_variant, financial_year_short;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The year is carried into the breakdown because Focus (Addnl) exists only in FY2025-26 - all 706 payments on one day. Without the year it reads as a trend.'
+
+- question: How much went out under the additional Focus round?
+  sql: |
+    SELECT date_of_remittance,
+           COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE programme_variant = 'Focus (Addnl)'
+    GROUP BY date_of_remittance;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Confirm the stored spelling with SELECT DISTINCT programme_variant first. Expect a single row: 2025-06-26, 706 payments, 18,405,000.'
+
+- question: Group type by district
+  sql: |
+    SELECT lgd_district, pg_entity_type, COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district, pg_entity_type
+    ORDER BY lgd_district, payments DESC;
+  tables:
+  - curated.v_focus_legacy
+
+# ---- product -----------------------------------------------------------
+- question: Which products do Focus Legacy groups work on?
+  sql: |
+    SELECT UPPER(TRIM(product_raw)) AS product,
+           COUNT(*)                 AS payments,
+           SUM(no_of_pg_members)    AS memberships,
+           SUM(amount_disbursed)    AS amount_disbursed,
+           MIN(financial_year_short) AS first_fy,
+           MAX(financial_year_short) AS last_fy
+    FROM curated.v_focus_legacy
+    WHERE product_raw IS NOT NULL
+    GROUP BY UPPER(TRIM(product_raw))
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Case folding is mandatory - 62 raw spellings collapse to 45 products. The FY columns show the answer covers FY2021-22 and FY2022-23 only.'
+
+- question: Top 5 products by payments
+  sql: |
+    SELECT UPPER(TRIM(product_raw)) AS product, COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    WHERE product_raw IS NOT NULL
+    GROUP BY UPPER(TRIM(product_raw))
+    ORDER BY payments DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Without the fold, PIGGERY / Piggery / piggery split into three rows and the leader is understated by 245 payments.'
+
+- question: How complete is the product field by year?
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*)           AS payments,
+           COUNT(product_raw) AS payments_with_product,
+           ROUND(100.0 * COUNT(product_raw) / COUNT(*), 1) AS pct_populated
+    FROM curated.v_focus_legacy
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The honest framing of any product question. 100% in the first two years, then 0 of 2,653 and 8 of 8,812. The gap is in the source, not the load.'
+
+- question: How many groups work on piggery?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE UPPER(TRIM(product_raw)) = 'PIGGERY';
+  tables:
+  - curated.v_focus_legacy
+  note: 'Expect about 877 payments, covering FY2021-22 and FY2022-23 only. Say the period in the answer.'
+
+- question: Which products are grown in West Garo Hills?
+  sql: |
+    SELECT UPPER(TRIM(product_raw)) AS product, COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    WHERE lgd_district = 'WEST GARO HILLS'
+      AND product_raw IS NOT NULL
+    GROUP BY UPPER(TRIM(product_raw))
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+
+- question: Show the raw product spellings behind each product
+  sql: |
+    SELECT UPPER(TRIM(product_raw)) AS product,
+           COUNT(DISTINCT product_raw) AS raw_spellings,
+           STRING_AGG(DISTINCT product_raw, ' | ' ORDER BY product_raw) AS spellings
+    FROM curated.v_focus_legacy
+    WHERE product_raw IS NOT NULL
+    GROUP BY UPPER(TRIM(product_raw))
+    HAVING COUNT(DISTINCT product_raw) > 1
+    ORDER BY raw_spellings DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'A data-quality answer: 12 products carry more than one spelling in the source.'
+
+# ---- banking -----------------------------------------------------------
+- question: Which banks handle Focus Legacy payments?
+  sql: |
+    SELECT COALESCE(bank_name, 'Not recorded') AS bank,
+           COUNT(*)              AS payments,
+           COUNT(DISTINCT pg_id) AS producer_groups,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY COALESCE(bank_name, 'Not recorded')
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Bank analysis is legitimate here, unlike Focus Plus. The 276 payments with no bank name are labelled, not merged into another bank.'
+
+- question: What share of payments go through the two largest banks?
+  sql: |
+    SELECT ROUND(100.0 * COUNT(*) FILTER (
+             WHERE bank_name IN ('Meghalaya Rural Bank','Meghalaya Co-operative Apex Bank')
+           ) / COUNT(*), 1) AS pct_through_top_two_banks,
+           COUNT(*) AS payments
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Expect about 92%. Bank names are Title Case - the uppercase rule applies to district and block only.'
+
+- question: Bank usage by district
+  sql: |
+    SELECT lgd_district,
+           COALESCE(bank_name, 'Not recorded') AS bank,
+           COUNT(*) AS payments
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district, COALESCE(bank_name, 'Not recorded')
+    ORDER BY lgd_district, payments DESC;
+  tables:
+  - curated.v_focus_legacy
+
+- question: Which IFSC codes carry the most payments?
+  sql: |
+    SELECT ifsc_code,
+           COUNT(*)                   AS payments,
+           COUNT(DISTINCT bank_name)  AS distinct_bank_names,
+           COUNT(DISTINCT pg_id)      AS producer_groups
+    FROM curated.v_focus_legacy
+    GROUP BY ifsc_code
+    ORDER BY payments DESC
+    LIMIT 10;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The distinct_bank_names column is deliberate: SBIN0RRMEGB is a sponsor-bank code, not a branch, and it appears against seven different bank names.'
+
+- question: Which payments went to an account that is no longer current?
+  sql: |
+    SELECT pg_id, MAX(pg_name) AS pg_name, date_of_remittance,
+           bank_name, account_no_masked, amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE bank_details_current IS NULL
+      AND account_no_masked IS NOT NULL
+    GROUP BY pg_id, date_of_remittance, bank_name, account_no_masked, amount_disbursed
+    ORDER BY date_of_remittance DESC
+    LIMIT 100;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The column is TRUE or NULL, never FALSE, so IS NULL is the test. "Current" is inferred from the latest remittance date - say so.'
+
+- question: How many groups have banked at more than one account?
+  sql: |
+    SELECT COUNT(*) AS groups_with_more_than_one_account
+    FROM (
+      SELECT pg_id
+      FROM curated.v_focus_legacy
+      WHERE account_no_masked IS NOT NULL
+      GROUP BY pg_id
+      HAVING COUNT(DISTINCT account_no_masked) > 1
+    ) g;
+  tables:
+  - curated.v_focus_legacy
+  note: 'An aggregate only. The masked form is not collision-free, so treat this as a lower bound and never list the accounts themselves.'
+
+# ---- rankings and grids ------------------------------------------------
+- question: Top 5 districts by amount disbursed
+  sql: |
+    SELECT lgd_district,
+           SUM(amount_disbursed) AS amount_disbursed,
+           SUM(no_of_pg_members) AS memberships,
+           COUNT(*)              AS payments
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district
+    ORDER BY amount_disbursed DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_legacy
+  note: 'This ranking is identical to a ranking by memberships. Showing both columns makes that visible instead of presenting two findings.'
+
+- question: Top 10 blocks by number of groups
+  sql: |
+    SELECT lgd_district, lgd_block, COUNT(DISTINCT pg_id) AS producer_groups
+    FROM curated.v_focus_legacy
+    WHERE lgd_block IS NOT NULL
+    GROUP BY lgd_district, lgd_block
+    ORDER BY producer_groups DESC
+    LIMIT 10;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Block names repeat across districts, so the district is carried in the grouping and the output.'
+
+- question: Which district has the lowest disbursement?
+  sql: |
+    SELECT lgd_district, SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district
+    ORDER BY amount_disbursed ASC
+    LIMIT 1;
+  tables:
+  - curated.v_focus_legacy
+
+- question: District by financial year grid
+  sql: |
+    SELECT lgd_district,
+           SUM(amount_disbursed) FILTER (WHERE financial_year_short = '2021-22') AS fy_2021_22,
+           SUM(amount_disbursed) FILTER (WHERE financial_year_short = '2022-23') AS fy_2022_23,
+           SUM(amount_disbursed) FILTER (WHERE financial_year_short = '2024-25') AS fy_2024_25,
+           SUM(amount_disbursed) FILTER (WHERE financial_year_short = '2025-26') AS fy_2025_26,
+           SUM(amount_disbursed) AS total
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district
+    ORDER BY total DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Four year columns, not five - FY2023-24 has no column because it has no payments. Do not add a zero column for it.'
+
+- question: Average group size by district
+  sql: |
+    SELECT lgd_district,
+           ROUND(AVG(no_of_pg_members), 2) AS avg_members_per_payment,
+           COUNT(*)                        AS payments
+    FROM curated.v_focus_legacy
+    GROUP BY lgd_district
+    ORDER BY avg_members_per_payment DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The same ordering as average amount per payment, at a 5,000 scale factor.'
+
+- question: How many groups and villages does each block reach?
+  sql: |
+    SELECT lgd_district, lgd_block,
+           COUNT(DISTINCT pg_id)        AS producer_groups,
+           COUNT(DISTINCT village_code) FILTER (WHERE entity_type <> 'Unresolved') AS villages,
+           COUNT(*)                     AS payments
+    FROM curated.v_focus_legacy
+    WHERE lgd_block IS NOT NULL
+    GROUP BY lgd_district, lgd_block
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The Unresolved filter sits inside the village count only, so the payment and group columns stay complete.'
+
+# ---- data quality and reconciliation -----------------------------------
+- question: Did the Focus Legacy load lose any rows?
+  sql: |
+    SELECT dataset, raw_rows, curated_rows, quarantined,
+           raw_rows - curated_rows - quarantined AS should_be_zero
+    FROM meta.v_reconciliation_focus_legacy;
+  tables:
+  - meta.v_reconciliation_focus_legacy
+  note: 'Run this before quoting any total. Expect 14,569 = 14,566 + 3.'
+
+- question: Why is the database total lower than my spreadsheet?
+  sql: |
+    SELECT reason_code, COUNT(*) AS rows_held_back
+    FROM staging.quarantine
+    WHERE source_system = 'focus_legacy'
+    GROUP BY reason_code
+    ORDER BY rows_held_back DESC;
+  tables:
+  - staging.quarantine
+  note: 'Expect DUPLICATE_DISBURSEMENT (1) and BAD_PG_ID_PREFIX (2). Note staging is outside the megh_readonly boundary, so this may need a different role.'
+
+- question: When was Focus Legacy last loaded?
+  sql: |
+    SELECT source_dataset, source_file, started_at, completed_at, status,
+           rows_read, rows_curated_loaded, rows_quarantined
+    FROM meta.ingestion_audit
+    WHERE source_system = 'focus_legacy'
+    ORDER BY started_at DESC;
+  tables:
+  - meta.ingestion_audit
+
+- question: How complete is each field in Focus Legacy?
+  sql: |
+    SELECT COUNT(*)                        AS payments,
+           COUNT(date_of_remittance)       AS with_date,
+           COUNT(product_raw)              AS with_product,
+           COUNT(branch_raw)               AS with_branch,
+           COUNT(bank_name)                AS with_bank_name,
+           COUNT(ifsc_code)                AS with_ifsc,
+           COUNT(account_no_masked)        AS with_account
+    FROM curated.v_focus_legacy;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The coverage profile in one row. Source expectations: 14,398 dated, 3,112 with product, 3,192 with branch, 14,293 with bank name.'
+
+- question: Are there duplicate payments?
+  sql: |
+    SELECT pg_id, date_of_remittance, amount_disbursed, COUNT(*) AS rows
+    FROM curated.v_focus_legacy
+    GROUP BY pg_id, date_of_remittance, amount_disbursed
+    HAVING COUNT(*) > 1
+    ORDER BY rows DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Expected to return nothing - the one disputed pair was quarantined at load, and it differed by date anyway.'
+
+- question: Which groups were paid twice in the same financial year?
+  sql: |
+    SELECT pg_id, MAX(pg_name) AS pg_name, financial_year_short,
+           COUNT(*)              AS payments,
+           SUM(no_of_pg_members) AS memberships,
+           SUM(amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy
+    GROUP BY pg_id, financial_year_short
+    HAVING COUNT(*) > 1
+    ORDER BY amount_disbursed DESC;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Six such pairs in the source, all FY2025-26 September-then-January top-ups with different member counts. They are legitimate second payments, not duplicates.'
+
+# ---- documented dimension joins ----------------------------------------
+- question: Which assembly constituencies did Focus Legacy money reach?
+  sql: |
+    SELECT g.ac_number, g.ac_name,
+           COUNT(*)                AS payments,
+           SUM(f.amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy f
+    JOIN curated.dim_geography g ON g.geography_key = f.geography_key
+    WHERE f.entity_type <> 'Unresolved'
+    GROUP BY g.ac_number, g.ac_name
+    ORDER BY amount_disbursed DESC;
+  tables:
+  - curated.v_focus_legacy
+  - curated.dim_geography
+  note: 'A permitted dimension join on a declared FK. The constituency comes from the geography registry, not the scheme''s own dropped column, and Unresolved rows are excluded - so this will not reconcile to the scheme total.'
+
+- question: Which constituency in East Khasi Hills got the most Focus Legacy money?
+  sql: |
+    SELECT g.ac_number, g.ac_name, SUM(f.amount_disbursed) AS amount_disbursed
+    FROM curated.v_focus_legacy f
+    JOIN curated.dim_geography g ON g.geography_key = f.geography_key
+    WHERE f.lgd_district = 'EAST KHASI HILLS'
+      AND f.entity_type <> 'Unresolved'
+    GROUP BY g.ac_number, g.ac_name
+    ORDER BY amount_disbursed DESC
+    LIMIT 1;
+  tables:
+  - curated.v_focus_legacy
+  - curated.dim_geography
+
+- question: Which villages appear in Focus Legacy but not in other schemes?
+  sql: |
+    SELECT b.geography_key, g.village_code, g.lgd_village_name, g.lgd_district,
+           b.row_count AS focus_legacy_rows
+    FROM curated.bridge_geography_source b
+    JOIN curated.dim_geography g ON g.geography_key = b.geography_key
+    WHERE b.source_system = 'focus_legacy'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM curated.bridge_geography_source b2
+        WHERE b2.geography_key = b.geography_key
+          AND b2.source_system <> 'focus_legacy'
+      )
+    ORDER BY b.row_count DESC
+    LIMIT 100;
+  tables:
+  - curated.bridge_geography_source
+  - curated.dim_geography
+  note: 'The join-free route to a coverage question. Run SELECT DISTINCT source_system first - whether Focus Legacy has bridge rows at all is unverified.'
+
+# ---- cross-scheme, built by aggregating each side ----------------------
+- question: Compare Focus Legacy and PMAY disbursement by district
+  sql: |
+    WITH fl AS (
+      SELECT lgd_district, SUM(amount_disbursed) AS focus_legacy_amount
+      FROM curated.v_focus_legacy
+      GROUP BY lgd_district
+    ), pm AS (
+      SELECT lgd_district, SUM(amount_released) AS pmay_amount_released
+      FROM curated.v_pmay
+      WHERE NOT is_placeholder
+      GROUP BY lgd_district
+    )
+    SELECT COALESCE(fl.lgd_district, pm.lgd_district) AS lgd_district,
+           fl.focus_legacy_amount,
+           pm.pmay_amount_released
+    FROM fl
+    FULL JOIN pm ON pm.lgd_district = fl.lgd_district
+    ORDER BY lgd_district;
+  tables:
+  - curated.v_focus_legacy
+  - curated.v_pmay
+  note: 'Focus Legacy is in neither cross-scheme view, so each side is aggregated independently and the aggregates joined - never the facts. The two amounts mean different things: money remitted against money released, and PMAY carries its own placeholder predicate while Focus Legacy has none.'
+
+- question: Which villages got both Focus Legacy and PMAY?
+  sql: |
+    WITH fl AS (
+      SELECT village_code, COUNT(*) AS focus_legacy_payments
+      FROM curated.v_focus_legacy
+      WHERE entity_type <> 'Unresolved'
+      GROUP BY village_code
+    )
+    SELECT c.village_code, c.lgd_district, c.pmay_houses, fl.focus_legacy_payments
+    FROM curated.v_cross_scheme_village_coverage c
+    JOIN fl ON fl.village_code = c.village_code
+    WHERE c.pmay_houses > 0
+    ORDER BY fl.focus_legacy_payments DESC
+    LIMIT 100;
+  tables:
+  - curated.v_focus_legacy
+  - curated.v_cross_scheme_village_coverage
+  note: 'The coverage view has no Focus Legacy column, so the Focus Legacy side is aggregated to village_code first and joined on the shared natural key.'
+
+# ---- listings ----------------------------------------------------------
+- question: List Focus Legacy payments in Songsak block
+  sql: |
+    SELECT pg_id, pg_name, lgd_village_name, financial_year_short,
+           date_of_remittance, no_of_pg_members, amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE lgd_block = 'SONGSAK'
+    ORDER BY date_of_remittance, pg_id
+    LIMIT 100;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Songsak is both a block and a village name - the block reading is the default, and the answer should say so. Block literals are UPPERCASE.'
+
+- question: List the groups paid on 11 September 2025
+  sql: |
+    SELECT pg_id, pg_name, lgd_district, lgd_block,
+           no_of_pg_members, amount_disbursed
+    FROM curated.v_focus_legacy
+    WHERE date_of_remittance = DATE '2025-09-11'
+    ORDER BY amount_disbursed DESC
+    LIMIT 100;
+  tables:
+  - curated.v_focus_legacy
+  note: 'The largest single batch in the scheme - about 3,503 payments. A listing is capped; offer the summary instead.'
+
+- question: Show every payment for groups in Mairang block
+  sql: |
+    SELECT pg_id, pg_name, lgd_village_name, financial_year_short,
+           date_of_remittance, no_of_pg_members, amount_disbursed,
+           UPPER(TRIM(product_raw)) AS product
+    FROM curated.v_focus_legacy
+    WHERE lgd_block = 'MAIRANG'
+    ORDER BY date_of_remittance, pg_id
+    LIMIT 100;
+  tables:
+  - curated.v_focus_legacy
+  note: 'Mairang is in Eastern West Khasi Hills, though the groups'' PG ids say WKH. Never filter on the id letters.'

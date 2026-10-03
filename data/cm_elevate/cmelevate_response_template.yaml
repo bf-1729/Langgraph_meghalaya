@@ -1,0 +1,528 @@
+# cmelevate_response_template.yaml
+#
+# ===========================================================================
+# v1.0 - 2026-09-04 - FIRST VERSION, WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Response templates for CM Elevate - node 5.15, the response composer.
+# Editable by analysts - no code change needed.
+# Numbers are locked from the result set; templates only shape the wording
+# around them.
+#
+# HOW THIS DIFFERS FROM PMAY'S RESPONSE TEMPLATE
+#
+#   1. NO CURRENCY ANYWHERE. PMAY's formatting block opens with a rupee symbol
+#      and a money unit. CM Elevate has no amount column, so currency_symbol is
+#      null and every money template is a REFUSAL rather than a format. If a
+#      rupee sign ever renders in a CM Elevate answer, something upstream is
+#      wrong.
+#
+#   2. NO TIME LANGUAGE. PMAY has financial_year_format, date_format, a
+#      partial-year caveat and eleven time-based follow-ups. CM Elevate has no
+#      date, so the whole family is replaced by one refusal template and a rule
+#      never to imply recency.
+#
+#   3. THE SCHEME MUST BE NAMED. CM Elevate is 15 schemes under one code. A
+#      figure with no scheme stated is ambiguous in a way no PMAY figure is, so
+#      scope_must_name_scheme is a formatting rule, not a nicety.
+#
+#   4. DENOMINATORS TRAVEL WITH PERCENTAGES. Six of the 15 schemes hold fewer
+#      than 15 applications, where one record moves a share by 7 to 50 points.
+#
+#   5. REFUSAL TEMPLATES ARE A FIRST-CLASS SECTION. 40 of the 89 use cases in
+#      the requirement workbook cannot be answered. The composer needs wording
+#      that says so plainly and offers the nearest real question, relabelled -
+#      never an application count dressed as a money figure.
+#
+# Every figure quoted inside a template below is a source-export value
+# (8,436 rows, profiled 2026-09-04) and is NOT re-verified against megh_db.
+# Templates that hardcode a number are marked; prefer the interpolated form.
+# ===========================================================================
+
+response_templates:
+
+  # ---- how the answer text is shaped ------------------------------------
+  formatting:
+    number_format: "indian"              # 8,436 not 8436
+    currency_symbol: null                # NO MONEY COLUMN EXISTS - see money_rule
+    decimal_places: 0                    # counts are integers
+    percent_decimal_places: 1            # one place, not PMAY's two - see small_denominator_rule
+    date_format: null                    # NO DATE COLUMN EXISTS - see time_rule
+    financial_year_format: null          # no year on a CM Elevate row
+    money_unit: null
+
+    money_rule:
+      critical: true
+      text: >
+        CM Elevate holds no monetary values. There is no sanctioned amount, subsidy,
+        loan or disbursement, and none in the source either. NEVER render a currency
+        symbol, a crore or lakh conversion, or a per-beneficiary amount in a CM Elevate
+        answer, and never present an application count as though it answered a money
+        question. curated.dim_scheme.money_unit carries a value for the CM_ELEVATE row
+        only because the column is NOT NULL - it describes nothing.
+
+    time_rule:
+      critical: true
+      text: >
+        CM Elevate applications carry no date - no application date, no year, no month.
+        NEVER render a period, a financial year, a trend direction, or words implying
+        recency ("latest", "recent", "so far this year", "up from"). If a scope
+        placeholder would be empty because no period exists, drop the phrase rather than
+        rendering "in ".
+
+    scope_must_name_scheme:
+      critical: true
+      text: >
+        CM Elevate is 15 schemes under one scheme_code. A figure given without naming
+        its scheme, or without saying it covers all 15, is ambiguous. Every template
+        with a {scope} placeholder must resolve it to either a named scheme or the
+        explicit phrase "across all 15 CM Elevate schemes".
+
+    small_denominator_rule:
+      critical: true
+      threshold: 15
+      text: >
+        Six of the 15 schemes hold fewer than 15 applications - Motorcaravan 2, Cinema
+        Theatre 2, Agro Tourism Villa 3, Sports and Wellness 6, Green Taxi 10,
+        Sericulture 14. Below the threshold, show the COUNT instead of the percentage.
+        At or above it, show the count ALONGSIDE the percentage, never the percentage
+        alone.
+
+    application_not_award_rule:
+      critical: true
+      text: >
+        One row is one APPLICATION - a request, not an award. Nothing in this data
+        confirms that any applicant received anything. Say "applications" throughout.
+        Never say "beneficiaries who received", "funded", "approved" or "sanctioned".
+
+    show_unit_always: false              # there is no unit to show
+    show_assumptions: true               # surface the defaults that fired
+    show_denominator_with_share: true
+    geography_display_case: "title"      # district and block are stored UPPERCASE in
+                                         # dim_geography - title-case for display,
+                                         # filter with the uppercase literal
+    status_display_case: "stored"        # emit data_verified and application_mode
+                                         # exactly as stored - "On Hold", "cmconnectcenter"
+    level_display_case: "lower"          # current_level is folded before grouping
+    null_display: "not recorded"
+    zero_display: "0"                    # a recorded zero is a real value, not a blank
+    tie_behaviour: "show_all"
+    empty_result_message: "No CM Elevate applications for that selection."
+    max_rows_inline: 20
+    max_schemes_inline: 15
+
+    unresolved_geography_rule: >
+      Village counts and village lists exclude entity_type = 'Unresolved'; every other
+      total includes it. Do not mention the exclusion unless the user asked about data
+      completeness or the excluded count is material - it is the normal case.
+
+    chart_rule: >
+      The largest scheme is over 1,800 times the smallest, so a linear bar chart of all
+      15 renders nine as invisible slivers. Either show the top 5 with the remainder
+      grouped, or use a log scale - and say which was done.
+
+  # =======================================================================
+  templates:
+
+    # ---- result shapes, all count-based ---------------------------------
+    single_value: "{metric} for {scope} is {value}."
+    count: "{scope} has {value} {entity}."
+    application_count: "{scope} has {value} applications."
+    programme_total: "CM Elevate has {value} applications across all 15 schemes."
+    scheme_count: "CM Elevate covers {value} individual schemes."
+    multi_metric: "For {scope}: {metric_list}."
+    average_value: "Average {metric} per {denominator} for {scope} is {value}."
+    share_percentage: "{scope} accounts for {value}% of {denominator_label} ({value_count} of {total})."
+    proportion_of_total: "{scope} is {value}% of all CM Elevate applications ({value_count} of {total})."
+
+    ranked_list: "Top {n} {entity} by application count:"
+    bottom_list: "Bottom {n} {entity} by application count:"
+    extremes: "Highest is {top_entity} at {top_value}; lowest is {bottom_entity} at {bottom_value}."
+    rank_position: "{scope} ranks {rank} of {total} {entity} by application count."
+    tie_at_top: "{tied_entities} are level at {value}."
+
+    breakdown: "Applications by {level} for {scope}:"
+    scheme_breakdown: "Applications by scheme{scope_suffix}:"
+    district_breakdown: "Applications by district{scope_suffix}:"
+    block_breakdown: "Applications by block{scope_suffix}:"
+    village_breakdown: "Applications by village{scope_suffix}, excluding unmatched localities:"
+    status_breakdown: "Applications in {scope} by verification outcome:"
+    mode_breakdown: "Applications in {scope} by how they were submitted:"
+    applicant_breakdown: "Applications in {scope} by applicant type:"
+    gender_breakdown: "Applications in {scope} by gender:"
+    cross_tab: "Applications by {row_level} and {column_level}{scope_suffix}:"
+
+    comparison: "{entity_a} {value_a} against {entity_b} {value_b} - a difference of {change}."
+    scheme_comparison: "{scheme_a} has {value_a} applications; {scheme_b} has {value_b}."
+    district_comparison: "{district_a} has {value_a} applications across {schemes_a} schemes; {district_b} has {value_b} across {schemes_b}."
+
+    coverage_statement: "{scope} reaches {districts} districts, {blocks} blocks and {villages} villages."
+    scheme_coverage: "{scheme} operates in {districts} of Meghalaya's 12 districts."
+    single_district_scheme: "{scheme} operates in {district} only, so there is no geographic comparison to make."
+
+    # ---- lookups and listings -------------------------------------------
+    entity_detail: "Application {request_id} is under {scheme}, in {village} village, {block} block, {district} district."
+    application_status_detail: "It was submitted {mode} and its verification outcome is {data_verified}; the file is at {file_status}."
+    lookup_list: "Matches for '{value}':"
+    multiple_matches: "Application number {request_id} appears on {count} records. All are shown."
+    entity_list: "{entity} in {scope}:"
+    scheme_list: "The 15 CM Elevate schemes, by application count:"
+    name_not_held: "Applicant names are not held in this data, so applications are identified by their application number."
+
+    # ---- situations that need specific wording ---------------------------
+    empty_result: "No applications recorded for {scope}."
+    all_zero_result: "{scope} recorded zero applications. The zero is a real recorded value, not missing data."
+    scheme_absent_from_scope: "{scheme} has no applications in {scope}."
+    no_data_in_source: "{scope} has {available} recorded but no {requested}, so there is nothing to report rather than a zero."
+    partial_coverage: "{covered} of {requested_total} {entity} have applications recorded; the rest are not reported rather than zero."
+    unavailable_in_source: "{requested} is not held in the CM Elevate data."
+    large_result: "Showing the first {shown} of {total} rows."
+
+    # ---- lines that travel alongside the answer --------------------------
+    assumption_prefix: "Assumed: {assumptions}."
+    application_grain_note: "One row is one application - a request, not an award. The data does not record whether anyone received anything."
+    programme_scope_note: "This covers all 15 CM Elevate schemes together."
+    scheme_scope_note: "This covers {scheme} only."
+    scheme_skew_note: "Two schemes hold about 78% of all applications, so a programme total is dominated by them."
+    small_denominator_note: "{scheme} holds only {count} applications, so a percentage from it moves several points per record."
+    denominator_note: "{value} of {total}."
+    grouping_is_constructed_note:
+      critical: true
+      text_template: "{grouping} is a grouping applied here, not a field in the data - it covers {members}."
+      applies_to: [region groupings, sector or scheme-family groupings]
+    region_expansion_note: "{region} covers {districts}. There is no region field in the data, so the grouping was applied here."
+    scheme_group_expansion_note: "{group} covers {schemes}. There is no sector field in the data, so the grouping was applied here."
+    overlapping_groups_note: "These groups overlap - {shared} appears in both - so the two totals cannot be added."
+
+    village_identity_note: "Villages are counted by LGD code, since 36 village names in this data map to more than one village."
+    unresolved_excluded_note: "{excluded} applications could not be matched to a real village and are left out of the village count; they remain in every other total."
+    urban_ward_note: "{value} of these localities are urban wards. CM Elevate reaches Municipal Boards and Town Committees, unlike rural-only schemes."
+    block_body_mix_note: "This block count mixes rural C&RD blocks with urban Municipal Boards and Town Committees."
+    geo_conflict_note: "{value} of these applications sit in villages where sources disagree on the block or district; the official roster values were used."
+
+    duplicate_application_note: "{duplicates} application numbers appear more than once, so the record count and the distinct-application count differ."
+    count_vs_distinct_note: "{rows} records against {distinct} distinct application numbers."
+    verification_null_note: "{excluded} applications have no verification outcome recorded and are shown as 'not recorded' rather than assumed valid."
+    applicant_category_null_note: "{excluded} applications have no applicant type recorded."
+
+    on_hold_source_note: "'On hold' is taken from the verification field, which is where that status is recorded."
+    dead_flag_note:
+      critical: true
+      text: "The {flag} flag is unpopulated in this data - every record reads false - so this zero reflects a gap in the data rather than {behaviour}."
+      example: "The withdrawn flag is unpopulated in this data - every record reads false - so this zero reflects a gap in the data rather than applicants withdrawing."
+    forward_status_note:
+      critical: true
+      text: "'forward' means the file moved to the next workflow step, not that it was approved or funded. About 98% of applications sit at this status."
+    level_no_order_note: "Workflow levels are listed by frequency. The data does not assert that one level follows another."
+    level_case_note: "Workflow levels were combined across capitalisation variants."
+    sendback_combined_note: "Sent-back applications are recorded under two wordings, combined here."
+    mode_label_note: "'cmconnectcenter' is an assisted walk-in centre, not an online submission."
+
+    gender_source_note: "Gender is recorded in each scheme's own details rather than as a standard field, and is present for every application."
+    gender_varies_by_scheme_note:
+      critical: true
+      text: "Gender balance varies widely by scheme - from all-female to all-male - so the programme figure of {programme_pct}% should not be read as applying to any one scheme."
+    scheme_outlier_note: "{scheme} is an outlier on this measure: {value} against {comparison} across the other schemes."
+    type_raw_note: "Applicant types were grouped on the standard categories. Each scheme spells its own raw label differently, so the raw values are not comparable."
+    jsonb_scope_note: "This field is recorded by {scheme} and not by every CM Elevate scheme, so the answer covers that scheme only."
+    uncoded_field_note: "This field holds a code with no lookup table in the database, so the stored value is shown as-is."
+
+    threshold_breach: "{scope} is below {threshold} at {value}."
+    threshold_pass: "{scope} is at or above {threshold} at {value}."
+    outlier_note: "{entity} is well clear of the rest and pulls the average up."
+    reconciliation_note: "Application totals have not yet been reconciled between the source export and the database."
+
+    # =====================================================================
+    # REFUSAL TEMPLATES
+    # No PMAY counterpart as a section. 40 of the 89 requirement-workbook use
+    # cases cannot be answered, so the composer needs wording that says so
+    # plainly and offers the nearest real question, clearly relabelled.
+    #
+    # THE RULE THEY ALL SHARE: never let an application count stand in for a
+    # money figure. Offering the count is fine - as a different question,
+    # named as such.
+    # =====================================================================
+
+    money_not_held:
+      critical: true
+      text: "CM Elevate records applications only. There is no sanctioned, subsidy, loan or disbursed amount held for this scheme, so that figure cannot be produced."
+      offer: "I can tell you how many applications there are{scope_suffix} - would that help?"
+      never: "Do not render a rupee figure, and do not present the application count as the answer to the money question."
+
+    disbursement_not_held:
+      text: "No disbursement figures are held for CM Elevate - the data stops at the application."
+      offer: "Applications by scheme or district are available instead."
+
+    sanctioned_not_held:
+      text: "There is no sanctioned amount in this data. An application is a request, not an award, so nothing here confirms an approval or a figure."
+
+    subsidy_or_loan_not_held:
+      text: "Subsidy and loan amounts, and their tranches, are not held for CM Elevate."
+
+    loan_channel_not_held:
+      text: "There is no loan-channel field in this data - Bank and LIFCOM are not recorded for CM Elevate."
+
+    gap_not_computable:
+      text: "Neither a sanctioned nor a disbursed amount is held, so the gap between them cannot be calculated."
+      offer: "The verification-outcome split - Valid, On Hold, Wrong, Invalid - is available."
+      never: "Do not present a count of unverified applications as a funding pipeline. They are different things."
+
+    time_not_held:
+      critical: true
+      text: "CM Elevate applications carry no date in this data - there is no application date, month or financial year - so they cannot be placed on a timeline."
+      offer: "I can break them down by scheme, district, block, applicant type, gender or status."
+      never: "Do not use the load timestamp, and do not read a date out of the application number - it is unpadded and ambiguous."
+
+    trend_not_available:
+      text: "A trend needs a date and CM Elevate applications do not carry one."
+      offer: "The distribution across schemes or districts is available instead."
+
+    recency_not_available:
+      text: "Newest and oldest cannot be distinguished - CM Elevate applications carry no date."
+
+    approval_not_recorded:
+      critical: true
+      text: "CM Elevate does not record an approval decision. The file status shows where an application sits in the workflow, not whether it was approved."
+      offer: "The verification outcome - whether the application's own data was found valid - is recorded, if that helps."
+
+    outcome_flags_not_held:
+      text: "There is no desanctioned or refused field for CM Elevate, and no refusal reasons."
+      offer: "The nearest recorded verdict is the verification outcome - Valid, On Hold, Wrong or Invalid - which is about the application's data, not about funding."
+
+    names_not_held:
+      critical: true
+      text: "Applicant names are not held in the database - they were removed when the data was loaded."
+      offer: "I can answer by scheme, district, block, village or application number."
+      never: "Do not offer a did-you-mean list. This is not a spelling problem, and there is no join that recovers a name."
+
+    personal_details_not_held:
+      text: "Aadhaar, EPIC, mobile numbers, PAN and bank account details are not held for CM Elevate - they were removed at ingest."
+
+    personal_details_withheld:
+      critical: true
+      text: "I cannot return dates of birth, addresses, email addresses or member identifiers for individual applicants."
+      offer: "I can answer the same question as a group total - which grouping would you like?"
+      never: >
+        Do not surface these fields even though some survive in the scheme-specific
+        details. Date of birth plus address plus village is re-identifying.
+
+    scheme_not_in_data:
+      critical: true
+      text: "There is no {value} scheme in the CM Elevate data."
+      offer: "The 15 schemes held are: {scheme_list}. Which did you mean?"
+      never: "Do not fuzzy-match onto the nearest-sounding real scheme."
+
+    cross_scheme_money_not_possible:
+      text: "CM Elevate has no money figures, so it cannot be compared against PMAY or MGNREGA spending."
+      offer: "I can compare which villages each scheme reaches - would that help?"
+
+    cross_scheme_row_level_refused:
+      text: "CM Elevate is recorded per application and the other schemes per house or per village-year, so they cannot be listed side by side row by row."
+      offer: "A village-coverage comparison is available."
+
+    identifier_format_wrong:
+      text: "'{value}' is not the application-number format held here - CM Elevate numbers begin with REQ."
+      offer: "I can search by scheme, district or village instead."
+
+    workbook_figure_correction:
+      critical: true
+      text: "That figure comes from a different extract of CM Elevate. This database holds about {actual} applications across 15 schemes."
+      offer: "Shall I answer from the data held here?"
+
+    scheme_count_correction:
+      text: "CM Elevate has 15 schemes in this database, not 13."
+      offer: "Shall I list all 15 with their application counts?"
+
+    write_refused: "I can only read this data, so I cannot make that change."
+    permission_denied: "That level of detail is above your access. The finest level available to you is {allowed_level}."
+    execution_failed: "The query could not be completed. Please try a narrower scope."
+
+    # ---- entity resolution wording ---------------------------------------
+    entity_not_found: "'{value}' is not in the CM Elevate data. Closest matches: {suggestions}."
+    ambiguous_entity_resolved: "Read '{value}' as {resolved} in {district}. There are {count} places with that name."
+    ambiguous_scheme: "'{value}' could be {candidates}. Which did you mean?"
+    colliding_name_resolved: "Read '{value}' as a block. It is also the name of a village - say 'village {value}' for that reading."
+    scheme_resolved_from_application_number: "Application number {request_id} belongs to {scheme}."
+    district_spelling_resolved: "Read '{value}' as {canonical}, the form held in the database."
+
+  # =======================================================================
+  follow_up_rules:
+
+    # ---- move across schemes - the axis that matters most here -----------
+    - condition: "result_is_programme_total"
+      suggestion: "Break this down by scheme? Two schemes hold about 78% of it."
+
+    - condition: "result_is_single_scheme"
+      suggestion: "See how this compares with the other schemes?"
+
+    - condition: "result_is_scheme_breakdown"
+      suggestion: "See which districts each scheme reaches?"
+
+    - condition: "result_is_scheme_ranking"
+      suggestion: "See the smallest schemes as well?"
+
+    - condition: "result_scheme_is_small"
+      suggestion: "See the larger schemes for comparison?"
+
+    - condition: "result_is_scheme_group"
+      suggestion: "See the individual schemes inside that grouping?"
+
+    - condition: "result_is_two_scheme_comparison"
+      suggestion: "Add the other schemes in the same family?"
+
+    - condition: "result_scheme_not_statewide"
+      suggestion: "See which districts it does not reach?"
+
+    # ---- move up or down the geography hierarchy ------------------------
+    - condition: "result_is_statewide"
+      suggestion: "Split this by district?"
+
+    - condition: "result_by_district"
+      suggestion: "Break this down by block?"
+
+    - condition: "result_by_block"
+      suggestion: "Break this down by village?"
+
+    - condition: "result_is_single_village"
+      suggestion: "Compare this against the rest of the block?"
+
+    - condition: "result_is_single_district"
+      suggestion: "See how this compares with the other districts?"
+
+    - condition: "result_is_region"
+      suggestion: "See the districts inside that region separately?"
+
+    - condition: "result_is_village_list"
+      suggestion: "See which of those villages also have PMAY houses?"
+
+    - condition: "result_includes_wards"
+      suggestion: "Separate the urban wards from the rural villages?"
+
+    # ---- move across the categorical dimensions -------------------------
+    - condition: "result_is_application_count"
+      suggestion: "See the verification-outcome split for these?"
+
+    - condition: "result_is_status_breakdown"
+      suggestion: "See the same split by scheme?"
+
+    - condition: "result_is_on_hold_count"
+      suggestion: "See which schemes those on-hold applications belong to?"
+
+    - condition: "result_is_gender_breakdown"
+      suggestion: "See the gender split scheme by scheme? It varies from all-female to all-male."
+
+    - condition: "result_is_programme_gender"
+      suggestion: "Break this down by scheme? The programme figure hides a very wide range."
+
+    - condition: "result_is_mode_breakdown"
+      suggestion: "See which schemes rely most on assisted application?"
+
+    - condition: "result_is_applicant_breakdown"
+      suggestion: "See which schemes the registered bodies applied to?"
+
+    - condition: "result_is_district_breakdown"
+      suggestion: "See the scheme mix inside the top district?"
+
+    - condition: "result_is_cross_tab"
+      suggestion: "Restrict this to the larger schemes so the table is readable?"
+
+    # ---- data quality ----------------------------------------------------
+    - condition: "result_has_unresolved_geography"
+      suggestion: "See the applications that could not be matched to a village?"
+
+    - condition: "result_has_duplicate_application_numbers"
+      suggestion: "See which application numbers repeat?"
+
+    - condition: "result_has_missing_verification"
+      suggestion: "See the applications with no verification outcome recorded?"
+
+    - condition: "result_has_geo_conflict"
+      suggestion: "Exclude the villages where sources disagree on the district?"
+
+    - condition: "result_is_data_quality_summary"
+      suggestion: "See the load reconciliation for each of the 15 schemes?"
+
+    # ---- work with the list just returned --------------------------------
+    - condition: "result_is_ranked_list"
+      suggestion: "Would you like to see the lowest as well?"
+
+    - condition: "result_is_ranked_list_top_n"
+      suggestion: "See what share of the total these account for?"
+
+    - condition: "result_has_tie"
+      suggestion: "Break the tie on a second measure - districts covered, perhaps?"
+
+    - condition: "result_has_outlier"
+      suggestion: "See the figures with that entry set aside?"
+
+    - condition: "result_row_count_exceeds_display"
+      suggestion: "Export the full list?"
+
+    - condition: "result_is_record_listing"
+      suggestion: "Summarise these applications by scheme instead?"
+
+    - condition: "result_is_scheme_chart"
+      suggestion: "Group the smallest schemes together so the chart is readable?"
+
+    # ---- scheme-specific detail ------------------------------------------
+    - condition: "result_is_single_scheme_detail"
+      suggestion: "See what additional fields this scheme records?"
+
+    - condition: "result_is_jsonb_field"
+      suggestion: "See the same field for a different scheme?"
+
+    # ---- recover from a thin or failed answer ----------------------------
+    - condition: "result_is_empty"
+      suggestion: "Try a wider scope, or the district this block sits in?"
+
+    - condition: "result_is_all_zero"
+      suggestion: "See which districts this scheme does reach?"
+
+    - condition: "entity_not_found"
+      suggestion: "List the schemes, or the villages in that district, instead?"
+
+    - condition: "entity_resolved_by_assumption"
+      suggestion: "Did you mean the village of that name rather than the block?"
+
+    - condition: "scheme_resolved_by_assumption"
+      suggestion: "Did you mean one of the other vehicle schemes?"
+
+    - condition: "result_has_partial_coverage"
+      suggestion: "See which of them have nothing recorded?"
+
+    # ---- after a refusal, offer the nearest real question ---------------
+    - condition: "refused_money_question"
+      suggestion: "Would an application count for the same scope help instead?"
+      note: >
+        Offer it as an explicitly different question. Never let the count read as the
+        answer to the money question.
+
+    - condition: "refused_time_question"
+      suggestion: "Would a breakdown by scheme or district help instead?"
+
+    - condition: "refused_outcome_question"
+      suggestion: "Would the verification-outcome split help instead?"
+      note: Relabel it clearly - it is about the application's data, not about funding.
+
+    - condition: "refused_name_lookup"
+      suggestion: "Would you like to search by application number, scheme or village?"
+
+    - condition: "corrected_workbook_figure"
+      suggestion: "Shall I show what this database actually holds for that question?"
+
+  # =======================================================================
+  composer_checks:
+    critical: true
+    note: >
+      Assertions the composer should run against its own draft before sending.
+      Each one catches a failure this partition is specifically prone to.
+    checks:
+    - "No currency symbol, and no words 'crore', 'lakh', 'rupees', 'disbursed', 'sanctioned amount' or 'subsidy' appear in the answer."
+    - "No year, month, quarter or date appears, and no word implying recency."
+    - "Every figure names its scheme, or says it covers all 15 schemes."
+    - "Every percentage is accompanied by its count."
+    - "The word 'applications' is used, not 'beneficiaries who received' or 'approved'."
+    - "If a region or sector grouping was used, the answer says the grouping was applied here and lists its members."
+    - "If a village count was given, the answer used LGD codes and excluded unmatched localities."
+    - "If an on-hold figure was given, it came from the verification field."
+    - "If a zero was reported for a flag, the answer says whether the flag is unpopulated."
+    - "If the answer refused something, it offered the nearest real question and named it as a different question."

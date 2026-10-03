@@ -1,0 +1,2397 @@
+# cmelevatelegacy_prompt_few_shots.yaml
+#
+# CM Elevate Legacy - prompt-layer few-shot bank, v2.0 (2026-09-24).
+# Scheme: CM Elevate Legacy (DB: CM Elevate Disbursement,
+# curated.v_cm_elevate_disbursement). Transcribed from PROMPT_LAYER_FEW_SHOTS.md
+# ("Prompt Layer Re-verification and Few-Shot Library v2"). That document is the
+# reviewed source; this file is the machine-readable form the app loads.
+#
+# How the app reads this file (app/annotations.py):
+#   sql_generation_examples  - the retrieval pool for the SQL prompt. Every entry
+#       has `question` and either `sql` or `status: UNANSWERABLE` + `reason`
+#       (the loader's existing contract). The extra keys are additive:
+#         variants     - other phrasings; retrieval scores the best of question
+#                        and variants, so "kitne records hai piggery me" finds C02
+#         plan         - 1-5 reasoning steps, rendered as a "Plan:" line
+#         caveat_sql   - companion query that fetches the number a caveat needs
+#         assumptions / caveats / use_case / why - documentation for reviewers
+#   common_mistakes          - the contrastive WRONG -> RIGHT block, rendered into
+#                              every CM Elevate Legacy SQL prompt
+#   answer_shots             - result rows + finished answer, for the composer
+#   clarification_shots      - what the gate asks instead of guessing (reference;
+#                              the sericulture ask is wired in app/pipeline.py)
+#
+# Policy defaults applied here: disbursement_ambiguity = answer_with_split and
+# refusal_ambiguity = answer_all_fields, so M01 and R01 are in the pool and the
+# clarify_first shots K01 / K02 are kept out of it (the model must never see
+# contradictory examples). partition_context = routed_here, so K06 is also out:
+# the app itself decides which CM Elevate dataset a question belongs to.
+#
+# Every expected figure is a SOURCE-WORKBOOK figure (2,823 rows). The database
+# now holds all 2,823 too - source row 2392 was un-quarantined on 2026-09-25.
+# NOT ONE QUERY HAS BEEN EXECUTED AGAINST megh_db; they execute on the calibrated
+# mock described in the document. Verify before trusting a figure.
+
+bank_version: '2.0'
+scheme: CM Elevate Legacy
+query_surface: curated.v_cm_elevate_disbursement
+# The scheme's own name, as retrieval tokens. The pool below is already this
+# scheme's, so its name separates nothing; without this, "legacy" (rare in the
+# shot questions, so a high IDF) dragged the same shots into every prompt.
+# ("disbursement" is NOT listed: retrieval folds it into the money token that
+# every disbursement question needs.)
+ranking_stop_words: [cm, elevate, legacy, cmelevate, cmelevatelegacy, under]
+# The document's selection rule: at most one refusal shot per prompt, and a
+# refusal must out-match the SQL shots clearly to lead (a real refusal question
+# is caught earlier by the pipeline's deterministic not-held gate anyway).
+refusal_score_factor: 0.6
+max_refusal_shots: 1
+
+sql_generation_examples:
+
+# ---- 6.1 Counts and scheme mix -------------------------------------------
+- id: C01
+  use_case: TC-11
+  question: "How many total applications are recorded under CM-ELEVATE?"
+  variants: ["total beneficiaries under CM Elevate", "how many records are there", "total no of cases"]
+  plan:
+  - "Bare CM-ELEVATE -> this partition (routed_here); state it"
+  - "Applications -> records: one row = one sanction-and-disbursement record"
+  - "No mandatory filter in this scheme -> COUNT(*)"
+  sql: |
+    SELECT COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions:
+  - "Answering from the CM Elevate Legacy sanction and disbursement records."
+  - "Counted as records - one row is one applicant's sanction and disbursement under one scheme."
+  caveats: [record_grain_note, quarantine_note]
+  why: "No placeholder flag exists here (unlike PMAY) - adding any blanket WHERE would be invented."
+
+- id: C02
+  use_case: TC-12
+  question: "How many applications are recorded under Piggery?"
+  variants: ["kitne records hai piggery me", "piggery ke kitne beneficiary", "no. of pig farming cases"]
+  plan:
+  - "Resolve 'Piggery' -> exact stored scheme_name"
+  - "Filter on scheme_name - never on the MPDSI prefix"
+  - "COUNT(*)"
+  sql: |
+    SELECT COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme';
+  assumptions: ["Read 'Piggery' as Meghalaya Piggery Development Scheme."]
+  caveats: [record_grain_note]
+
+- id: C03
+  use_case: TC-12, TC-13
+  question: "How many records are there under each scheme?"
+  variants: ["scheme wise applications", "scheme-wise count", "applications per scheme"]
+  plan:
+  - "Group by scheme_name"
+  - "13 schemes -> return all, no LIMIT"
+  - "Order by records desc"
+  sql: |
+    SELECT scheme_name, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+  assumptions: ["All 13 schemes are shown, since the list is short enough to read in full."]
+  caveats: [record_grain_note]
+
+- id: C04
+  use_case: TC-13
+  question: "Which schemes have the highest number of applications?"
+  variants: ["top schemes by applications", "schemes with most beneficiaries"]
+  plan:
+  - "Rank schemes by COUNT(*)"
+  - "Add share of total (window) to expose the Piggery skew"
+  - "Add sanctioned_cr because the money leader is a different scheme"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) AS records,
+           ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS share_pct,
+           ROUND(SUM(sanctioned_amount) / 1e7, 2)          AS sanctioned_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+  assumptions: ["Ranked by number of records; all 13 schemes are shown."]
+  caveats: [biggest_scheme_ambiguity, scheme_skew_note, record_grain_note]
+
+- id: C05
+  question: "Which scheme is the biggest?"
+  variants: ["largest scheme", "most important scheme under CM Elevate"]
+  plan:
+  - "'Biggest' has no measure -> return records AND money"
+  - "Order by records; the answer must say Warehouse leads on money"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                AS records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+  assumptions: ["Schemes are compared on both record count and amount, since the largest by records and the largest by money are different schemes."]
+  caveats: [biggest_scheme_ambiguity, disbursement_split_caveat]
+
+- id: C06
+  use_case: TC-14
+  question: "How many applications have been sanctioned under CM-ELEVATE?"
+  variants: ["number of sanctioned cases", "total sanctions"]
+  plan:
+  - "Sanctioned cases = records that carry a sanctioned amount: COUNT(sanctioned_amount)"
+  - "Show all records alongside - 3 Refused records carry no sanctioned amount"
+  - "Say how many were later desanctioned (Refused / Duplicate)"
+  sql: |
+    SELECT COUNT(*)                               AS records,
+           COUNT(sanctioned_amount)               AS sanctioned_records,
+           COUNT(desanctioned_reason_raw)         AS later_desanctioned,
+           ROUND(SUM(sanctioned_amount) / 1e7, 2) AS sanctioned_cr
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["A sanctioned case is a record with a sanctioned amount; the few records without one (all marked Refused) are not counted as sanctioned. Records later desanctioned (Refused / Duplicate) are reported alongside, not removed."]
+  caveats: [record_grain_note, sanctioned_not_disbursed]
+
+- id: C07
+  use_case: TC-19
+  question: "How many sanctioned applications are there for each scheme?"
+  plan:
+  - "Sanctioned cases = COUNT(sanctioned_amount), never COUNT(*)"
+  - "Group by scheme with sanctioned amount alongside"
+  sql: |
+    SELECT scheme_name,
+           COUNT(sanctioned_amount)               AS sanctioned_records,
+           ROUND(SUM(sanctioned_amount) / 1e7, 2) AS sanctioned_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY sanctioned_records DESC;
+  assumptions: ["A sanctioned case is a record with a sanctioned amount; Any Business Venture has 3 Refused records with none, which are not counted."]
+  caveats: [record_grain_note]
+
+- id: C08
+  use_case: TC-35
+  question: "Compare the number of sanctioned applications across West Garo Hills and Ri Bhoi."
+  variants: ["WGH vs Ri Bhoi sanctioned cases", "compare two districts"]
+  plan:
+  - "Two districts -> IN list of UPPERCASE stored names"
+  - "Sanctioned applications = COUNT(sanctioned_amount)"
+  - "Carry sanctioned and disbursed money for context"
+  - "ROLLUP adds an exact ALL SELECTED DISTRICTS row - a combined figure comes from it, never from adding rounded rows"
+  sql: |
+    SELECT COALESCE(lgd_district, 'ALL SELECTED DISTRICTS') AS lgd_district,
+           COUNT(sanctioned_amount)                AS sanctioned_records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district IN ('WEST GARO HILLS', 'RI BHOI')
+    GROUP BY ROLLUP (lgd_district)
+    ORDER BY GROUPING(lgd_district), sanctioned_records DESC;
+  assumptions: ["A sanctioned application is a record with a sanctioned amount; money is shown alongside."]
+  caveats: [record_grain_note, disbursement_split_caveat]
+
+- id: C09
+  question: "List all the schemes"
+  variants: ["which schemes are covered", "how many schemes are there", "names of sub-schemes"]
+  plan:
+  - "Distinct scheme_name with record count"
+  - "13 rows, alphabetical is fine but records desc is more useful"
+  sql: |
+    SELECT scheme_name, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+  why: "A scheme list answers from the data, never from memory - and there are 13 here, not the 15 of the other CM Elevate dataset."
+
+- id: C10
+  question: "How many distinct schemes operate in East Khasi Hills?"
+  plan:
+  - "District literal is the stored UPPERCASE form"
+  - "COUNT(DISTINCT scheme_name)"
+  sql: |
+    SELECT COUNT(DISTINCT scheme_name) AS schemes,
+           COUNT(*)                    AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'EAST KHASI HILLS';
+
+# ---- 6.2 Money - sanctioned, subsidy, loan, total, utilisation, pending ---
+- id: M01
+  use_case: TC-17
+  policy: "disbursement_ambiguity=answer_with_split/total_means_both"
+  question: "What is the total amount disbursed under CM-ELEVATE?"
+  variants: ["how much money has been disbursed", "total disbursment", "how much was released so far"]
+  plan:
+  - "'Disbursed' is 3-way -> return subsidy, loan and total side by side"
+  - "Sanctioned beside it + disbursed %"
+  - "Stored totals only; ROUND(SUM/1e7,2) crore"
+  sql: |
+    SELECT ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr,
+           ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions:
+  - 'Disbursement is shown three ways - subsidy, loan, and the two together - since "disbursed" can mean any of them.'
+  - "Desanctioned records are included in the totals, as the source file's own totals include them."
+  caveats: [disbursement_split_caveat, sanctioned_not_disbursed]
+
+- id: M02
+  question: "What is the total disbursement, subsidy and loan together?"
+  variants: ["overall amount paid including loans", "combined disbursement"]
+  plan:
+  - "User named the whole -> total_disbursement"
+  - "Sanctioned alongside"
+  sql: |
+    SELECT ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["Using total disbursement - subsidy and loan together."]
+  caveats: [sanctioned_not_disbursed]
+
+- id: M03
+  question: "How much subsidy has been paid out?"
+  variants: ["total grant disbursed", "subsidy released", "assistance given as subsidy"]
+  plan:
+  - "Subsidy -> total_subsidy_disbursement (never the tranches)"
+  - "Count records with subsidy > 0"
+  sql: |
+    SELECT ROUND(SUM(total_subsidy_disbursement) / 1e7, 2)      AS subsidy_cr,
+           COUNT(*) FILTER (WHERE total_subsidy_disbursement > 0) AS records_with_subsidy
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["Subsidy means the grant paid, excluding loans."]
+
+- id: M04
+  question: "What is the total amount sanctioned?"
+  plan:
+  - "Sanctioned -> SUM(sanctioned_amount); it is NOT disbursed"
+  sql: |
+    SELECT ROUND(SUM(sanctioned_amount) / 1e7, 2) AS sanctioned_cr,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["Sanctioned means the amount approved - not the amount paid out."]
+  caveats: [sanctioned_not_disbursed]
+
+- id: M05
+  use_case: TC-18
+  question: "What is the total amount disbursed under each scheme?"
+  variants: ["scheme wise disbursement", "how much each scheme paid out"]
+  plan:
+  - "Group by scheme"
+  - "Split subsidy / loan / total + sanctioned"
+  - "Order by total disbursed"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY total_disbursed_cr DESC;
+  assumptions: ["Disbursement is shown as subsidy, loan and total side by side; all 13 schemes are shown."]
+  caveats: [disbursement_split_caveat, sanctioned_not_disbursed]
+
+- id: M06
+  question: "How much of the sanctioned amount has actually been disbursed?"
+  variants: ["fund utilisation", "disbursement rate", "what percent of sanction is paid"]
+  plan:
+  - "Utilisation = total disbursed / sanctioned (a share of MONEY - answerable)"
+  - "Show numerator and denominator"
+  - "NULLIF on the denominator"
+  sql: |
+    SELECT ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr,
+           ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["Utilisation is total disbursed (subsidy and loan) over total sanctioned."]
+  caveats: [sanctioned_not_disbursed, disbursement_split_caveat]
+  why: "A share of the sanctioned AMOUNT is answerable; a share of APPLICATIONS sanctioned is not (X01)."
+
+- id: M07
+  question: "Which district has the highest utilisation?"
+  variants: ["best performing district by disbursement %", "district wise utilisation"]
+  plan:
+  - "Utilisation per district = disbursed / sanctioned"
+  - "Rank all 12 with both sides of the ratio and record count"
+  - "Singular 'highest' -> the lead row, but show the table for context"
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                                AS records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr,
+           ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY disbursed_pct DESC, records DESC;
+  assumptions: ["Utilisation is total disbursed over total sanctioned; all 12 districts are ranked."]
+  caveats: [sanctioned_not_disbursed, small_scheme_note]
+
+- id: M08
+  question: "Which schemes have the largest gap between sanctioned and disbursed?"
+  variants: ["pending amount by scheme", "outstanding disbursement per scheme", "yet to be disbursed"]
+  plan:
+  - "Pending is DERIVED (sanctioned - disbursed); label it"
+  - "Keep negatives as calculated"
+  - "Order by pending desc"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                AS records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr,
+           ROUND((SUM(sanctioned_amount) - SUM(total_disbursement)) / 1e7, 2) AS pending_cr,
+           ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY pending_cr DESC;
+  assumptions: ["Pending is calculated as sanctioned minus disbursed - it is not a recorded column in this scheme."]
+  caveats: [pending_derived_note, singleton_scheme_note]
+
+- id: M09
+  question: "What is pending to be disbursed in Mylliem?"
+  plan:
+  - "Mylliem -> block literal"
+  - "Pending = sanctioned - disbursed (derived)"
+  sql: |
+    SELECT COUNT(*)                                AS records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr,
+           ROUND((SUM(sanctioned_amount) - SUM(total_disbursement)) / 1e7, 2) AS pending_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'MYLLIEM';
+  assumptions: ["Pending is calculated as sanctioned minus disbursed - it is not a recorded column in this scheme."]
+  caveats: [pending_derived_note]
+
+- id: M10
+  use_case: TC-27
+  question: "What is the total disbursement amount for each district?"
+  variants: ["district wise disbursement", "money paid per district"]
+  plan:
+  - "Group by district; KEEP Unresolved-village rows (district is known)"
+  - "Split subsidy / loan / total + sanctioned + records"
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY total_disbursed_cr DESC;
+  assumptions:
+  - "Records whose village could not be identified are included in district figures, where their district is known."
+  - "Record counts are shown alongside the money, since district totals are driven by which schemes happen to sit there."
+  caveats: [disbursement_split_caveat]
+
+- id: M11
+  use_case: TC-30
+  question: "What is the total disbursement amount for Mawkyrwat block?"
+  variants: ["total disbursment mawkyrwat", "money in Mawkyrwat"]
+  plan:
+  - "Mawkyrwat is both block and village -> block (user said block)"
+  - "UPPERCASE literal"
+  - "Split money"
+  sql: |
+    SELECT COUNT(*)                                        AS records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'MAWKYRWAT';
+  caveats: [disbursement_split_caveat]
+
+- id: M12
+  question: "What share of the total sanctioned amount does each scheme have?"
+  variants: ["scheme wise percentage of sanction", "contribution of each scheme to sanctioned money"]
+  plan:
+  - "Per-scheme SUM(sanctioned_amount)"
+  - "Share over the statewide total via a window SUM"
+  - "All 13 rows"
+  sql: |
+    SELECT scheme_name,
+           ROUND(SUM(sanctioned_amount) / 1e7, 2) AS sanctioned_cr,
+           ROUND(100.0 * SUM(sanctioned_amount) / SUM(SUM(sanctioned_amount)) OVER (), 1) AS share_of_state_pct
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY sanctioned_cr DESC;
+  caveats: [sanctioned_not_disbursed]
+
+- id: M13
+  question: "Compare Piggery and Poultry"
+  variants: ["piggery vs poultry", "difference between pig and poultry schemes"]
+  plan:
+  - "Two exact scheme literals in an IN list"
+  - "Compare records, sanctioned, subsidy, loan, total, disbursed %"
+  - "Loan uptake count because it differs sharply"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                            AS records,
+           COUNT(*) FILTER (WHERE total_loan_disbursement > 0) AS with_loan,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2)     AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2)     AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2)     AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2)     AS total_disbursed_cr,
+           ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme', 'Meghalaya Poultry Farming Scheme')
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+  assumptions: ["Schemes are compared on both record count and amount."]
+  caveats: [fixed_entitlement_note, disbursement_split_caveat]
+
+- id: M14
+  question: "What is the average disbursement per applicant?"
+  variants: ["average amount per beneficiary", "mean disbursement per record"]
+  plan:
+  - "Per-record average is in RUPEES"
+  - "Break down by scheme - a statewide mean is a Piggery mean"
+  - "AVG ignores NULLs; never COALESCE to 0"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                               AS records,
+           ROUND(AVG(total_disbursement))         AS avg_total_disbursed_rupees,
+           ROUND(AVG(total_subsidy_disbursement)) AS avg_subsidy_rupees
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY avg_total_disbursed_rupees DESC;
+  assumptions: ["Averaged per record and broken down by scheme, because a single statewide average is dominated by Piggery."]
+  caveats: [scheme_skew_note, singleton_scheme_note, disbursement_split_caveat]
+
+- id: M15
+  question: "What is the average sanctioned amount for Piggery?"
+  variants: ["piggery sanctioned amount per beneficiary", "how much is sanctioned per piggery unit"]
+  plan:
+  - "Piggery is a fixed-entitlement scheme"
+  - "AVG would restate the constant -> show the distribution"
+  sql: |
+    SELECT sanctioned_amount AS sanctioned_rupees, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+    GROUP BY sanctioned_amount
+    ORDER BY records DESC;
+  assumptions: ["Meghalaya Piggery Development Scheme pays a fixed entitlement to every applicant, so the distribution is shown rather than an average."]
+  caveats: [fixed_entitlement_note]
+
+- id: M16
+  question: "Dairy sanctioned amount"
+  variants: ["how much is sanctioned under dairy"]
+  plan:
+  - "Dairy pays a fixed Rs 3,00,000 per record"
+  - "Give the total AND the per-record entitlement in one query"
+  sql: |
+    SELECT sanctioned_amount                          AS sanctioned_each_rupees,
+           COUNT(*)                                   AS records,
+           ROUND(SUM(sanctioned_amount) / 1e7, 2)     AS sanctioned_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Dairy Development Scheme'
+    GROUP BY sanctioned_amount
+    ORDER BY records DESC;
+  assumptions: ["Meghalaya Dairy Development Scheme pays a fixed entitlement, so the total is the record count times that amount."]
+  caveats: [fixed_entitlement_note, sanctioned_not_disbursed]
+
+- id: M17
+  question: "Which schemes pay a fixed entitlement?"
+  plan:
+  - "Distinct sanctioned amounts per scheme with min / max"
+  - "1 distinct value = fixed entitlement"
+  sql: |
+    SELECT scheme_name,
+           COUNT(DISTINCT sanctioned_amount) AS distinct_amounts,
+           MIN(sanctioned_amount)            AS min_sanctioned_rupees,
+           MAX(sanctioned_amount)            AS max_sanctioned_rupees,
+           COUNT(*)                          AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY distinct_amounts, records DESC;
+  caveats: [fixed_entitlement_note]
+
+- id: M18
+  question: "How many records received no money at all?"
+  variants: ["sanctioned but nothing paid", "beneficiaries who got nothing", "zero disbursement"]
+  plan:
+  - "Nothing paid = total_disbursement = 0 (a recorded zero), not IS NULL"
+  - "Group by scheme"
+  sql: |
+    SELECT scheme_name, COUNT(*) AS records_with_no_disbursement
+    FROM curated.v_cm_elevate_disbursement
+    WHERE total_disbursement = 0
+    GROUP BY scheme_name
+    ORDER BY records_with_no_disbursement DESC;
+  assumptions: ["A recorded zero means nothing was paid; it is counted with = 0, not treated as missing."]
+  caveats: [zero_disbursement_note]
+
+- id: M19
+  question: "Which beneficiaries got nothing in weaving?"
+  plan:
+  - "weaving -> exact literal with NO space before '(weaving)'"
+  - "Zero = 0, count and list size note"
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE total_disbursement = 0) AS records_with_no_disbursement,
+           COUNT(*)                                       AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Sericulture & Weaving Scheme(weaving)';
+  assumptions: ["Read 'weaving' as Meghalaya Sericulture & Weaving Scheme(weaving)."]
+  caveats: [zero_disbursement_note, record_grain_note]
+
+- id: M20
+  question: "Which records were disbursed more than they were sanctioned?"
+  plan:
+  - "total_disbursement > sanctioned_amount"
+  - "List by source_row_id with the excess in rupees"
+  - "Report - never filter away"
+  sql: |
+    SELECT source_row_id, application_number, scheme_name,
+           sanctioned_amount, total_disbursement,
+           total_disbursement - sanctioned_amount AS excess_rupees
+    FROM curated.v_cm_elevate_disbursement
+    WHERE total_disbursement > sanctioned_amount
+    ORDER BY excess_rupees DESC;
+
+- id: M21
+  question: "How many records reached the full entitlement?"
+  plan:
+  - "Fully paid = total >= sanctioned (>= keeps the 4 over-disbursed)"
+  - "Also count nothing paid"
+  - "Exclude NULL sanctions"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                                         AS records,
+           COUNT(*) FILTER (WHERE total_disbursement >= sanctioned_amount)  AS fully_paid,
+           COUNT(*) FILTER (WHERE total_disbursement = 0)                   AS nothing_paid
+    FROM curated.v_cm_elevate_disbursement
+    WHERE sanctioned_amount IS NOT NULL
+    GROUP BY scheme_name
+    ORDER BY fully_paid DESC;
+  caveats: [zero_disbursement_note]
+
+- id: M22
+  question: "What are the payment steps in the Piggery scheme?"
+  variants: ["how many got 62500", "piggery instalment amounts"]
+  plan:
+  - "Distribution of total_disbursement within Piggery"
+  - "Top 10 values"
+  sql: |
+    SELECT total_disbursement AS total_disbursed_rupees, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+    GROUP BY total_disbursement
+    ORDER BY records DESC
+    LIMIT 10;
+  caveats: [fixed_entitlement_note]
+
+- id: M23
+  question: "What is the Piggery disbursement in Ri Bhoi in FY 2024-25?"
+  variants: ["piggery ri bhoi 2024-25 money"]
+  plan:
+  - "Three filters - exact scheme, UPPERCASE district, stored FY label"
+  - "Split money"
+  - "No caveat_sql needed - Piggery is fully dated"
+  sql: |
+    SELECT COUNT(*)                                        AS records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+      AND lgd_district = 'RI BHOI'
+      AND financial_year_short = '2024-25';
+  assumptions: ["Financial years are read from the recorded year label, not calculated from the disbursement dates."]
+  caveats: [disbursement_split_caveat, fixed_entitlement_note]
+
+- id: M24
+  question: "Top 3 blocks by number of records"
+  variants: ["3 biggest blocks", "which three blocks have most applications"]
+  plan:
+  - "Explicit N=3 -> LIMIT 3"
+  - "Group by block with district for context"
+  - "Money column beside the count"
+  sql: |
+    SELECT lgd_block, lgd_district,
+           COUNT(*)                                AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_block, lgd_district
+    ORDER BY records DESC
+    LIMIT 3;
+  caveats: [record_grain_note]
+
+- id: M25
+  question: "Bottom 5 districts by money disbursed"
+  variants: ["lowest 5 districts by disbursement", "districts that got least money"]
+  plan:
+  - "Explicit N=5 ascending"
+  - "Money split + records"
+  - "Tie-break by name"
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY total_disbursed_cr ASC, lgd_district
+    LIMIT 5;
+  assumptions: ["Ranked lowest first by total disbursed (subsidy and loan)."]
+  caveats: [disbursement_split_caveat]
+
+- id: M26
+  question: "Which blocks received the most money?"
+  plan:
+  - "Plural 'most' without N -> top 5"
+  - "Keep records beside money (money leader != count leader)"
+  sql: |
+    SELECT lgd_block, lgd_district,
+           COUNT(*)                                AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_block, lgd_district
+    ORDER BY total_disbursed_cr DESC
+    LIMIT 5;
+  assumptions: ["Showing the top 5 blocks by total disbursed (subsidy and loan)."]
+  caveats: [disbursement_split_caveat]
+
+- id: M27
+  question: "How many instalments did each record receive?"
+  plan:
+  - "COUNT tranches with CASE (never sum them for money)"
+  - "Group by the tranche count"
+  sql: |
+    SELECT (CASE WHEN subsidy_disbursement_1 > 0 THEN 1 ELSE 0 END
+          + CASE WHEN subsidy_disbursement_2 > 0 THEN 1 ELSE 0 END
+          + CASE WHEN subsidy_disbursement_3 > 0 THEN 1 ELSE 0 END) AS subsidy_tranches,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY 1
+    ORDER BY 1;
+
+- id: M28
+  question: "Which records got the second instalment, and how much was paid in it?"
+  variants: ["second tranche paid", "2nd installment amount"]
+  plan:
+  - "The question names a tranche -> subsidy_disbursement_2 is correct here"
+  - "Count and sum it"
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE subsidy_disbursement_2 > 0) AS records_with_second_instalment,
+           ROUND(SUM(subsidy_disbursement_2) / 1e7, 2)        AS second_instalment_cr
+    FROM curated.v_cm_elevate_disbursement;
+
+# ---- 6.3 Loans and lenders ------------------------------------------------
+- id: L01
+  use_case: TC-20
+  question: "Which loan entities are associated with CM-ELEVATE applications?"
+  variants: ["list of lenders", "loan providers"]
+  plan:
+  - "Only two stored values + NULL"
+  - "COALESCE the NULL bucket to '(not recorded)'"
+  sql: |
+    SELECT COALESCE(loan_entity, '(not recorded)') AS loan_entity,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY loan_entity
+    ORDER BY records DESC;
+  assumptions: ["Records with no lender recorded are shown as a separate group."]
+  caveats: [loan_entity_null_note, record_grain_note]
+
+- id: L02
+  use_case: TC-21
+  question: "How many applications are associated with each loan entity?"
+  plan:
+  - "Group by COALESCE(loan_entity)"
+  - "Add with_loan_money: a recorded lender does not mean a loan was paid"
+  sql: |
+    SELECT COALESCE(loan_entity, '(not recorded)')             AS loan_entity,
+           COUNT(*)                                            AS records,
+           COUNT(*) FILTER (WHERE total_loan_disbursement > 0) AS with_loan_money
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY loan_entity
+    ORDER BY records DESC;
+  caveats: [loan_entity_null_note, record_grain_note]
+
+- id: L03
+  use_case: TC-22
+  question: "What is the total disbursement made through each loan entity?"
+  plan:
+  - "The lender carries the LOAN -> loan_cr is the headline"
+  - "Subsidy and total on the same records shown separately, not merged"
+  - "Keep '(not recorded)'"
+  sql: |
+    SELECT COALESCE(loan_entity, '(not recorded)')         AS loan_entity,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY loan_entity
+    ORDER BY loan_cr DESC;
+  assumptions: ["Money through a loan entity is the loan disbursed; subsidy and total are shown alongside for the same records."]
+  caveats: [loan_entity_null_note, disbursement_split_caveat]
+
+- id: L04
+  question: "How many records received a loan?"
+  variants: ["how many beneficiaries who took a loan", "number of loanees"]
+  plan:
+  - "Loan presence = total_loan_disbursement > 0 (loan_disbursed_status is the same fact restated)"
+  sql: |
+    SELECT COUNT(*) AS records_with_loan,
+           ROUND(SUM(total_loan_disbursement) / 1e7, 2) AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE total_loan_disbursement > 0;
+  assumptions: ["A record counts as having a loan when a loan amount is recorded."]
+
+- id: L05
+  question: "How many beneficiaries who took a loan in Poultry?"
+  plan:
+  - "'who took a loan' is a filter, not a name request"
+  - "Scheme literal + loan > 0"
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE total_loan_disbursement > 0) AS records_with_loan,
+           COUNT(*)                                            AS records,
+           ROUND(SUM(total_loan_disbursement) / 1e7, 2)        AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Poultry Farming Scheme';
+  caveats: [record_grain_note]
+  why: 'A relative clause with "who" is NOT an applicant-name request - it asks for a count.'
+
+- id: L06
+  question: "How many LIFCOM loans were given under Poultry?"
+  plan:
+  - "loan_entity literal 'LIFCOM' + scheme literal"
+  - "Count only records with loan money"
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE total_loan_disbursement > 0) AS records_with_loan,
+           COUNT(*)                                            AS records,
+           ROUND(SUM(total_loan_disbursement) / 1e7, 2)        AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE loan_entity = 'LIFCOM'
+      AND scheme_name = 'Meghalaya Poultry Farming Scheme';
+
+- id: L07
+  question: "How many LIFCOM loans in Garo Hills?"
+  plan:
+  - "Garo Hills is a region -> expand to its 5 districts"
+  - "loan_entity = 'LIFCOM' and loan > 0"
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                                     AS records_with_loan,
+           ROUND(SUM(total_loan_disbursement) / 1e7, 2) AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE loan_entity = 'LIFCOM'
+      AND total_loan_disbursement > 0
+      AND lgd_district IN ('EAST GARO HILLS', 'NORTH GARO HILLS', 'SOUTH GARO HILLS',
+                           'SOUTH WEST GARO HILLS', 'WEST GARO HILLS')
+    GROUP BY lgd_district
+    ORDER BY records_with_loan DESC;
+  assumptions: ["Garo Hills covers East, North, South, South West and West Garo Hills."]
+
+- id: L08
+  question: "Records with loan money but no lender recorded"
+  variants: ["loans without loan entity", "unattributed loans"]
+  plan:
+  - "loan > 0 AND loan_entity IS NULL"
+  - "Count and sum"
+  sql: |
+    SELECT COUNT(*) AS loans_without_lender,
+           ROUND(SUM(total_loan_disbursement) / 1e7, 2) AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE total_loan_disbursement > 0
+      AND loan_entity IS NULL;
+  caveats: [loan_entity_null_note]
+
+- id: L09
+  question: "How many records got both subsidy and loan?"
+  variants: ["subsidy plus loan beneficiaries", "records with both grant and credit"]
+  plan:
+  - "Both > 0 in one FILTER"
+  - "Break down by scheme - in the vehicle schemes both is the norm"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE total_subsidy_disbursement > 0 AND total_loan_disbursement > 0) AS with_both,
+           COUNT(*)                                                                                AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY with_both DESC;
+
+- id: L10
+  question: "Average loan size by lender"
+  plan:
+  - "Average only over records that HAVE a loan (FILTER)"
+  - "Per record -> rupees"
+  - "COALESCE the lender"
+  sql: |
+    SELECT COALESCE(loan_entity, '(not recorded)')                                     AS loan_entity,
+           COUNT(*) FILTER (WHERE total_loan_disbursement > 0)                         AS records_with_loan,
+           ROUND(AVG(total_loan_disbursement) FILTER (WHERE total_loan_disbursement > 0)) AS avg_loan_rupees
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY loan_entity
+    ORDER BY records_with_loan DESC;
+  assumptions: ["Averaged over records that received a loan only."]
+  caveats: [loan_entity_null_note]
+  why: "AVG over all records would divide by the 2,000+ with no loan and understate the loan size."
+
+- id: L11
+  question: "How does loan use differ by scheme?"
+  plan:
+  - "Counts of records with loan / subsidy + money per scheme"
+  - "Keep zero rows (Goat has no loans)"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                               AS records,
+           COUNT(*) FILTER (WHERE total_loan_disbursement > 0)    AS with_loan,
+           COUNT(*) FILTER (WHERE total_subsidy_disbursement > 0) AS with_subsidy,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2)        AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2)        AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY loan_cr DESC;
+  assumptions: ["Schemes with no loans are shown as zero rather than left out."]
+
+# ---- 6.4 Financial year and dates ----------------------------------------
+- id: Y01
+  use_case: TC-23
+  question: "How many applications are recorded for each financial year?"
+  variants: ["year wise applications", "FY wise count"]
+  plan:
+  - "Group by the STORED financial_year_short"
+  - "COALESCE the NULL bucket - 395 undated records (all Sericulture)"
+  - "NULLS LAST so the bucket prints last"
+  sql: |
+    SELECT COALESCE(financial_year_short, '(no financial year)') AS financial_year,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short NULLS LAST;
+  assumptions:
+  - "Financial years are read from the recorded year label, not calculated from the disbursement dates."
+  - "Records with no financial year are reported separately rather than dropped."
+  caveats: [unresolved_year_note, sericulture_year_note, record_grain_note]
+
+- id: Y02
+  use_case: TC-24
+  question: "What was the total disbursement in each financial year?"
+  variants: ["year wise disbursement", "disbursement trend by year"]
+  plan:
+  - "Stored FY label with COALESCE bucket"
+  - "Split money"
+  - "Two years only - a comparison, not a trend"
+  sql: |
+    SELECT COALESCE(financial_year_short, '(no financial year)')  AS financial_year,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short NULLS LAST;
+  assumptions:
+  - "Financial years are read from the recorded year label, not calculated from the disbursement dates."
+  - "Only two financial years are held, so this is a comparison rather than a trend."
+  caveats: [unresolved_year_note, sericulture_year_note, disbursement_split_caveat]
+
+- id: Y03
+  use_case: TC-24
+  question: "What was the total disbursement in FY 2024-25?"
+  variants: ["disbursement in 2024-25", "money paid in FY25"]
+  plan:
+  - "Filter financial_year_short = '2024-25'"
+  - "Split money"
+  - "caveat_sql - how many undated records the filter leaves out"
+  sql: |
+    SELECT COUNT(*)                                        AS records,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE financial_year_short = '2024-25';
+  caveat_sql: |
+    SELECT COUNT(*) AS records_without_financial_year,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS their_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE year_key IS NULL;
+  assumptions: ["Financial years are read from the recorded year label, not calculated from the disbursement dates."]
+  caveats: [unresolved_year_note, sericulture_year_note, disbursement_split_caveat]
+
+- id: Y04
+  use_case: TC-25
+  question: "Compare the number of applications across schemes for FY 2024-25."
+  plan:
+  - "FY filter + group by scheme"
+  - "Sericulture cannot appear (no FY) - say so, don't show it as 0"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                AS records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE financial_year_short = '2024-25'
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+  assumptions: ["Financial years are read from the recorded year label."]
+  caveats: [sericulture_year_note, unresolved_year_note, record_grain_note]
+
+- id: Y05
+  use_case: TC-25
+  question: "Compare the schemes across financial years"
+  variants: ["scheme performance 2024-25 vs 2025-26", "year on year by scheme"]
+  plan:
+  - "Pivot with FILTER columns per FY + a no-FY column"
+  - "Money per FY"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) FILTER (WHERE financial_year_short = '2024-25') AS fy_2024_25_records,
+           COUNT(*) FILTER (WHERE financial_year_short = '2025-26') AS fy_2025_26_records,
+           COUNT(*) FILTER (WHERE year_key IS NULL)                 AS no_financial_year_records,
+           ROUND(SUM(total_disbursement) FILTER (WHERE financial_year_short = '2024-25') / 1e7, 2) AS fy_2024_25_disbursed_cr,
+           ROUND(SUM(total_disbursement) FILTER (WHERE financial_year_short = '2025-26') / 1e7, 2) AS fy_2025_26_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY scheme_name;
+  assumptions: ["Only Prime Tourism Vehicle, Agriculture Warehouse and Prime Agriculture Response Vehicle appear in both financial years."]
+  caveats: [unresolved_year_note, sericulture_year_note, disbursement_split_caveat]
+
+- id: Y06
+  question: "Compare FY 2024-25 with FY 2025-26 for Prime Tourism Vehicle"
+  variants: ["tourism vehicle year on year", "PTV 2024-25 vs 2025-26"]
+  plan:
+  - "One scheme, grouped by the stored FY with the COALESCE bucket"
+  - "Records + split money per year"
+  sql: |
+    SELECT COALESCE(financial_year_short, '(no financial year)')  AS financial_year,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Prime Tourism Vehicle Scheme'
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short NULLS LAST;
+  assumptions: ["Financial years are read from the recorded year label."]
+  caveats: [unresolved_year_note, disbursement_split_caveat]
+
+- id: Y07
+  question: "How many records were there this year?"
+  variants: ["current year records", "latest year disbursement"]
+  plan:
+  - "'this year' -> latest FY held = 2025-26 (state it)"
+  - "Filter stored label"
+  sql: |
+    SELECT COUNT(*) AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE financial_year_short = '2025-26';
+  assumptions: ["Taking the latest year as FY 2025-26, the later of the two years held; it holds far fewer records than FY 2024-25."]
+  caveats: [unresolved_year_note, sericulture_year_note]
+
+- id: Y08
+  question: "Warehouse disbursement in 2025-26 by district"
+  plan:
+  - "Scheme + FY filter"
+  - "Group by district"
+  - "Split money"
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Agriculture Warehouse Scheme'
+      AND financial_year_short = '2025-26'
+    GROUP BY lgd_district
+    ORDER BY total_disbursed_cr DESC;
+  caveats: [disbursement_split_caveat]
+
+- id: Y09
+  question: "Year wise loan amount"
+  plan:
+  - "Loan measure"
+  - "FY groups with COALESCE bucket"
+  sql: |
+    SELECT COALESCE(financial_year_short, '(no financial year)')  AS financial_year,
+           COUNT(*) FILTER (WHERE total_loan_disbursement > 0)    AS records_with_loan,
+           ROUND(SUM(total_loan_disbursement) / 1e7, 2)           AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short NULLS LAST;
+  caveats: [unresolved_year_note, sericulture_year_note]
+
+- id: Y10
+  question: "How many records have no financial year?"
+  plan:
+  - "year_key IS NULL grouped by scheme - the answer IS the finding"
+  sql: |
+    SELECT scheme_name, COUNT(*) AS records_without_financial_year
+    FROM curated.v_cm_elevate_disbursement
+    WHERE year_key IS NULL
+    GROUP BY scheme_name
+    ORDER BY records_without_financial_year DESC;
+  caveats: [sericulture_year_note]
+
+- id: Y11
+  question: "How much subsidy was paid between April and December 2024?"
+  variants: ["subsidy paid in calendar 2024", "disbursement between two dates"]
+  plan:
+  - "Date question -> a date column, never the FY label"
+  - "Contract default - date the record by subsidy_disbursement_date_1"
+  - "Half-open range"
+  sql: |
+    SELECT ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE subsidy_disbursement_date_1 >= DATE '2024-04-01'
+      AND subsidy_disbursement_date_1 <  DATE '2025-01-01';
+  assumptions:
+  - "Dated by the first subsidy disbursement date; the recorded financial year may not agree with it on every record."
+  - "Four records have no usable disbursement date and fall outside date filters."
+  caveats: [year_date_disagreement_note]
+
+- id: Y12
+  question: "When were the first and last disbursements made?"
+  variants: ["earliest disbursement date", "earliest loan date", "latest payment date"]
+  plan:
+  - "MIN/MAX on first subsidy and loan dates"
+  - "Always flag the suspect extremes"
+  sql: |
+    SELECT MIN(subsidy_disbursement_date_1) AS first_subsidy_date,
+           MAX(subsidy_disbursement_date_1) AS last_subsidy_date,
+           MIN(loan_disbursement_date_1)    AS first_loan_date,
+           MAX(loan_disbursement_date_1)    AS last_loan_date
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["The earliest and latest dates are reported as recorded and flagged."]
+  caveats: [suspect_date_note]
+
+- id: Y13
+  question: "Which records have suspect disbursement dates?"
+  plan:
+  - "After the extract date (2026-09-03) or before 2020"
+  - "List by source_row_id"
+  sql: |
+    SELECT source_row_id, application_number, scheme_name,
+           subsidy_disbursement_date_1, loan_disbursement_date_1, total_disbursement
+    FROM curated.v_cm_elevate_disbursement
+    WHERE subsidy_disbursement_date_1 > DATE '2026-09-03'
+       OR loan_disbursement_date_1    < DATE '2020-01-01'
+    ORDER BY source_row_id;
+  caveats: [suspect_date_note]
+
+- id: Y14
+  question: "Do the disbursement dates agree with the recorded financial year?"
+  plan:
+  - "Cross-tab stored FY x calendar year of first subsidy date"
+  - "EXTRACT only for display - never to assign an FY"
+  sql: |
+    SELECT COALESCE(financial_year_short, '(no financial year)') AS financial_year,
+           EXTRACT(YEAR FROM subsidy_disbursement_date_1)        AS first_subsidy_calendar_year,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE subsidy_disbursement_date_1 IS NOT NULL
+    GROUP BY financial_year_short, EXTRACT(YEAR FROM subsidy_disbursement_date_1)
+    ORDER BY financial_year_short NULLS LAST, first_subsidy_calendar_year;
+  caveats: [year_date_disagreement_note]
+
+- id: Y15
+  question: "How many records would a financial-year filter drop?"
+  plan:
+  - "Count and money of year_key IS NULL vs NOT NULL"
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE year_key IS NULL)     AS dropped_by_fy_filter,
+           COUNT(*) FILTER (WHERE year_key IS NOT NULL) AS kept,
+           COUNT(*)                                     AS total_records,
+           ROUND(SUM(total_disbursement) FILTER (WHERE year_key IS NULL) / 1e7, 2) AS dropped_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement;
+  caveats: [sericulture_year_note]
+
+# ---- 6.5 Geography - district, block, region -----------------------------
+- id: G01
+  use_case: TC-26
+  question: "How many CM-ELEVATE applications are recorded in each district?"
+  variants: ["district wise applications", "records per district"]
+  plan:
+  - "Group by district; Unresolved rows stay in (district known)"
+  - "Order by records"
+  sql: |
+    SELECT lgd_district, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY records DESC;
+  assumptions: ["Records whose village could not be identified are included in district figures, where their district is known."]
+  caveats: [record_grain_note]
+
+- id: G02
+  use_case: TC-28
+  question: "Which districts have the highest number of CM-ELEVATE applications?"
+  variants: ["top districts by applications", "districts with most beneficiaries"]
+  plan:
+  - "Plural without N -> top 5"
+  - "Share over ALL districts computed before LIMIT"
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) AS records,
+           ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS share_pct
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY records DESC
+    LIMIT 5;
+  assumptions: ["Showing the top 5, ranked highest first."]
+  caveats: [record_grain_note]
+
+- id: G03
+  question: "Which district has the fewest records?"
+  plan:
+  - "Singular -> LIMIT 1 ascending"
+  - "Tie-break by name"
+  sql: |
+    SELECT lgd_district, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY records ASC, lgd_district
+    LIMIT 1;
+  assumptions: ["Showing the single lowest."]
+  caveats: [small_scheme_note]
+
+- id: G04
+  use_case: TC-29
+  question: "How many applications are recorded in Umling block?"
+  plan:
+  - "Block literal UPPERCASE"
+  - "COUNT(*)"
+  sql: |
+    SELECT COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'UMLING';
+  caveats: [record_grain_note]
+
+- id: G05
+  use_case: TC-29
+  question: "How many records are in Songsak?"
+  plan:
+  - "Songsak is both block and village; no qualifier -> block (state it)"
+  sql: |
+    SELECT COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'SONGSAK';
+  assumptions: ["Read 'Songsak' as a block. It is also the name of a village - say 'village Songsak' for that reading."]
+
+- id: G06
+  use_case: TC-33
+  question: "Show me the number of CM-ELEVATE applications in each block of West Garo Hills."
+  variants: ["block wise records in WGH", "drill down district to block"]
+  plan:
+  - "WGH -> 'WEST GARO HILLS'"
+  - "Group by block"
+  - "Money beside count"
+  sql: |
+    SELECT lgd_block,
+           COUNT(*) AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'WEST GARO HILLS'
+    GROUP BY lgd_block
+    ORDER BY records DESC;
+  caveats: [record_grain_note, disbursement_split_caveat]
+
+- id: G07
+  question: "Compare the Garo Hills, Khasi Hills and Jaintia Hills regions"
+  plan:
+  - "Regions are not a column -> CASE over the district lists"
+  - "Ri Bhoi is its own group"
+  sql: |
+    SELECT CASE
+             WHEN lgd_district IN ('EAST GARO HILLS','NORTH GARO HILLS','SOUTH GARO HILLS',
+                                   'SOUTH WEST GARO HILLS','WEST GARO HILLS')   THEN 'Garo Hills'
+             WHEN lgd_district IN ('EAST KHASI HILLS','EASTERN WEST KHASI HILLS',
+                                   'SOUTH WEST KHASI HILLS','WEST KHASI HILLS') THEN 'Khasi Hills'
+             WHEN lgd_district IN ('EAST JAINTIA HILLS','WEST JAINTIA HILLS')   THEN 'Jaintia Hills'
+             WHEN lgd_district = 'RI BHOI'                                      THEN 'Ri Bhoi'
+           END                                     AS region,
+           COUNT(*)                                AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY 1
+    ORDER BY records DESC;
+  assumptions: ["Garo Hills covers 5 districts, Khasi Hills 4, Jaintia Hills 2; Ri Bhoi is its own group."]
+  caveats: [disbursement_split_caveat]
+
+- id: G08
+  use_case: TC-36
+  question: "Give me a district-wise summary of applications, sanctioned cases and total disbursement under CM-ELEVATE."
+  variants: ["district summary", "administrative summary by district", "give me an overview of disbursement by district"]
+  plan:
+  - "Applications = records (COUNT(*)); sanctioned cases = COUNT(sanctioned_amount) - separate column"
+  - "One row per district: records, sanctioned cases, sanctioned, subsidy, loan, total, %"
+  - "ROLLUP adds an exact ALL DISTRICTS row - quote statewide totals from it, never sum rounded rows"
+  sql: |
+    SELECT COALESCE(lgd_district, 'ALL DISTRICTS')              AS lgd_district,
+           COUNT(*)                                        AS records,
+           COUNT(sanctioned_amount)                        AS sanctioned_records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr,
+           ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY ROLLUP (lgd_district)
+    ORDER BY GROUPING(lgd_district), total_disbursed_cr DESC;
+  assumptions:
+  - 'Applications are all records; sanctioned cases are the records carrying a sanctioned amount (3 Refused records have none).'
+  - "Disbursement is shown as subsidy, loan and total side by side."
+  caveats: [record_grain_note, disbursement_split_caveat, sanctioned_not_disbursed]
+  why: 'An "overview of disbursement" is a DATA summary - answer it; only a programme overview is refused.'
+
+- id: G09
+  question: "Show scheme by district"
+  plan:
+  - "Two-way grid -> up to 156 rows - the composer offers a chart"
+  sql: |
+    SELECT scheme_name, lgd_district, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name, lgd_district
+    ORDER BY scheme_name, records DESC;
+
+- id: G10
+  question: "How many records in Resubelpara Municipal Board?"
+  plan:
+  - "User said Municipal Board -> the urban stored value with its suffix"
+  - "Not the rural Resubelpara block"
+  sql: |
+    SELECT COUNT(*) AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'RESUBELPARA-MUNICIPAL BOARD';
+  caveats: [municipal_block_note]
+
+- id: G11
+  question: "How many records are in urban Municipal Board areas?"
+  plan:
+  - "Three stored Municipal Board block values verbatim"
+  - "Group by block"
+  sql: |
+    SELECT lgd_block, lgd_district, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block IN ('RESUBELPARA-MUNICIPAL BOARD', 'WILLIAM NAGAR-MUNICIPAL BOARD',
+                        'TURA MUNICIPAL BOARD-MUNICIPAL BOARD')
+    GROUP BY lgd_block, lgd_district
+    ORDER BY records DESC;
+  caveats: [municipal_block_note]
+
+- id: G12
+  question: "total disbursment in WKH"
+  variants: ["WKH disbursement", "west khasi money"]
+  plan:
+  - "WKH -> 'WEST KHASI HILLS' (not Eastern West Khasi Hills)"
+  - "Typo 'disbursment' = disbursed -> split"
+  sql: |
+    SELECT COUNT(*)                                        AS records,
+           ROUND(SUM(sanctioned_amount)          / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'WEST KHASI HILLS';
+  assumptions: ["Read 'WKH' as West Khasi Hills district."]
+  caveats: [disbursement_split_caveat]
+
+# ---- 6.6 Villages --------------------------------------------------------
+- id: V01
+  question: "How many villages received CM Elevate Legacy support?"
+  plan:
+  - "COUNT(DISTINCT village_code) - never names (17 shared)"
+  - "entity_type <> 'Unresolved'"
+  - "caveat_sql - rows set aside"
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate_disbursement
+    WHERE entity_type <> 'Unresolved';
+  caveat_sql: |
+    SELECT COUNT(*) AS unresolved_records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE entity_type = 'Unresolved';
+  caveats: [unresolved_village_note, village_identity_note]
+
+- id: V02
+  question: "How many villages in West Garo Hills received support?"
+  variants: ["how many villages in WGH got support"]
+  plan:
+  - "District filter + Unresolved exclusion"
+  - "Distinct codes"
+  - "caveat_sql for the same district"
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages,
+           COUNT(*)                     AS records_in_those_villages
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'WEST GARO HILLS'
+      AND entity_type <> 'Unresolved';
+  caveat_sql: |
+    SELECT COUNT(*) AS unresolved_records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'WEST GARO HILLS'
+      AND entity_type = 'Unresolved';
+  assumptions: ["Villages are counted by LGD code; records not matched to a village are left out of the village count."]
+  caveats: [unresolved_village_note, village_identity_note]
+
+- id: V03
+  use_case: TC-34
+  question: "Show me the no of applications mapped to each village in Umling block."
+  variants: ["village wise records in a block", "drill down block to village"]
+  plan:
+  - "Block filter + Unresolved exclusion"
+  - "Group by name AND code (shared names stay apart)"
+  - "caveat_sql for the block's unresolved rows"
+  sql: |
+    SELECT lgd_village_name, village_code,
+           COUNT(*) AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'UMLING'
+      AND entity_type <> 'Unresolved'
+    GROUP BY lgd_village_name, village_code
+    ORDER BY records DESC, lgd_village_name
+    LIMIT 100;
+  caveat_sql: |
+    SELECT COUNT(*) AS unresolved_records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'UMLING'
+      AND entity_type = 'Unresolved';
+  assumptions: ["Records that could not be matched to a village are left out of village figures."]
+  caveats: [unresolved_village_note, village_identity_note]
+
+- id: V04
+  question: "How many villages in Garo Hills region?"
+  plan:
+  - "Region -> 5 districts IN list"
+  - "Distinct village codes excluding Unresolved"
+  - "Per-district breakdown helps"
+  sql: |
+    SELECT lgd_district,
+           COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district IN ('EAST GARO HILLS', 'NORTH GARO HILLS', 'SOUTH GARO HILLS',
+                           'SOUTH WEST GARO HILLS', 'WEST GARO HILLS')
+      AND entity_type <> 'Unresolved'
+    GROUP BY lgd_district
+    ORDER BY villages DESC;
+  caveat_sql: |
+    SELECT COUNT(*) AS unresolved_records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district IN ('EAST GARO HILLS', 'NORTH GARO HILLS', 'SOUTH GARO HILLS',
+                           'SOUTH WEST GARO HILLS', 'WEST GARO HILLS')
+      AND entity_type = 'Unresolved';
+  assumptions: ["Garo Hills covers East, North, South, South West and West Garo Hills."]
+  caveats: [unresolved_village_note, village_identity_note]
+  why: "Village counts per district can be summed because a village code belongs to one district; the statewide COUNT(DISTINCT) would give the same 519."
+
+- id: V05
+  question: "Number of villages covered in Umsning block"
+  plan:
+  - "Block + Unresolved exclusion"
+  - "Distinct codes"
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'UMSNING'
+      AND entity_type <> 'Unresolved';
+  caveat_sql: |
+    SELECT COUNT(*) AS unresolved_records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_block = 'UMSNING'
+      AND entity_type = 'Unresolved';
+  caveats: [unresolved_village_note]
+
+- id: V06
+  question: "How many records could not be matched to a village?"
+  plan:
+  - "entity_type = 'Unresolved' by district"
+  sql: |
+    SELECT lgd_district, COUNT(*) AS unresolved_records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE entity_type = 'Unresolved'
+    GROUP BY lgd_district
+    ORDER BY unresolved_records DESC;
+
+- id: V07
+  question: "Which villages received the most money?"
+  plan:
+  - "Exclude Unresolved"
+  - "Group by name + code + district"
+  - "Top 5 with records (top villages are single big records)"
+  sql: |
+    SELECT lgd_village_name, village_code, lgd_district,
+           COUNT(*)                                AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE entity_type <> 'Unresolved'
+    GROUP BY lgd_village_name, village_code, lgd_district
+    ORDER BY total_disbursed_cr DESC, records DESC
+    LIMIT 5;
+  assumptions: ["Showing the top 5; ranked by total disbursed (subsidy and loan)."]
+  caveats: [unresolved_village_note, disbursement_split_caveat]
+
+- id: V08
+  question: "Records in village code 278266"
+  plan:
+  - "Filter village_code directly (resolver hands the code)"
+  - "Show name / block / district"
+  sql: |
+    SELECT lgd_village_name, lgd_block, lgd_district,
+           COUNT(*) AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE village_code = 278266
+    GROUP BY lgd_village_name, lgd_block, lgd_district
+    ORDER BY records DESC;
+
+- id: V09
+  question: "Are any records in villages where sources disagree on the district?"
+  plan:
+  - "has_geo_conflict IS TRUE, real villages only"
+  - "Surface - never filter"
+  sql: |
+    SELECT lgd_district, lgd_village_name, village_code, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE has_geo_conflict IS TRUE
+      AND entity_type <> 'Unresolved'
+    GROUP BY lgd_district, lgd_village_name, village_code
+    ORDER BY records DESC;
+  caveats: [geo_conflict_note]
+
+# ---- 6.7 Refusal / desanction fields -------------------------------------
+- id: R01
+  policy: "refusal_ambiguity=answer_all_fields"
+  question: "How many records were refused?"
+  variants: ["how many applications were refused", "refused cases", "cancelled count"]
+  plan:
+  - "Three disagreeing fields - count each side by side"
+  - "Add desanctioned-but-paid"
+  - "No field presented as authoritative"
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE desanctioned_reason_raw = 'Refused')   AS desanction_reason_refused,
+           COUNT(*) FILTER (WHERE desanctioned_reason_raw = 'Duplicate') AS desanction_reason_duplicate,
+           COUNT(*) FILTER (WHERE desanctioned_reason_raw IS NOT NULL)   AS any_desanction_reason,
+           COUNT(*) FILTER (WHERE refused_flag_raw IS TRUE)              AS refused_flag_set,
+           COUNT(*) FILTER (WHERE refused_reason_text IS NOT NULL)       AS written_reason,
+           COUNT(*) FILTER (WHERE desanctioned_reason_raw IS NOT NULL
+                              AND total_disbursement > 0)                AS desanctioned_but_paid
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["Refusal is counted from all three recorded fields side by side, because they disagree and none is authoritative."]
+  caveats: [refusal_field_note, refused_with_money_note]
+
+- id: R02
+  question: "How many records were desanctioned?"
+  variants: ["desanctioned records by reason", "withdrawn sanctions", "whose sanction was withdrawn"]
+  plan:
+  - "Group desanctioned_reason_raw with COALESCE '(none recorded)'"
+  - "Name the field in the answer"
+  sql: |
+    SELECT COALESCE(desanctioned_reason_raw, '(none recorded)') AS desanctioned_reason,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY desanctioned_reason_raw
+    ORDER BY records DESC;
+  assumptions: ['Counted from the desanction reason; "(none recorded)" means nothing was recorded, not "not refused".']
+  caveats: [refusal_field_note]
+
+- id: R03
+  question: "Show how the three refusal fields disagree"
+  plan:
+  - "Cross-tab of the three signals"
+  - "Booleans via IS TRUE / IS NOT NULL"
+  sql: |
+    SELECT COALESCE(desanctioned_reason_raw, '(none recorded)') AS desanctioned_reason,
+           (refused_flag_raw IS TRUE)                          AS refused_flag,
+           (refused_reason_text IS NOT NULL)                   AS has_reason_text,
+           COUNT(*)                                            AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY 1, 2, 3
+    ORDER BY records DESC;
+  caveats: [refusal_field_note]
+
+- id: R04
+  question: "How many records were not refused?"
+  plan:
+  - "refused_flag_raw is TRUE or NULL, never FALSE -> IS DISTINCT FROM TRUE"
+  sql: |
+    SELECT COUNT(*) AS not_flagged_refused
+    FROM curated.v_cm_elevate_disbursement
+    WHERE refused_flag_raw IS DISTINCT FROM TRUE;
+  assumptions: ["Not refused covers every record without a refusal flag, including those where nothing was recorded either way."]
+  caveats: [refusal_field_note]
+  why: "NOT refused_flag_raw returns 0 rows here - the classic wrong answer."
+
+- id: R05
+  question: "Did any desanctioned records still receive money?"
+  variants: ["money received by desanctioned applicants", "were refused cases paid"]
+  plan:
+  - "Desanctioned only"
+  - "Count paid and sum per reason"
+  sql: |
+    SELECT desanctioned_reason_raw                        AS desanctioned_reason,
+           COUNT(*)                                       AS records,
+           COUNT(*) FILTER (WHERE total_disbursement > 0) AS with_disbursement,
+           ROUND(SUM(total_disbursement) / 1e7, 2)        AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE desanctioned_reason_raw IS NOT NULL
+    GROUP BY desanctioned_reason_raw
+    ORDER BY records DESC;
+  caveats: [refusal_field_note, refused_with_money_note]
+
+- id: R06
+  question: "What is the total disbursement excluding desanctioned records?"
+  plan:
+  - "Exclude only because the user asked - desanctioned_reason_raw IS NULL"
+  - "caveat_sql - what the exclusion removed"
+  sql: |
+    SELECT COUNT(*)                                        AS records,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE desanctioned_reason_raw IS NULL;
+  caveat_sql: |
+    SELECT COUNT(*) AS excluded_records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS excluded_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE desanctioned_reason_raw IS NOT NULL;
+  assumptions: ["Desanctioned records (Refused or Duplicate) are left out, as asked."]
+  caveats: [refused_with_money_note, refusal_field_note, disbursement_split_caveat]
+
+- id: R07
+  question: "What reasons were recorded for refusals?"
+  plan:
+  - "Free text on few rows -> list it, never GROUP BY"
+  - "No geography columns - reasons can be personal"
+  sql: |
+    SELECT source_row_id, application_number, scheme_name,
+           desanctioned_reason_raw, refused_flag_raw, refused_reason_text
+    FROM curated.v_cm_elevate_disbursement
+    WHERE refused_reason_text IS NOT NULL
+       OR refused_flag_raw IS TRUE
+    ORDER BY source_row_id;
+  assumptions: ["Refusal reasons are free text on very few records, so they are listed rather than grouped."]
+  caveats: [refusal_field_note]
+
+- id: R08
+  question: "How many were marked duplicate?"
+  variants: ["show me the duplicate records", "duplicate cases"]
+  plan:
+  - "'Duplicate' is a recorded outcome, not duplicate rows (application_number is unique)"
+  - "Count + paid; no self-join"
+  sql: |
+    SELECT COUNT(*)                                       AS marked_duplicate,
+           COUNT(*) FILTER (WHERE total_disbursement > 0) AS still_paid
+    FROM curated.v_cm_elevate_disbursement
+    WHERE desanctioned_reason_raw = 'Duplicate';
+  assumptions: ["The records marked 'Duplicate' are an outcome recorded against a record, not repeated rows - every application number is unique."]
+  caveats: [refusal_field_note]
+
+# ---- 6.8 Sericulture and scheme shape ------------------------------------
+- id: S01
+  question: "How much did Sericulture spinning actually disburse?"
+  plan:
+  - "Spinning literal has a SPACE before '(spinning)'"
+  - "Rupees - the amount is tiny"
+  - "Show with_subsidy = 0 so the answer says nothing was paid as subsidy"
+  sql: |
+    SELECT COUNT(*)                                               AS records,
+           COUNT(*) FILTER (WHERE total_subsidy_disbursement > 0) AS with_subsidy,
+           COUNT(*) FILTER (WHERE total_loan_disbursement > 0)    AS with_loan,
+           ROUND(SUM(sanctioned_amount))                          AS sanctioned_rupees,
+           ROUND(SUM(total_disbursement))                         AS total_disbursed_rupees
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Sericulture & Weaving Scheme (spinning)';
+  assumptions: ["Read 'Sericulture spinning' as Meghalaya Sericulture & Weaving Scheme (spinning)."]
+  caveats: [zero_disbursement_note, sericulture_year_note]
+
+- id: S02
+  question: "Show both Sericulture schemes together"
+  plan:
+  - "Both exact literals (spacing differs)"
+  - "Group by scheme"
+  sql: |
+    SELECT scheme_name,
+           COUNT(*)                                AS records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name IN ('Meghalaya Sericulture & Weaving Scheme (spinning)',
+                          'Meghalaya Sericulture & Weaving Scheme(weaving)')
+    GROUP BY scheme_name
+    ORDER BY scheme_name;
+  assumptions: ["Covering both Sericulture schemes, spinning and weaving, which are recorded separately."]
+  caveats: [sericulture_year_note, disbursement_split_caveat]
+
+- id: S03
+  question: "Sericulture disbursement by financial year"
+  plan:
+  - "Both Sericulture literals"
+  - "FY group with COALESCE - both schemes land in the no-FY bucket, which IS the answer"
+  sql: |
+    SELECT scheme_name,
+           COALESCE(financial_year_short, '(no financial year)') AS financial_year,
+           COUNT(*) AS records,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name IN ('Meghalaya Sericulture & Weaving Scheme (spinning)',
+                          'Meghalaya Sericulture & Weaving Scheme(weaving)')
+    GROUP BY scheme_name, financial_year_short
+    ORDER BY scheme_name, financial_year_short NULLS LAST;
+  assumptions: ["Covering both Sericulture schemes, spinning and weaving."]
+  caveats: [sericulture_year_note, unresolved_year_note]
+
+# ---- 6.9 Lookups and data quality ----------------------------------------
+- id: Q01
+  question: "Find the record with application number MPDSI018328"
+  plan:
+  - "application_number is unique -> at most one row"
+  - "No names in the view"
+  - "Amounts in rupees"
+  sql: |
+    SELECT application_number, scheme_name, financial_year_short,
+           lgd_district, lgd_block, lgd_village_name,
+           sanctioned_amount, total_subsidy_disbursement,
+           total_loan_disbursement, total_disbursement,
+           loan_entity, desanctioned_reason_raw
+    FROM curated.v_cm_elevate_disbursement
+    WHERE application_number = 'MPDSI018328';
+
+- id: Q02
+  question: "List individual records of Goat Farming in Ri Bhoi"
+  variants: ["show goat farming records in Ri Bhoi", "details of goat beneficiaries in Ri Bhoi"]
+  plan:
+  - "'individual records' = a row listing, not an applicant-type question"
+  - "Identify by application number (no names)"
+  - "LIMIT 100"
+  sql: |
+    SELECT application_number, lgd_block, lgd_village_name, village_code,
+           sanctioned_amount, total_disbursement, financial_year_short
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Goat Farming Scheme'
+      AND lgd_district = 'RI BHOI'
+    ORDER BY application_number
+    LIMIT 100;
+  assumptions: ["Showing the first 100 matching records."]
+
+- id: Q03
+  question: "Which record received the largest disbursement?"
+  plan:
+  - "The answerable form of 'who got the most' - identify by application number"
+  - "ORDER BY total desc NULLS LAST LIMIT 1"
+  sql: |
+    SELECT application_number, scheme_name, lgd_district,
+           sanctioned_amount, total_disbursement
+    FROM curated.v_cm_elevate_disbursement
+    ORDER BY total_disbursement DESC NULLS LAST, application_number
+    LIMIT 1;
+
+- id: Q04
+  question: "How complete is each field?"
+  plan:
+  - "One row of gap counts via FILTER"
+  - "Report - never filter away"
+  sql: |
+    SELECT COUNT(*)                                                    AS records,
+           COUNT(*) FILTER (WHERE sanctioned_amount IS NULL)           AS missing_sanctioned,
+           COUNT(*) FILTER (WHERE year_key IS NULL)                    AS missing_financial_year,
+           COUNT(*) FILTER (WHERE loan_entity IS NULL)                 AS missing_loan_entity,
+           COUNT(*) FILTER (WHERE subsidy_disbursement_date_1 IS NULL
+                              AND subsidy_disbursement_1 > 0)          AS paid_but_undated,
+           COUNT(*) FILTER (WHERE entity_type = 'Unresolved')          AS unresolved_village
+    FROM curated.v_cm_elevate_disbursement;
+  caveats: [quarantine_note]
+
+- id: Q05
+  question: "Which records have no sanctioned amount?"
+  plan:
+  - "sanctioned_amount IS NULL list"
+  sql: |
+    SELECT source_row_id, application_number, scheme_name,
+           desanctioned_reason_raw, refused_reason_text, total_disbursement
+    FROM curated.v_cm_elevate_disbursement
+    WHERE sanctioned_amount IS NULL
+    ORDER BY source_row_id;
+
+- id: Q06
+  question: "Do the recorded totals match the sum of their instalments?"
+  plan:
+  - "AUDIT ONLY - the one place tranches are added"
+  - "Count disagreements > 0.01"
+  sql: |
+    SELECT COUNT(*) AS records_where_totals_disagree
+    FROM curated.v_cm_elevate_disbursement
+    WHERE ABS(COALESCE(total_subsidy_disbursement, 0)
+            - (COALESCE(subsidy_disbursement_1, 0)
+             + COALESCE(subsidy_disbursement_2, 0)
+             + COALESCE(subsidy_disbursement_3, 0))) > 0.01
+       OR ABS(COALESCE(total_disbursement, 0)
+            - (COALESCE(total_subsidy_disbursement, 0)
+             + COALESCE(total_loan_disbursement, 0))) > 0.01;
+  caveats: [derived_total_note]
+
+- id: Q07
+  question: "Show the records with data-quality problems"
+  plan:
+  - "One CASE label per issue"
+  - "List by source_row_id"
+  sql: |
+    SELECT source_row_id, application_number, scheme_name,
+           CASE
+             WHEN subsidy_disbursement_date_1 > DATE '2026-09-03' THEN 'payment dated after the file was produced'
+             WHEN loan_disbursement_date_1    < DATE '2020-01-01' THEN 'loan dated before the scheme existed'
+             WHEN total_disbursement > sanctioned_amount          THEN 'disbursed more than sanctioned'
+             WHEN sanctioned_amount IS NULL                       THEN 'no sanctioned amount recorded'
+           END AS issue,
+           sanctioned_amount, total_disbursement
+    FROM curated.v_cm_elevate_disbursement
+    WHERE subsidy_disbursement_date_1 > DATE '2026-09-03'
+       OR loan_disbursement_date_1    < DATE '2020-01-01'
+       OR total_disbursement > sanctioned_amount
+       OR sanctioned_amount IS NULL
+    ORDER BY source_row_id;
+  caveats: [suspect_date_note]
+  why: "10 in the source - 2 future dates, 1 1985 loan, 4 over-disbursed, 3 no sanction (the all-NULL row 2823 has a sanction, so it is not caught)."
+
+- id: Q08
+  question: "Which Piggery records lost their disbursement date?"
+  plan:
+  - "Paid first tranche but NULL date = the 4 corrupted-century rows"
+  sql: |
+    SELECT source_row_id, application_number,
+           subsidy_disbursement_1, subsidy_disbursement_date_1, total_disbursement
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+      AND subsidy_disbursement_1 IS NOT NULL
+      AND subsidy_disbursement_date_1 IS NULL
+    ORDER BY source_row_id;
+
+# ---- 6.11 Continuations and follow-ups -----------------------------------
+# The app rewrites a clarification answer or a follow-up fragment into a
+# standalone question before it reaches the SQL prompt, so these are stored in
+# that standalone form. `source_question` keeps the document's original.
+- id: F01
+  source_question: "[clarified: sericulture_spelling_ambiguous = both separately] Sericulture records by district"
+  question: "Sericulture records by district, spinning and weaving shown separately"
+  plan:
+  - "The clarification answer is binding - both schemes, kept apart"
+  - "Group by scheme and district"
+  sql: |
+    SELECT scheme_name, lgd_district, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name IN ('Meghalaya Sericulture & Weaving Scheme (spinning)',
+                          'Meghalaya Sericulture & Weaving Scheme(weaving)')
+    GROUP BY scheme_name, lgd_district
+    ORDER BY scheme_name, records DESC;
+  assumptions: ["As clarified: both Sericulture schemes, shown separately."]
+  caveats: [record_grain_note]
+
+- id: F02
+  source_question: "[clarified: bare_disbursement_measure_ambiguous = loan only] How much was disbursed?"
+  question: "How much loan was disbursed, loan only?"
+  plan:
+  - "Clarification picked the loan measure"
+  - "total_loan_disbursement only"
+  sql: |
+    SELECT ROUND(SUM(total_loan_disbursement) / 1e7, 2) AS loan_cr,
+           COUNT(*) FILTER (WHERE total_loan_disbursement > 0) AS records_with_loan
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["As clarified: loan disbursement only, excluding subsidy."]
+
+- id: F03
+  source_question: "[clarified: shared_village_name = Umsning] How much was disbursed in Umtham village?"
+  question: "How much was disbursed in Umtham village in Umsning block?"
+  plan:
+  - "The block answer picks code 277925 from the registry"
+  - "Filter by code"
+  - "Split money"
+  sql: |
+    SELECT lgd_village_name, lgd_block,
+           COUNT(*)                                        AS records,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE village_code = 277925
+    GROUP BY lgd_village_name, lgd_block
+    ORDER BY records DESC;
+  assumptions: ["As clarified: Umtham in Umsning block (LGD code 277925)."]
+  caveats: [disbursement_split_caveat]
+
+- id: F04
+  source_question: "[previous: records by district] Break that down by block for Ri Bhoi"
+  question: "Records by block for Ri Bhoi"
+  plan:
+  - "Inherit the measure (records) from the previous turn"
+  - "Add the district filter and group by block"
+  sql: |
+    SELECT lgd_block, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'RI BHOI'
+    GROUP BY lgd_block
+    ORDER BY records DESC;
+
+- id: F05
+  source_question: "[previous: total disbursement for Poultry] and how much of that was loan?"
+  question: "How much of the Poultry disbursement was loan?"
+  plan:
+  - "Inherit scheme filter"
+  - "Return loan with subsidy and total for context"
+  sql: |
+    SELECT ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Poultry Farming Scheme';
+
+- id: F06
+  source_question: "[previous: records by scheme for FY 2024-25] same for 2025-26"
+  question: "Records by scheme for FY 2025-26"
+  plan:
+  - "Inherit shape (records by scheme)"
+  - "Swap the FY literal"
+  sql: |
+    SELECT scheme_name, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE financial_year_short = '2025-26'
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+  assumptions: ["Financial years are read from the recorded year label."]
+  caveats: [sericulture_year_note, unresolved_year_note]
+
+# ---- 6.12 Refusals ---------------------------------------------------------
+# status: UNANSWERABLE + sql: null is the loader's contract for a negative
+# example. `reason` is the refusal and the offer, as the answer should say it.
+- id: X01
+  use_case: TC-15
+  question: "What percentage of applications have been sanctioned?"
+  variants: ["sanction rate", "approval rate of applications", "ratio of sanctioned to total applications"]
+  plan:
+  - "Share of records in THIS dataset carrying a sanctioned amount"
+  - "Numerator COUNT(sanctioned_amount), denominator COUNT(*)"
+  - "Caveat: the wider application pool is the separate CM Elevate dataset"
+  sql: |
+    SELECT COUNT(*)                                                         AS records,
+           COUNT(sanctioned_amount)                                         AS sanctioned_records,
+           ROUND(100.0 * COUNT(sanctioned_amount) / NULLIF(COUNT(*), 0), 2) AS sanctioned_pct
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["The percentage is of the records in this sanction-and-disbursement dataset; applications that never reached sanction are held in the separate CM Elevate applications dataset, which cannot be linked to this one."]
+
+- id: X02
+  use_case: TC-16
+  question: "How many applications have not been sanctioned?"
+  variants: ["how many applications got rejected", "non sanctioned applications"]
+  plan:
+  - "Not sanctioned = records with NO sanctioned amount"
+  - "Report later-desanctioned (Refused / Duplicate) separately, labelled as withdrawn sanctions"
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE sanctioned_amount IS NULL)             AS not_sanctioned_records,
+           COUNT(*) FILTER (WHERE desanctioned_reason_raw = 'Refused')   AS desanctioned_refused,
+           COUNT(*) FILTER (WHERE desanctioned_reason_raw = 'Duplicate') AS desanctioned_duplicate,
+           COUNT(*)                                                      AS records
+    FROM curated.v_cm_elevate_disbursement;
+  assumptions: ["Not sanctioned means a record with no sanctioned amount. Records whose sanction was later withdrawn (Refused / Duplicate) are shown separately - they were sanctioned first."]
+
+- id: X03
+  use_case: TC-01, TC-02, TC-03, TC-04, TC-07, TC-09
+  status: UNANSWERABLE
+  refusal_code: PROGRAMME_NARRATIVE
+  question: "What is the CM-ELEVATE programme in Meghalaya?"
+  variants: ["main objective of CM-ELEVATE", "intended beneficiaries", "sectors covered", "prepare a briefing note on CM-ELEVATE"]
+  plan:
+  - "Programme narrative is not in the data"
+  - "Never answer from general knowledge as if it were data"
+  - "Offer the data overview"
+  sql: null
+  reason: >
+    This dataset holds sanction and disbursement records only; it has no description of
+    the programme, its objectives, beneficiaries or sectors, so I cannot answer that from
+    the data. Offer instead: a data overview - records, amounts sanctioned and disbursed
+    by scheme and district, and the financial years covered.
+
+- id: X04
+  use_case: TC-05, TC-06
+  status: UNANSWERABLE
+  refusal_code: PROGRAMME_NARRATIVE
+  question: "What type of financial assistance is provided under CM-ELEVATE, and how does it provide access to credit?"
+  plan:
+  - "Design of the programme is narrative"
+  - "The data shows how money was actually paid - offer that"
+  sql: null
+  reason: >
+    The programme's design is not described in this data. What the records do show is
+    how the money was actually paid - as subsidy, as loans through 'Bank' or LIFCOM, or
+    both. Offer instead: subsidy and loan amounts by scheme, and loans by lender.
+
+- id: X05
+  use_case: TC-08
+  status: UNANSWERABLE
+  refusal_code: TARGETS
+  question: "What is the target number of entrepreneurs under CM-ELEVATE?"
+  plan:
+  - "Targets / budgets not held"
+  sql: null
+  reason: >
+    Programme targets, budgets and allocations are not held - only amounts actually
+    sanctioned and disbursed. Offer instead: the number of sanctioned records and the
+    total sanctioned amount.
+
+- id: X06
+  use_case: TC-10
+  status: UNANSWERABLE
+  refusal_code: APPLICATION_PROCESS
+  question: "How can an entrepreneur apply under the CM-ELEVATE programme?"
+  plan:
+  - "Eligibility / process not held"
+  sql: null
+  reason: >
+    Eligibility rules and the application process are not held in this data. Offer
+    instead: the sanctioned records by scheme and district.
+
+- id: X07
+  use_case: TC-31
+  question: "How many CM-ELEVATE applications are mapped to Mairang constituency?"
+  variants: ["applications by assembly constituency", "constituency wise records"]
+  plan:
+  - "The view has no constituency column - join curated.dim_geography on geography_key for ac_name"
+  - "Filter UPPER(g.ac_name) = UPPER('Mairang') - the constituency, NOT the Mairang block"
+  - "Unresolved records have no village and so no constituency"
+  sql: |
+    SELECT g.ac_name,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement v
+    JOIN curated.dim_geography g ON g.geography_key = v.geography_key
+    WHERE UPPER(g.ac_name) = UPPER('Mairang')
+    GROUP BY g.ac_name;
+  assumptions: ["Constituency comes from the geography registry, reached through each record's village; records with no village carry no constituency."]
+
+- id: X08
+  use_case: TC-32
+  question: "What is the total disbursement amount for Pynursla constituency?"
+  variants: ["disbursement by assembly constituency"]
+  plan:
+  - "Join curated.dim_geography on geography_key for ac_name"
+  - "Stored totals: subsidy, loan and total"
+  sql: |
+    SELECT g.ac_name,
+           COUNT(*)                                          AS records,
+           ROUND(SUM(v.total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(v.total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(v.total_disbursement)         / 1e7, 2) AS total_disbursed_cr
+    FROM curated.v_cm_elevate_disbursement v
+    JOIN curated.dim_geography g ON g.geography_key = v.geography_key
+    WHERE UPPER(g.ac_name) = UPPER('Pynursla')
+    GROUP BY g.ac_name;
+  assumptions: ["Constituency comes from the geography registry, reached through each record's village; records with no village carry no constituency."]
+  caveats: [disbursement_split_caveat]
+
+- id: X09
+  status: UNANSWERABLE
+  refusal_code: APPLICANT_NAME
+  question: "Who received the largest disbursement?"
+  variants: ["names of piggery beneficiaries in Umling", "who got the maximum money", "beneficiary name list"]
+  plan:
+  - "Names are PII and dropped by the view"
+  - "No join back to the fact"
+  - "Offer the application number"
+  sql: null
+  reason: >
+    Applicant names are not available in the query surface - they are held for audit
+    only and excluded from everything the bot can read. Offer instead: the application
+    number, scheme and district of the largest record.
+
+- id: X10
+  status: UNANSWERABLE
+  refusal_code: MONTHLY
+  question: "Show me the monthly disbursement trend"
+  variants: ["month wise disbursement for 2024-25", "quarterly disbursement"]
+  plan:
+  - "No monthly grain"
+  - "Do not synthesise months from dates"
+  sql: null
+  reason: >
+    A monthly view is not available for this scheme - the source records only a batch
+    label with four values across two years, and it was not loaded. Offer instead: the
+    two financial years side by side.
+
+- id: X11
+  status: UNANSWERABLE
+  refusal_code: BANK_SANCTIONED_SHARE
+  question: "What share of the sanctioned amount did the bank sanction?"
+  variants: ["what percentage did the bank contribute", "bank contribution"]
+  plan:
+  - "bank_sanctioned_amount meaning unconfirmed"
+  - "No share may be built"
+  sql: null
+  reason: >
+    The bank-sanctioned figure has no confirmed meaning - it is zero on half the records
+    and its ratio to the sanctioned amount varies within a single scheme - so no share can
+    be built on it. Offer instead: the loan actually disbursed through Bank and LIFCOM.
+
+- id: X12
+  status: UNANSWERABLE
+  refusal_code: CROSS_SCHEME
+  question: "Compare CM Elevate Legacy and PMAY spending by district"
+  variants: ["compare with MGNREGA spending"]
+  plan:
+  - "No cross-scheme view includes this scheme"
+  - "No hand-rolled comparison"
+  sql: null
+  reason: >
+    CM Elevate Legacy is not included in the cross-scheme comparison views, which cover
+    MGNREGA and PMAY only, so a like-for-like comparison cannot be produced. Offer
+    instead: CM Elevate Legacy disbursement by district on its own.
+
+- id: X13
+  status: UNANSWERABLE
+  refusal_code: LINK_APPLICATIONS
+  question: "Show me the applications behind these disbursement records"
+  plan:
+  - "No shared identifier between the two CM Elevate files"
+  - "Join prohibited"
+  sql: null
+  reason: >
+    The application records and these disbursement records come from two separate files
+    with no shared identifier, so they cannot be linked. Offer instead: the disbursement
+    records on their own.
+
+- id: X14
+  status: UNANSWERABLE
+  refusal_code: WRONG_PARTITION
+  question: "How many CM Elevate applications are on hold?"
+  variants: ["application status wise count", "applications withdrawn"]
+  plan:
+  - "Status / on-hold belong to the applications dataset"
+  sql: null
+  reason: >
+    Application status, on-hold and withdrawal are recorded in the other CM Elevate
+    dataset (applications), not in these sanction and disbursement records. Offer
+    instead: switching to the CM Elevate applications dataset, or the sanctioned records
+    here.
+
+- id: X15
+  status: UNANSWERABLE
+  refusal_code: APPLICANT_TYPE
+  question: "How many individual applicants versus groups received support?"
+  variants: ["how many SHG group applicants"]
+  plan:
+  - "No applicant-type column"
+  - "Never parse application_number"
+  sql: null
+  reason: >
+    Individual and group applicants are not recorded as a field in this dataset. The
+    letter inside the application number looks like one but is unreliable. Offer instead:
+    records by scheme instead.
+
+- id: X16
+  status: UNANSWERABLE
+  refusal_code: REPAYMENT
+  question: "How many loans have been repaid?"
+  variants: ["loan repayment status"]
+  plan:
+  - "loan_repaid was a dead column and not loaded - 'none' would be a false finding"
+  sql: null
+  reason: >
+    Repayment is not recorded in this data - only whether a loan was disbursed. Offer
+    instead: loans disbursed by scheme and lender.
+
+- id: X17
+  status: UNANSWERABLE
+  refusal_code: DEMOGRAPHICS
+  question: "How many women beneficiaries are there?"
+  variants: ["gender wise beneficiaries", "SC ST beneficiaries"]
+  plan:
+  - "No demographic columns"
+  sql: null
+  reason: >
+    Gender, age, caste, income and category are not held for this scheme. Offer instead:
+    records by scheme, district or amount.
+
+- id: X18
+  status: UNANSWERABLE
+  refusal_code: BANK_NAME
+  question: "Which bank branch gave the most loans?"
+  plan:
+  - "Only 'Bank' / 'LIFCOM' categories exist"
+  sql: null
+  reason: >
+    Individual bank names and branches are not held - the only lender values recorded
+    are 'Bank' and 'LIFCOM'. Offer instead: loans by those two lender categories.
+
+- id: X19
+  status: UNANSWERABLE
+  refusal_code: GEO_CODE
+  question: "What is the LGD code of East Khasi Hills district?"
+  plan:
+  - "District / block codes are not in the curated layer"
+  sql: null
+  reason: >
+    District and block are held as names only - there is no LGD code for them in this
+    data. Offer instead: figures by district name, or village LGD codes.
+
+- id: X20
+  status: UNANSWERABLE
+  refusal_code: WRITE_OPERATION
+  question: "Delete the duplicate records"
+  variants: ["update the sanctioned amount for an applicant"]
+  plan:
+  - "Read-only role - SELECT only"
+  sql: null
+  reason: >
+    This assistant can only read data; it cannot change records. Offer instead: listing
+    the records marked 'Duplicate'.
+
+- id: X21
+  status: UNANSWERABLE
+  refusal_code: BUSINESS_OUTCOME
+  question: "How many jobs were created under CM Elevate?"
+  plan:
+  - "Outcomes not recorded"
+  sql: null
+  reason: >
+    Business outcomes - jobs created, income, turnover, whether the venture survived -
+    are not held. Offer instead: amounts sanctioned and disbursed by scheme.
+
+- id: X22
+  status: UNANSWERABLE
+  refusal_code: OUTSIDE_DATA_SPAN
+  question: "Disbursement in FY 2022-23"
+  plan:
+  - "Only FY 2024-25 and 2025-26 are held"
+  sql: null
+  reason: >
+    No records are held for FY 2022-23; this scheme covers FY 2024-25 and FY 2025-26
+    only. Offer instead: FY 2024-25 or FY 2025-26, the two years held.
+
+# ---------------------------------------------------------------------------
+# 6.10 Clarifications - what the gate asks instead of guessing. NOT in the SQL
+# pool: the SQL generator cannot ask a question, the pipeline does. K03 is wired
+# in app/pipeline.py (_cm_legacy_sericulture_clarification); the others are the
+# reviewed wording for when each gate is built. K01 / K02 / K06 belong to
+# non-default policies and are listed for completeness only.
+# ---------------------------------------------------------------------------
+clarification_shots:
+- id: K01
+  use_case: TC-17
+  policy: "disbursement_ambiguity=clarify_first"
+  question: "How much was disbursed?"
+  rule: bare_disbursement_measure_ambiguous
+  asks: "Disbursement is recorded three ways here - subsidy, loan, and the two together. Which did you mean?"
+  options: ["Subsidy only", "Loan only", "Subsidy and loan together", "Show all three"]
+- id: K02
+  policy: "refusal_ambiguity=clarify_first"
+  question: "How many were refused?"
+  rule: refusal_measure_ambiguous
+  asks: "Refusal is recorded in three fields that disagree - a desanction reason, a refused flag, and a written reason. Which should I count?"
+  options: ["Desanction reason 'Refused'", "Refused flag", "Anything withdrawn (Refused or Duplicate)", "Show all three"]
+- id: K03
+  question: "How many records are there under Sericulture?"
+  variants: ["sericulture records by district", "silk scheme count"]
+  rule: sericulture_spelling_ambiguous
+  asks: "Sericulture is recorded as two separate schemes - spinning and weaving. Which did you mean, or both together?"
+  options: ["Spinning", "Weaving", "Both together", "Both separately"]
+- id: K04
+  question: "How many records are in Nongthymmai?"
+  rule: shared_village_name
+  asks: "More than one village is called Nongthymmai. Which block - Mawryngkneng, Pynursla (both East Khasi Hills) or Jirang (Ri Bhoi)?"
+  options: ["Mawryngkneng", "Pynursla", "Jirang", "All three together"]
+- id: K05
+  question: "Show me Resubelpara"
+  rule: ambiguous_geography_level
+  asks: "Resubelpara is recorded as two different places - the rural block and the Resubelpara Municipal Board. Which one?"
+  options: ["Resubelpara block (rural)", "Resubelpara Municipal Board (urban)", "Both, shown separately"]
+- id: K06
+  policy: "partition_context=ask_when_ambiguous"
+  question: "How many CM Elevate beneficiaries are there?"
+  rule: cm_elevate_scheme_ambiguous
+  asks: "Two different datasets are called CM Elevate - sanction and disbursement records for 13 schemes (with amounts and financial years), or applications for 15 schemes (no money, no dates). Which did you mean?"
+  options: ["Sanctions and disbursements (CM Elevate Legacy)", "Applications"]
+- id: K07
+  question: "Which is the best performing district?"
+  variants: ["top performing block", "best scheme"]
+  rule: performance_term_unclear
+  asks: "What counts as performance here - the number of records, the amount disbursed, or how much of the sanctioned amount has actually been paid?"
+  options: ["Number of records", "Amount disbursed", "Share of sanction paid (utilisation)"]
+  why: "LLM-judged clarification (no regex fires). Contrast M07, where 'utilisation' names the measure."
+- id: K08
+  question: "Compare Ri Bhoi"
+  rule: missing_comparison_target
+  asks: "Compare Ri Bhoi with which other district, scheme, or financial year?"
+  options: ["Another district", "The statewide total", "FY 2024-25 vs 2025-26 within Ri Bhoi"]
+
+# ---------------------------------------------------------------------------
+# 7. Common mistakes - rendered as a contrastive block into every CM Elevate
+# Legacy SQL prompt. Each WRONG trips the named validator rule.
+# ---------------------------------------------------------------------------
+common_mistakes:
+- id: AP01
+  title: "Grouping by financial year without keeping the undated bucket"
+  rule: V10
+  why: "The NULL group prints as a blank row the reader drops - 395 Sericulture records vanish."
+  wrong: "SELECT financial_year_short, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY financial_year_short ORDER BY 1"
+  right: "SELECT COALESCE(financial_year_short, '(no financial year)') AS financial_year, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY financial_year_short ORDER BY financial_year_short NULLS LAST"
+- id: AP02
+  title: "Counting villages without excluding Unresolved placeholders"
+  rule: V12
+  why: "The Unresolved placeholder code(s) get counted as villages, inflating the count (54 West Garo Hills records have no village)."
+  wrong: "SELECT COUNT(DISTINCT village_code) AS villages FROM curated.v_cm_elevate_disbursement WHERE lgd_district = 'WEST GARO HILLS'"
+  right: "SELECT COUNT(DISTINCT village_code) AS villages FROM curated.v_cm_elevate_disbursement WHERE lgd_district = 'WEST GARO HILLS' AND entity_type <> 'Unresolved'"
+- id: AP03
+  title: "Listing villages by name only"
+  rule: V12
+  why: "17 names belong to more than one village - grouping by name merges different places."
+  wrong: "SELECT lgd_village_name, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE entity_type <> 'Unresolved' GROUP BY lgd_village_name ORDER BY 2 DESC"
+  right: "SELECT lgd_village_name, village_code, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE entity_type <> 'Unresolved' GROUP BY lgd_village_name, village_code ORDER BY 3 DESC"
+- id: AP04
+  title: "Title-case district literal"
+  rule: V13
+  why: "Stored UPPERCASE - the mixed-case filter returns 0 silently."
+  wrong: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE lgd_district = 'West Garo Hills'"
+  right: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE lgd_district = 'WEST GARO HILLS'"
+- id: AP05
+  title: "Wrong Sericulture spelling"
+  rule: V14
+  why: "Weaving has NO space before the bracket; spinning has one. Wrong spelling = 0 rows."
+  wrong: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE scheme_name = 'Meghalaya Sericulture & Weaving Scheme (weaving)'"
+  right: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE scheme_name = 'Meghalaya Sericulture & Weaving Scheme(weaving)'"
+- id: AP06
+  title: "Deriving the scheme from the application-number prefix"
+  rule: V07
+  why: "Prefixes are observed, not enforced - one Poultry record carries MPDSI."
+  wrong: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE application_number LIKE 'MPDSI%'"
+  right: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE scheme_name = 'Meghalaya Piggery Development Scheme'"
+- id: AP07
+  title: "Negating the positive-only refusal flag"
+  rule: V08
+  why: "The flag is TRUE or NULL, never FALSE - NOT returns 0 instead of 2,815."
+  wrong: "SELECT COUNT(*) AS not_refused FROM curated.v_cm_elevate_disbursement WHERE NOT refused_flag_raw"
+  right: "SELECT COUNT(*) AS not_refused FROM curated.v_cm_elevate_disbursement WHERE refused_flag_raw IS DISTINCT FROM TRUE"
+- id: AP08
+  title: "Re-adding subsidy and loan (or tranches) by hand"
+  rule: V15
+  why: "The stored total is verified; adding parts invites NULL arithmetic errors and double counting."
+  wrong: "SELECT ROUND(SUM(total_subsidy_disbursement + total_loan_disbursement) / 1e7, 2) AS total_cr FROM curated.v_cm_elevate_disbursement"
+  right: "SELECT ROUND(SUM(total_disbursement) / 1e7, 2) AS total_disbursed_cr FROM curated.v_cm_elevate_disbursement"
+- id: AP09
+  title: "Building a metric on bank_sanctioned_amount"
+  rule: V09
+  why: "Meaning unconfirmed - refuse the share, offer the loans actually disbursed."
+  wrong: "SELECT ROUND(100.0 * SUM(bank_sanctioned_amount) / NULLIF(SUM(sanctioned_amount), 0), 1) AS bank_share_pct FROM curated.v_cm_elevate_disbursement"
+  right: "SELECT COALESCE(loan_entity, '(not recorded)') AS loan_entity, ROUND(SUM(total_loan_disbursement) / 1e7, 2) AS loan_cr FROM curated.v_cm_elevate_disbursement GROUP BY loan_entity ORDER BY loan_cr DESC"
+- id: AP10
+  title: "Joining a dimension the view already carries"
+  rule: V03
+  why: "Zero joins for any ordinary question - and an INNER join to dim_year deletes both Sericulture schemes."
+  wrong: "SELECT y.financial_year, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement v JOIN curated.dim_year y ON v.year_key = y.year_key GROUP BY 1 ORDER BY 1"
+  right: "SELECT COALESCE(financial_year_short, '(no financial year)') AS financial_year, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY financial_year_short ORDER BY financial_year_short NULLS LAST"
+- id: AP11
+  title: "Querying the fact table (it carries PII names)"
+  rule: V02
+  why: "The view is the only query surface."
+  wrong: "SELECT COUNT(*) AS records FROM curated.fact_cm_elevate_disbursement"
+  right: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement"
+- id: AP12
+  title: "Monthly grouping from disbursement dates"
+  rule: V11
+  why: "No monthly grain exists - refuse and offer the two FYs."
+  wrong: "SELECT EXTRACT(MONTH FROM subsidy_disbursement_date_1) AS month, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY 1 ORDER BY 1"
+  right: "SELECT COALESCE(financial_year_short, '(no financial year)') AS financial_year, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY financial_year_short ORDER BY financial_year_short NULLS LAST"
+- id: AP13
+  title: "Grouping by lender without the unattributed bucket"
+  rule: V17
+  why: "401 records (19 with loan money) print as an unlabeled blank row."
+  wrong: "SELECT loan_entity, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY loan_entity ORDER BY 2 DESC"
+  right: "SELECT COALESCE(loan_entity, '(not recorded)') AS loan_entity, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY loan_entity ORDER BY records DESC"
+- id: AP14
+  title: "Ratio without NULLIF"
+  rule: V21
+  why: "A filtered scope with no sanction divides by zero; also show numerator and denominator."
+  wrong: "SELECT SUM(total_disbursement) / SUM(sanctioned_amount) AS utilisation FROM curated.v_cm_elevate_disbursement"
+  right: "SELECT ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct FROM curated.v_cm_elevate_disbursement"
+
+# ---------------------------------------------------------------------------
+# 8. Answer-writing shots (response composer). Two are picked per answer by
+# similarity and shown as WORDING examples only - their numbers are never the
+# current answer's data (the composer's numbers-locked check enforces that).
+# ---------------------------------------------------------------------------
+answer_shots:
+- id: A01
+  question: "What is the total amount disbursed under CM-ELEVATE?"
+  columns: [sanctioned_cr, subsidy_cr, loan_cr, total_disbursed_cr, disbursed_pct]
+  rows: [[142.74, 52.57, 30.33, 82.9, 58.1]]
+  answer: >-
+    ₹82.90 crore has been disbursed under CM Elevate Legacy - ₹52.57 crore as subsidy
+    and ₹30.33 crore as loans - against ₹142.74 crore sanctioned, so 58.1% of the
+    sanction has been paid out. Assumed: "disbursed" is shown three ways because it can
+    mean subsidy, loan or both; desanctioned records are included, as in the source
+    file's totals. Would you like the subsidy and loan split by scheme?
+- id: A02
+  question: "How many applications are recorded for each financial year?"
+  columns: [financial_year, records]
+  rows: [["2024-25", 2291], ["2025-26", 137], ["(no financial year)", 395]]
+  answer: >-
+    FY 2024-25 holds 2,291 records and FY 2025-26 holds 137. Another 395 records carry
+    no financial year - all of them from the two Sericulture schemes, so Sericulture does
+    not appear in either year. Financial years are the recorded year labels, not years
+    worked out from disbursement dates. Records here are sanction-and-disbursement
+    records, one per applicant per scheme. Would you like to see which schemes make up
+    FY 2025-26?
+- id: A03
+  question: "How many villages in West Garo Hills received support?"
+  columns: [villages, records_in_those_villages]
+  rows: [[196, 439]]
+  caveat_values: {unresolved_records: 54}
+  answer: >-
+    196 villages in West Garo Hills have CM Elevate Legacy records (439 records). A
+    further 54 records in the district could not be matched to a village and are left
+    out of the village count; they are still included in West Garo Hills' record and
+    money totals. Villages are counted by LGD code, because some village names are shared
+    by more than one village. Would you like these broken down by block?
+- id: A04
+  question: "How many records were refused?"
+  columns: [desanction_reason_refused, desanction_reason_duplicate, any_desanction_reason, refused_flag_set, written_reason, desanctioned_but_paid]
+  rows: [[52, 31, 83, 8, 7, 32]]
+  answer: >-
+    52 records are marked "Refused" and 31 "Duplicate" in the desanction reason - 83
+    withdrawn sanctions in all. The separate refusal flag is set on only 8 records and a
+    written reason exists on 7, so the three fields disagree and none of them is
+    authoritative. 32 of the 83 desanctioned records still received money, so leaving
+    them out would change any money total. Would you like to see how the three fields
+    overlap?
+- id: A05
+  question: "What percentage of applications have been sanctioned?"
+  columns: [records, sanctioned_records, sanctioned_pct]
+  rows: [[2823, 2820, 99.89]]
+  answer: >-
+    99.89% of the records in CM Elevate Legacy carry a sanctioned amount - 2,820 of
+    2,823. The 3 without one are all marked Refused. This is a share of this sanction
+    and disbursement dataset; applications that never reached sanction sit in the
+    separate CM Elevate applications dataset, which cannot be linked to this one.
+- id: A06
+  question: "Which scheme is the biggest?"
+  columns: [scheme_name, records, sanctioned_cr, total_disbursed_cr]
+  rows: [["Meghalaya Piggery Development Scheme", 1353, 16.91, 9.52], ["Meghalaya Poultry Farming Scheme", 454, 5.45, 4.01], ["Meghalaya Agriculture Warehouse Scheme", 87, 44.34, 22.62]]
+  answer: >-
+    It depends on the measure. By number of records it is the Meghalaya Piggery
+    Development Scheme, with 1,353 records. By money it is the Meghalaya Agriculture
+    Warehouse Scheme - ₹44.34 crore sanctioned and ₹22.62 crore disbursed from just 87
+    records. Disbursed here means subsidy and loan together. Would you like all 13
+    schemes ranked on both measures?
+- id: A07
+  question: "What is the average sanctioned amount for Piggery?"
+  columns: [sanctioned_rupees, records]
+  rows: [[125000, 1353]]
+  answer: >-
+    ₹1,25,000 - the same on all 1,353 Piggery records, because the scheme pays a fixed
+    entitlement, so an average adds nothing beyond that figure. What varies is how much
+    of it has been paid; shall I show the payment steps?
+- id: A08
+  question: "How much did Sericulture spinning actually disburse?"
+  columns: [records, with_subsidy, with_loan, sanctioned_rupees, total_disbursed_rupees]
+  rows: [[198, 0, 2, 20063892, 26000]]
+  answer: >-
+    Almost nothing. The spinning scheme sanctioned ₹2.01 crore across 198 records but
+    disbursed only ₹26,000, and none of that was subsidy - no subsidy payment was made
+    on any record; the ₹26,000 is two loans. The scheme also has no financial year on
+    any record, so it does not appear in year-by-year figures. Would you like to see the
+    weaving scheme alongside it?

@@ -1,0 +1,467 @@
+# pmay_foreign_key_augmentation.yaml
+#
+# Join edges and the materialised join graph for PMAY-G - node 5.9.
+#
+#   nodes       what each object is, its grain, and whether it may be aggregated
+#   edges       every join, with the exact ON clause the generator must emit
+#   join_graph  adjacency list, listed from the many side, traversed undirected
+#
+# declared: true      the edge is a real constraint in information_schema
+# declared: false     the edge exists only here
+# is_prohibited: true the generator must refuse this join and use `use_instead`
+#
+# ===========================================================================
+# v2.0 - 2026-08-24 - REWRITTEN. THE PREMISE OF v1.0 IS NOW FALSE.
+#
+# v1.0 opened with "PMAY-G is not loaded into megh_db - both tables are flat and
+# Excel-sourced, so information_schema holds no constraint for this scheme and
+# every edge below is declared: false."
+#
+# That is no longer true. PMAY-G is loaded into the curated star schema and
+# fact_pmay_house carries FIVE REAL DECLARED FOREIGN KEYS. The embedded-dimension
+# fiction of v1.0 - district, block, village, status and category as pseudo-tables
+# hanging off a flat row - is gone. They are real dimensions now.
+#
+# Authority: SCHEMA_FOR_DEVELOPERS.md, rewritten 2026-08-24 from the live
+# information_schema extract (data-1787574891914.csv).
+#
+# What did NOT change: the generator still emits no joins for ordinary questions.
+# The reason changed. In v1.0 it was because everything was denormalised onto one
+# flat row. In v2.0 it is because curated.v_pmay already pre-joins every dimension.
+# Same output, different justification - and the prohibited edges are different.
+# ===========================================================================
+
+foreign_key_augmentation:
+
+  version: '2.0'
+  database: megh_db
+  schema: curated
+  read_role: megh_readonly
+  structure_verified: '2026-08-24'
+  primary_query_surface: curated.v_pmay
+
+  # =======================================================================
+  nodes:
+
+    curated.v_pmay:
+      role: fact_view
+      object_type: view
+      over: curated.fact_pmay_house
+      primary_key: pmay_fact_id
+      natural_key: none
+      grain: one row per sanctioned PMAY-G house
+      column_count: 28
+      aggregate_before_reporting: false
+      unit: rupees
+      row_count: unverified_in_db
+      note: >
+        THE DEFAULT FROM CLAUSE FOR EVERY PMAY QUESTION. Pre-joins dim_year,
+        dim_geography, dim_scheme and dim_pmay_house_status, so the generator emits
+        WHERE and GROUP BY only. COUNT(*) is a house count. reg_no and sanction_no both
+        repeat, so neither is a key - pmay_fact_id is. Every count and sum needs
+        WHERE NOT is_placeholder.
+
+    curated.fact_pmay_house:
+      role: fact
+      object_type: table
+      primary_key: pmay_fact_id
+      natural_key: none
+      grain: one row per sanctioned PMAY-G house
+      column_count: 26
+      aggregate_before_reporting: false
+      unit: rupees
+      row_count: unverified_in_db
+      note: >
+        The underlying fact. Reach for it only when the question needs a column the view
+        does not expose - mapping_status_raw, scheme_key, or the audit columns. Otherwise
+        use v_pmay, which saves four joins.
+
+    curated.dim_scheme:
+      role: dimension
+      object_type: table
+      primary_key: scheme_key
+      grain: one row per scheme
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        NEW IN v2.0. Authority on money_unit and time_semantics. Constant within the
+        PMAY partition, so never a grouping key for a PMAY-only question. Relevant when
+        a cross-scheme answer must state what the two amounts actually mean.
+
+    curated.dim_year:
+      role: dimension
+      object_type: table
+      primary_key: year_key
+      row_count: 4
+      grain: one row per financial year
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        NEW EDGE IN v2.0 - PMAY had no year dimension at all in v1.0. Covers FY 2022-23
+        to 2025-26 only. fact_pmay_house.year_key is NULLABLE, so this is an OUTER
+        relationship in practice: sanctions outside the window keep a NULL key rather
+        than being dropped. Pre-joined into v_pmay as financial_year.
+
+    curated.dim_geography:
+      role: dimension
+      object_type: table
+      primary_key: geography_key
+      natural_key: village_code
+      row_count: 7364
+      grain: one row per LGD village or ward
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        v1.0 PROHIBITED THIS JOIN. v2.0 DECLARES IT. The edge that v1.0 called
+        "unsanctioned, nothing is gained and rows are silently dropped" is now a real
+        foreign key on a NOT NULL column, and it is the conformed dimension that makes
+        cross-scheme comparison possible. District and block are NAMES here - there is
+        no district or block code column. Pre-joined into v_pmay.
+
+    curated.dim_pmay_house_status:
+      role: dimension
+      object_type: table
+      primary_key: status_key
+      grain: one row per construction stage
+      scheme_scoped: true
+      safe_to_aggregate: false
+      note: >
+        NEW IN v2.0. Replaces the v1.0 embedded dimension pmay_beneficiaries.house_status.
+        Carries is_completed and is_in_progress, both NULLABLE. Pre-joined into v_pmay.
+
+    curated.dim_geography_alias:
+      role: dimension
+      object_type: table
+      primary_key: alias_key
+      row_count: 18959
+      grain: one row per source spelling of a village
+      reachable: true
+      used_by_pmay: false
+      note: >
+        REACHABLE BUT NOT PART OF THE PMAY GRAPH. fact_pmay_house has NO alias_key -
+        PMAY geography was resolved at ingest. Only the two MGNREGA facts reference this
+        table. Do not join it from PMAY.
+
+    curated.v_pmay_monthly_sanctions:
+      role: pre_aggregate
+      object_type: view
+      primary_key: sanction_month
+      grain: one row per sanction month, statewide
+      aggregate_before_reporting: false
+      unit: crore_rupees
+      replaces: pmay_fy_summary
+      note: >
+        Replaces the v1.0 pmay_fy_summary, which does not exist in megh_db. Grain moved
+        from financial year to MONTH and there is no geography breakdown. Read it or
+        ignore it, never join it.
+
+    curated.v_cross_scheme_money_district_year:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per scheme x district x financial year
+      aggregate_before_reporting: false
+      unit: crore_rupees
+      note: >
+        NEW IN v2.0 AND IT CHANGES WHAT PMAY CAN ANSWER. v1.0 said cross-scheme questions
+        had no path. They have one now. Each side is aggregated independently before the
+        union, so no fan-out. measure_semantics must be carried into the answer.
+
+    curated.v_cross_scheme_village_coverage:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per village
+      aggregate_before_reporting: false
+      note: >
+        NEW IN v2.0. Answers "which villages get both schemes" without a fact-to-fact
+        join. NULLs on either measure are the finding, not a defect.
+
+    curated.fact_mgnrega_employment:
+      role: fact
+      object_type: table
+      primary_key: employment_fact_id
+      grain: one row per source row of the employment workbook
+      aggregate_before_reporting: true
+      note: >
+        MGNREGA partition. Declared here only as the far end of a prohibited edge - no
+        PMAY query may reference it directly.
+
+    curated.fact_mgnrega_expenditure:
+      role: fact
+      object_type: table
+      primary_key: expenditure_fact_id
+      grain: one row per source row of the expenditure workbook
+      aggregate_before_reporting: true
+      unit: lakh_rupees
+      note: >
+        MGNREGA partition, and in a THIRD money unit - lakh against PMAY's rupees and
+        the cross-scheme view's crore. Declared here only as the far end of a
+        prohibited edge.
+
+    raw.source_rows:
+      role: lineage
+      object_type: table
+      primary_key: raw_id
+      readable_by_read_role: false
+      note: >
+        fact_pmay_house.raw_id is a real declared FK to this table, but `raw` is outside
+        the megh_readonly boundary. The edge exists and the application cannot traverse
+        it. Lineage queries are a DBA task.
+
+  # =======================================================================
+  edges:
+
+    # ---- REAL DECLARED FOREIGN KEYS -------------------------------------
+    # All five are constraints in information_schema as of 2026-08-24.
+    # All five are already resolved inside curated.v_pmay, so the generator
+    # should emit them ONLY when querying fact_pmay_house directly.
+
+    - from_table: curated.fact_pmay_house
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      on_clause: "curated.fact_pmay_house.geography_key = curated.dim_geography.geography_key"
+      prefer_instead: curated.v_pmay
+      reason: >
+        The conformed geography join. NOT NULL on the fact side, so an inner join loses
+        nothing. This is the edge v1.0 listed as PROHIBITED; it is now the backbone of
+        PMAY geography. v_pmay already carries village_code, lgd_village_name, lgd_block,
+        lgd_district and on_roster, so emit this join only against the raw fact.
+
+    - from_table: curated.fact_pmay_house
+      from_column: year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      join_type: LEFT
+      on_clause: "curated.fact_pmay_house.year_key = curated.dim_year.year_key"
+      prefer_instead: curated.v_pmay
+      reason: >
+        NULLABLE ON THE FACT SIDE - this is the trap. dim_year holds 4 years; a sanction
+        outside FY 2022-26 keeps year_key NULL. An INNER join silently deletes those
+        houses from the result. Use LEFT, or accept the loss and state it. The MGNREGA
+        equivalents are NOT NULL and do not have this problem.
+
+    - from_table: curated.fact_pmay_house
+      from_column: status_key
+      to_table: curated.dim_pmay_house_status
+      to_column: status_key
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      join_type: LEFT
+      on_clause: "curated.fact_pmay_house.status_key = curated.dim_pmay_house_status.status_key"
+      prefer_instead: curated.v_pmay
+      reason: >
+        Nullable - a house with no recorded stage keeps status_key NULL. Use LEFT so
+        those houses survive into totals, then exclude them from status BREAKDOWNS
+        explicitly and say how many were excluded.
+
+    - from_table: curated.fact_pmay_house
+      from_column: scheme_key
+      to_table: curated.dim_scheme
+      to_column: scheme_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      on_clause: "curated.fact_pmay_house.scheme_key = curated.dim_scheme.scheme_key"
+      prefer_instead: read dim_scheme on its own
+      reason: >
+        Constant within the PMAY partition, so joining it per row buys nothing for a
+        PMAY-only question. Read dim_scheme separately when the answer needs money_unit
+        or time_semantics.
+
+    - from_table: curated.fact_pmay_house
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      traversable_by_read_role: false
+      on_clause: "curated.fact_pmay_house.raw_id = raw.source_rows.raw_id"
+      reason: >
+        Real constraint, unreachable in practice. `raw` is outside the megh_readonly
+        boundary, so the generator must never emit this join. Lineage is a DBA task.
+
+    # ---- THE JOINS THAT MUST NEVER BE MADE -------------------------------
+
+    - from_table: curated.v_pmay
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_employment
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_village_coverage
+      on_clause: null
+      reason: >
+        CROSS-SCHEME ROW-LEVEL JOIN. The two facts sit at different grains - one row per
+        HOUSE against one row per SOURCE ROW of a village-year workbook - so the join
+        multiplies both sides. There is no foreign key between them and there never will
+        be. Note also that the columns do not even mean the same thing: PMAY's
+        village_code is an LGD code, MGNREGA's geography_key is an unstable surrogate.
+        Use the cross-scheme coverage view, which aggregates each side first.
+
+    - from_table: curated.v_pmay
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_expenditure
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_money_district_year
+      on_clause: null
+      reason: >
+        Same grain mismatch as the employment edge, plus a unit mismatch: PMAY money is
+        RUPEES and MGNREGA expenditure is LAKH. Any combined figure is meaningless as
+        well as inflated. The cross-scheme money view normalises both to CRORE and
+        carries measure_semantics explaining that PMAY's amount is money RELEASED while
+        MGNREGA's is expenditure INCURRED.
+
+    - from_table: curated.v_pmay
+      from_column: sanction_month
+      to_table: curated.v_pmay_monthly_sanctions
+      to_column: sanction_month
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_pmay_monthly_sanctions
+      on_clause: null
+      reason: >
+        v_pmay_monthly_sanctions is a pre-aggregate OF v_pmay, not a second source.
+        Joining the detail to its own rollup repeats every monthly figure once per house
+        and inflates any SUM by that month's house count. Read the summary alone for
+        monthly questions, or group the detail on sanction_month - never both.
+        This is the v1.0 pmay_fy_summary prohibition, carried forward to the object that
+        replaced it.
+
+    - from_table: curated.v_pmay
+      from_column: village_code
+      to_table: curated.dim_geography_alias
+      to_column: geography_key
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_pmay
+      on_clause: null
+      reason: >
+        PMAY HAS NO alias_key. The alias table holds MGNREGA source spellings only, and
+        it fans out - 18,959 aliases over 7,364 villages, so joining it multiplies PMAY
+        rows by the alias count. PMAY geography was resolved at ingest; the names on
+        v_pmay are already canonical. Use the alias table for MGNREGA name lookup only.
+
+    - from_table: curated.v_pmay
+      from_column: reg_no
+      to_table: curated.v_pmay
+      to_column: reg_no
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_pmay
+      on_clause: null
+      reason: >
+        Self-join on registration number. reg_no is NOT unique - 368 duplicates in the
+        source workbook - and it is nullable in the curated layer, so the join both fans
+        out and drops rows. To find repeats use GROUP BY reg_no HAVING COUNT(*) > 1.
+
+    - from_table: curated.v_pmay
+      from_column: sanction_no
+      to_table: curated.v_pmay
+      to_column: sanction_no
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_pmay
+      on_clause: null
+      reason: >
+        Self-join on sanction number. One order covers a median of 2 houses and up to
+        322, so this squares those groups - 322 rows become 103,684. Sanction-level
+        questions are GROUP BY sanction_no or COUNT(DISTINCT sanction_no).
+
+    - from_table: curated.v_pmay
+      from_column: any
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        The view does not expose raw_id, and `raw` is outside the read boundary in any
+        case. A lineage request is answered by telling the user it is a DBA task.
+
+  # =======================================================================
+  # v1.0 EDGES THAT NO LONGER EXIST
+  # Kept so a stale retrieval hit is recognised as stale rather than followed.
+  # =======================================================================
+  retired_edges:
+
+  - v1_edge: pmay_beneficiaries -> pmay_fy_summary
+    status: object_gone
+    replacement: curated.v_pmay -> curated.v_pmay_monthly_sanctions (still prohibited)
+    note: pmay_fy_summary does not exist in megh_db. The prohibition carries over to the monthly view.
+
+  - v1_edge: pmay_beneficiaries -> curated.dim_geography (PROHIBITED in v1.0)
+    status: reversed
+    replacement: curated.fact_pmay_house.geography_key -> curated.dim_geography.geography_key
+    note: >
+      The most important reversal in this file. v1.0 refused this join because PMAY was
+      not in megh_db and coverage was unverified. It is now a declared NOT NULL foreign
+      key. Any rule that still refuses it is wrong.
+
+  - v1_edge: pmay_beneficiaries.district / .block / .village / .house_status / .house_alloted_to / .mapping_status
+    status: fiction_retired
+    replacement: real dimensions, or plain columns on curated.v_pmay
+    note: >
+      These were embedded-dimension pseudo-nodes invented to describe a flat table.
+      house_status became dim_pmay_house_status. Village became dim_geography. District
+      and block became NAME columns on dim_geography with NO CODE COLUMN AT ALL - the
+      v1.0 primary keys mapped_district_lgd_code and mapped_block_lgd_code have no
+      equivalent and questions asking for them cannot be answered. house_alloted_to and
+      mapping_category remain plain columns on the fact.
+
+  - v1_edge: pmay_beneficiaries -> pmay_beneficiaries.financial_year
+    status: fiction_retired
+    replacement: curated.fact_pmay_house.year_key -> curated.dim_year.year_key
+    note: >
+      v1.0 told the generator to emit an inline CASE derivation of the financial year
+      because no year table existed. One exists now. That CASE pattern must be deleted
+      wherever it appears - financial_year is a stored column on v_pmay.
+
+  # =======================================================================
+  join_graph:
+
+    # v_pmay pre-joins every dimension, so its list is empty for the same
+    # reason v1.0's was empty - but the reason is now "already joined", not
+    # "nothing to join to". Ordinary questions still emit WHERE and GROUP BY only.
+    curated.v_pmay: []
+
+    # the raw fact is the only PMAY node with real outbound edges
+    curated.fact_pmay_house:
+    - {to: curated.dim_geography,          on: geography_key, join_type: INNER}
+    - {to: curated.dim_year,               on: year_key,      join_type: LEFT}
+    - {to: curated.dim_pmay_house_status,  on: status_key,    join_type: LEFT}
+    - {to: curated.dim_scheme,             on: scheme_key,    join_type: INNER}
+
+    # dimensions are terminal
+    curated.dim_geography: []
+    curated.dim_year: []
+    curated.dim_pmay_house_status: []
+    curated.dim_scheme: []
+
+    # pre-aggregates and cross-scheme views are read alone, never joined
+    curated.v_pmay_monthly_sanctions: []
+    curated.v_cross_scheme_money_district_year: []
+    curated.v_cross_scheme_village_coverage: []
+
+    # reachable in megh_db but closed to this scheme - see the prohibited edges
+    curated.dim_geography_alias: []
+    curated.fact_mgnrega_employment: []
+    curated.fact_mgnrega_expenditure: []
+    raw.source_rows: []

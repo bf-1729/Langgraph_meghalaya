@@ -1,0 +1,1574 @@
+resolver_version: '2.0'
+resolver_name: mgnrega_entity_resolver
+display_name: MGNREGA Entity Resolver (Meghalaya)
+generated_from:
+- quadrent/datasets/Updated MNGREGA Expenditure WIth Year.xlsx
+- quadrent/datasets/MGNREGA_Employment.xlsx
+- Annotations/stage2_mgnrega_combined_production.yaml
+generated_on: '2026-08-21'
+companion_schema: stage2_mgnrega_combined_production.yaml
+
+description: >
+  Value-level entity resolution for the MGNREGA NLP-to-SQL bot. This file answers exactly
+  one question: the user typed some text - which stored database value did they mean?
+  It does NOT describe column meanings or aggregation; that is the companion stage2
+  semantic schema. Resolve entities with this file FIRST, then hand the resolved
+  canonical values to schema linking and SQL generation.
+
+scheme:
+  id: mgnrega
+  display_name: MGNREGA
+  full_name: Mahatma Gandhi National Rural Employment Guarantee Act
+  state: Meghalaya
+  aliases: [MGNREGA, MNREGA, NREGA, NREGS, "MGNREGS", "Mahatma Gandhi NREGA",
+            "employment guarantee scheme", "job card scheme", "100 days work scheme",
+            "rural employment scheme"]
+
+tables:
+  expenditure: mgnrega_expenditure
+  employment: mgnrega_employment
+
+# ---------------------------------------------------------------------------
+# HOW TO USE THIS FILE  (read this before resolving anything)
+# ---------------------------------------------------------------------------
+how_to_use:
+  step_1_classify: >
+    Decide which entity type each span of user text is. Order of attempt matters
+    because block, constituency and village names overlap heavily - see
+    cross_dimension_collisions. Try: year -> district -> block -> assembly_constituency
+    -> village -> measure.
+  step_2_normalise: Apply normalisation.fold to both the user text and the candidate values.
+  step_3_match: Walk matching_pipeline in order. Stop at the first stage that produces a hit.
+  step_4_emit: Return the output_contract shape. Never emit raw user text into SQL.
+  step_5_predicate: Build the WHERE clause using the per-dimension sql_predicate template.
+
+  hard_rules:
+  - Villages are resolved by village_code, never by name alone. 238 village names are
+    shared by two or more different villages.
+  - Never filter on village_clean (expenditure) or village (employment). Those are raw
+    pre-LGD text. Always filter on lgd_village_name.
+  - The two tables store geography in DIFFERENT CASE. Always compare case-folded, and
+    emit the per-table stored form given under stored_as.
+  - If more than one candidate survives with no way to separate them, return
+    status ambiguous and ask. Do not pick the first row.
+  - If nothing matches above the fuzzy floor, return status not_found with suggestions.
+    Never invent a district, block, village, constituency or year.
+  - Only the four financial years listed under year exist. Do not extrapolate.
+
+# ---------------------------------------------------------------------------
+normalisation:
+  fold:
+  - trim leading/trailing whitespace
+  - collapse internal whitespace runs to a single space
+  - uppercase
+  - strip the characters . , ' and the words BLOCK, DISTRICT, VILLAGE, C&RD, AC,
+    CONSTITUENCY when they appear as a trailing qualifier
+  - map & to AND
+  - treat - and / and ( ) as a single space, then re-collapse whitespace
+  squash: >
+    a second, stricter key used only for tie-breaking: remove EVERY non-alphanumeric
+    character from the folded form. "SHELLA BHOLAGANJ" and "Shella-Bholaganj" both
+    squash to SHELLABHOLAGANJ.
+  numeric_ids: >
+    village_code is an integer in both workbooks. Cast user-typed codes with int();
+    strip any trailing .0 before comparing.
+
+matching_pipeline:
+- stage: 1_exact
+  test: folded user text == folded canonical value
+  confidence: 1.0
+- stage: 2_alias
+  test: folded user text is in the value's aliases list
+  confidence: 0.98
+- stage: 3_squash
+  test: squashed user text == squashed canonical or squashed alias
+  confidence: 0.95
+- stage: 4_acronym
+  test: user text matches an acronym in the district table (districts only)
+  confidence: 0.95
+  note: acronyms are defined for districts only; do not invent them for blocks or ACs
+- stage: 5_contains
+  test: >
+    folded canonical is a whole-word substring of the user text, or vice versa
+    (catches "in East Garo Hills district of Meghalaya")
+  confidence: 0.85
+- stage: 6_fuzzy
+  test: RapidFuzz token_set_ratio against the dimension catalogue
+  accept_at: ">= 90 and the runner-up is at least 5 points lower"
+  ask_between: 80 - 89, or any score where the runner-up is within 5 points
+  reject_below: 80
+  confidence: score / 100
+- stage: 7_embedding
+  test: BGE-small nearest neighbour over the dimension catalogue
+  use_when: fuzzy returned nothing at or above 80
+  accept_at: cosine >= 0.88 AND the value is unique in its dimension
+  otherwise: fall through to not_found with the top 5 as suggestions
+- stage: 8_fail
+  action: emit not_found
+
+blocked_matches:
+  purpose: >
+    Pairs that fuzzy matching gets wrong. Never let stage 6 or 7 resolve the left value
+    to the right value; require an exact or alias hit.
+  pairs:
+  - [LASKEIN, THADLASKEIN]        # two different West Jaintia Hills blocks
+  - [THADLASKEIN, LASKEIN]
+  - [MAWKYNREW, MAWKYRWAT]        # East Khasi Hills vs South West Khasi Hills
+  - [MAWKYRWAT, MAWKYNREW]
+  - [MAWSYNRAM, MAWSHYNRUT]       # East Khasi Hills vs West Khasi Hills
+  - [MAWSHYNRUT, MAWSYNRAM]
+  - [SIJU, SAIPUNG]
+  - [MAWIONG, MAWLONG]            # both are ambiguous village names in their own right
+  - [MAWSAW, MAWSMAI]
+  - [NORTH TURA, SOUTH TURA]      # two different constituencies
+
+output_contract:
+  resolved:
+    status: resolved
+    entity_type: district | block | assembly_constituency | village | year | measure
+    user_text: <verbatim span>
+    canonical: <canonical value>
+    stored_as: { expenditure: <value or null>, employment: <value or null> }
+    confidence: <0-1>
+    matched_by: <pipeline stage>
+  ambiguous:
+    status: ambiguous
+    entity_type: <type>
+    user_text: <verbatim span>
+    candidates: [ { canonical, village_code, district, block } ]
+    question: <one short clarifying question naming the distinguishing attribute>
+  not_found:
+    status: not_found
+    entity_type: <type or unknown>
+    user_text: <verbatim span>
+    suggestions: [ up to 5 nearest catalogue values ]
+    message: state plainly that the value is not in the MGNREGA data.
+
+# ---------------------------------------------------------------------------
+# CROSS-DIMENSION COLLISIONS - the highest-risk part of this resolver
+# ---------------------------------------------------------------------------
+cross_dimension_collisions:
+  why: >
+    Block names, assembly constituency names and village names overlap massively in
+    Meghalaya. A bare "Mawlai" is a valid block, a valid constituency AND a valid
+    village. Districts are the only dimension with zero collisions.
+  measured:
+    block_names_that_are_also_ac_names: 26
+    block_names_that_are_also_village_names: 28
+    ac_names_that_are_also_village_names: 26
+    district_collisions: 0
+  disambiguation_rules:
+  - If the user said "constituency", "AC", "assembly", "MLA" or gave a number, resolve
+    as assembly_constituency.
+  - Else if the user said "block", "C&RD block" or "development block", resolve as block.
+  - Else if the user said "village", "gaon" or "GP", resolve as village.
+  - With no qualifier, default to BLOCK. Blocks are the level MGNREGA is administered at
+    and the level users mean by default.
+  - State the assumption in the answer whenever the default rule fired and the name was
+    also valid at another level.
+  - assembly_constituency exists ONLY in mgnrega_employment. If the question needs
+    expenditure and names a constituency, say so instead of silently switching level.
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS
+# ---------------------------------------------------------------------------
+dimensions:
+
+  district:
+    columns: { expenditure: lgd_district, employment: lgd_district }
+    stored_case: { expenditure: Title Case, employment: ALL CAPS }
+    distinct: 12
+    complete: true          # all 12 Meghalaya districts are present in both tables
+    collisions: none
+    sql_predicate: "UPPER(lgd_district) = UPPER('<canonical>')"
+    alias_provenance: >
+      canonical + stored_as + blocks are read from the workbooks. acronym and the
+      spelling/spacing variants are curated linguistic forms, not data-derived.
+    values:
+    - canonical: "East Garo Hills"
+      acronym: EGH
+      stored_as: { expenditure: "East Garo Hills", employment: "EAST GARO HILLS" }
+      region: "Garo Hills"
+      block_count: 3
+      aliases: ["EGH", "E.G.H.", "East Garo Hill", "East Garo", "E Garo Hills", "E Garo Hill", "E Garo", "EastGaroHills", "East Garo Hills District", "Williamnagar district"]
+    - canonical: "East Jaintia Hills"
+      acronym: EJH
+      stored_as: { expenditure: "East Jaintia Hills", employment: "EAST JAINTIA HILLS" }
+      region: "Jaintia Hills"
+      block_count: 3
+      aliases: ["EJH", "E.J.H.", "East Jaintia Hill", "East Jaintia", "E Jaintia Hills", "E Jaintia Hill", "E Jaintia", "EastJaintiaHills", "East Jaintia Hills District", "Khliehriat district"]
+    - canonical: "East Khasi Hills"
+      acronym: EKH
+      stored_as: { expenditure: "East Khasi Hills", employment: "EAST KHASI HILLS" }
+      region: "Khasi Hills"
+      block_count: 11
+      aliases: ["EKH", "E.K.H.", "East Khasi Hill", "East Khasi", "E Khasi Hills", "E Khasi Hill", "E Khasi", "EastKhasiHills", "East Khasi Hills District", "Shillong district"]
+    - canonical: "Eastern West Khasi Hills"
+      acronym: EWKH
+      stored_as: { expenditure: "Eastern West Khasi Hills", employment: "EASTERN WEST KHASI HILLS" }
+      region: "Khasi Hills"
+      block_count: 2
+      aliases: ["EWKH", "E.W.K.H.", "Eastern West Khasi Hill", "Eastern West Khasi", "Eastern W Khasi Hills", "Eastern W Khasi Hill", "Eastern W Khasi", "EasternWestKhasiHills", "Eastern West Khasi Hills District", "Mairang district", "E West Khasi Hills", "Eastern WKH"]
+    - canonical: "North Garo Hills"
+      acronym: NGH
+      stored_as: { expenditure: "North Garo Hills", employment: "NORTH GARO HILLS" }
+      region: "Garo Hills"
+      block_count: 4
+      aliases: ["NGH", "N.G.H.", "North Garo Hill", "North Garo", "N Garo Hills", "N Garo Hill", "N Garo", "NorthGaroHills", "North Garo Hills District", "Resubelpara district"]
+    - canonical: "Ri Bhoi"
+      acronym: RB
+      stored_as: { expenditure: "Ri Bhoi", employment: "RI BHOI" }
+      region: "Ri Bhoi"
+      block_count: 5
+      aliases: ["RB", "R.B.", "Ribhoi", "Ri-Bhoi", "Ri Bhoi District", "Nongpoh district"]
+    - canonical: "South Garo Hills"
+      acronym: SGH
+      stored_as: { expenditure: "South Garo Hills", employment: "SOUTH GARO HILLS" }
+      region: "Garo Hills"
+      block_count: 5
+      aliases: ["SGH", "S.G.H.", "South Garo Hill", "South Garo", "S Garo Hills", "S Garo Hill", "S Garo", "SouthGaroHills", "South Garo Hills District", "Baghmara district"]
+    - canonical: "South West Garo Hills"
+      acronym: SWGH
+      stored_as: { expenditure: "South West Garo Hills", employment: "SOUTH WEST GARO HILLS" }
+      region: "Garo Hills"
+      block_count: 4
+      aliases: ["SWGH", "S.W.G.H.", "South West Garo Hill", "South West Garo", "S W Garo Hills", "S W Garo Hill", "S W Garo", "SouthWestGaroHills", "South West Garo Hills District", "Ampati district", "S West Garo Hills"]
+    - canonical: "South West Khasi Hills"
+      acronym: SWKH
+      stored_as: { expenditure: "South West Khasi Hills", employment: "SOUTH WEST KHASI HILLS" }
+      region: "Khasi Hills"
+      block_count: 2
+      aliases: ["SWKH", "S.W.K.H.", "South West Khasi Hill", "South West Khasi", "S W Khasi Hills", "S W Khasi Hill", "S W Khasi", "SouthWestKhasiHills", "South West Khasi Hills District", "Mawkyrwat district", "S West Khasi Hills"]
+    - canonical: "West Garo Hills"
+      acronym: WGH
+      stored_as: { expenditure: "West Garo Hills", employment: "WEST GARO HILLS" }
+      region: "Garo Hills"
+      block_count: 8
+      aliases: ["WGH", "W.G.H.", "West Garo Hill", "West Garo", "W Garo Hills", "W Garo Hill", "W Garo", "WestGaroHills", "West Garo Hills District", "Tura district"]
+    - canonical: "West Jaintia Hills"
+      acronym: WJH
+      stored_as: { expenditure: "West Jaintia Hills", employment: "WEST JAINTIA HILLS" }
+      region: "Jaintia Hills"
+      block_count: 4
+      aliases: ["WJH", "W.J.H.", "West Jaintia Hill", "West Jaintia", "W Jaintia Hills", "W Jaintia Hill", "W Jaintia", "WestJaintiaHills", "West Jaintia Hills District", "Jowai district"]
+    - canonical: "West Khasi Hills"
+      acronym: WKH
+      stored_as: { expenditure: "West Khasi Hills", employment: "WEST KHASI HILLS" }
+      region: "Khasi Hills"
+      block_count: 5
+      aliases: ["WKH", "W.K.H.", "West Khasi Hill", "West Khasi", "W Khasi Hills", "W Khasi Hill", "W Khasi", "WestKhasiHills", "West Khasi Hills District", "Nongstoin district"]
+
+  block:
+    columns: { expenditure: lgd_block, employment: lgd_block }
+    stored_case: { expenditure: ALL CAPS, employment: ALL CAPS }
+    distinct: { expenditure: 55, employment: 56, union: 56 }
+    sql_predicate: "UPPER(lgd_block) = UPPER('<canonical>')"
+    coverage_gap:
+      block: KHATARSHNONG LAITKROH
+      district: East Khasi Hills
+      detail: >
+        Present in mgnrega_employment only. There are no expenditure rows for it. An
+        expenditure question about this block must answer "no expenditure data recorded",
+        not zero.
+    disambiguation: >
+      26 of these 56 names are also assembly constituency names. Apply
+      cross_dimension_collisions.disambiguation_rules before resolving.
+    resolve_within_district_when_given: true
+    values:
+    - canonical: "ADOKGRE"
+      district: "North Garo Hills"
+      also_a: [village]
+      aliases: ["Adokgre Block"]
+    - canonical: "AMLAREM"
+      district: "West Jaintia Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Amlarem Block"]
+    - canonical: "BAGHMARA"
+      district: "South Garo Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Baghmara Block"]
+    - canonical: "BAJENGDOBA"
+      district: "North Garo Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Bajengdoba Block"]
+    - canonical: "BATABARI"
+      district: "West Garo Hills"
+      also_a: [village]
+      aliases: ["Batabari Block"]
+    - canonical: "BETASING"
+      district: "South West Garo Hills"
+      also_a: []
+      aliases: ["Betasing Block"]
+    - canonical: "BHOIRYMBONG"
+      district: "Ri Bhoi"
+      also_a: []
+      aliases: ["Bhoirymbong Block"]
+    - canonical: "CHOKPOT"
+      district: "South Garo Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Chokpot Block"]
+    - canonical: "DADENGGIRI"
+      district: "West Garo Hills"
+      also_a: []
+      aliases: ["Dadenggre", "Dadenggri", "Dadenggiri Block"]
+    - canonical: "DALU"
+      district: "West Garo Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Dalu Block"]
+    - canonical: "DAMBO RONGJENG"
+      district: "East Garo Hills"
+      also_a: []
+      aliases: ["DamboRongjeng", "Rongjeng", "Dambo-Rongjeng", "Dambo Rongjeng Block"]
+    - canonical: "DEMDEMA"
+      district: "West Garo Hills"
+      also_a: [village]
+      aliases: ["Demdema Block"]
+    - canonical: "GAMBEGRE"
+      district: "West Garo Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Gambegre Block"]
+    - canonical: "GASUAPARA"
+      district: "South Garo Hills"
+      also_a: []
+      aliases: ["Gasuapara Block"]
+    - canonical: "JIRANG"
+      district: "Ri Bhoi"
+      also_a: [assembly_constituency]
+      aliases: ["Jirang Block"]
+    - canonical: "KHARKUTTA"
+      district: "North Garo Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Kharkutta Block"]
+    - canonical: "KHATARSHNONG LAITKROH"
+      district: "East Khasi Hills"
+      also_a: []
+      in_tables: [employment]
+      aliases: ["KhatarshnongLaitkroh", "Khatarshnong", "Laitkroh", "Khatarshnong-Laitkroh", "Khatarshnong Laitkroh Block"]
+    - canonical: "LASKEIN"
+      district: "West Jaintia Hills"
+      also_a: [village]
+      aliases: ["Laskein Block"]
+      never_fuzzy_to: ["THADLASKEIN"]
+    - canonical: "LUMSHNONG"
+      district: "East Jaintia Hills"
+      also_a: [village]
+      aliases: ["Lumshnong Block"]
+    - canonical: "MAIRANG"
+      district: "Eastern West Khasi Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Mairang Block"]
+    - canonical: "MAWHATI"
+      district: "Ri Bhoi"
+      also_a: [assembly_constituency, village]
+      aliases: ["Mawhati Block"]
+    - canonical: "MAWKYNREW"
+      district: "East Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Mawkynrew Block"]
+      never_fuzzy_to: ["MAWKYRWAT"]
+    - canonical: "MAWKYRWAT"
+      district: "South West Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Mawkyrwat Block"]
+      never_fuzzy_to: ["MAWKYNREW"]
+    - canonical: "MAWLAI"
+      district: "East Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Mawlai Block"]
+    - canonical: "MAWPAT"
+      district: "East Khasi Hills"
+      also_a: [village]
+      aliases: ["Mawpat Block"]
+    - canonical: "MAWPHLANG"
+      district: "East Khasi Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Mawphlang Block"]
+    - canonical: "MAWRYNGKNENG"
+      district: "East Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Mawryngkneng Block"]
+    - canonical: "MAWSHYNRUT"
+      district: "West Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Mawshynrut Block"]
+      never_fuzzy_to: ["MAWSYNRAM"]
+    - canonical: "MAWSYNRAM"
+      district: "East Khasi Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Mawsynram Block"]
+      never_fuzzy_to: ["MAWSHYNRUT"]
+    - canonical: "MAWTHADRAISHAN"
+      district: "Eastern West Khasi Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Mawthadraishan Block"]
+    - canonical: "MYLLIEM"
+      district: "East Khasi Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Mylliem Block"]
+    - canonical: "NAMDONG"
+      district: "West Jaintia Hills"
+      also_a: []
+      aliases: ["Namdong Block"]
+    - canonical: "NONGSTOIN"
+      district: "West Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Nongstoin Block"]
+    - canonical: "PURAKHASIA"
+      district: "South West Garo Hills"
+      also_a: []
+      aliases: ["Purakhasia Block"]
+    - canonical: "PYNURSLA"
+      district: "East Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Pynursla Block"]
+    - canonical: "RAMBRAI"
+      district: "West Khasi Hills"
+      also_a: [village]
+      aliases: ["Rambrai Jyrngam", "Rambrai Block"]
+    - canonical: "RANIKOR"
+      district: "South West Khasi Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Ranikor Block"]
+    - canonical: "RERAPARA"
+      district: "South West Garo Hills"
+      also_a: [village]
+      aliases: ["Rerapara Block"]
+    - canonical: "RESUBELPARA"
+      district: "North Garo Hills"
+      also_a: [assembly_constituency]
+      aliases: ["Resubelpara Block"]
+    - canonical: "RI MULIANG"
+      district: "West Khasi Hills"
+      also_a: []
+      aliases: ["RiMuliang", "Ri Muliang Block"]
+    - canonical: "RONGARA"
+      district: "South Garo Hills"
+      also_a: []
+      aliases: ["Rongara Siju", "Rongara Block"]
+    - canonical: "RONGRAM"
+      district: "West Garo Hills"
+      also_a: [village]
+      aliases: ["Rongram Block"]
+    - canonical: "SAIPUNG"
+      district: "East Jaintia Hills"
+      also_a: [village]
+      aliases: ["Sutnga Saipung", "Saipung Block"]
+    - canonical: "SAMANDA"
+      district: "East Garo Hills"
+      also_a: []
+      aliases: ["Samanda Block"]
+    - canonical: "SELSELLA"
+      district: "West Garo Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Selsella Block"]
+    - canonical: "SHALLANG"
+      district: "West Khasi Hills"
+      also_a: []
+      aliases: ["Shallang Block"]
+    - canonical: "SHELLA BHOLAGANJ"
+      district: "East Khasi Hills"
+      also_a: []
+      aliases: ["ShellaBholaganj", "Shella", "Bholaganj", "Shella-Bholaganj", "Shella Bholaganj Block"]
+    - canonical: "SIJU"
+      district: "South Garo Hills"
+      also_a: []
+      aliases: ["Siju Block"]
+      never_fuzzy_to: ["SAIPUNG"]
+    - canonical: "SOHIONG"
+      district: "East Khasi Hills"
+      also_a: []
+      aliases: ["Sohing", "Sohiong Block"]
+    - canonical: "SONGSAK"
+      district: "East Garo Hills"
+      also_a: [assembly_constituency, village]
+      aliases: ["Songsak Block"]
+    - canonical: "THADLASKEIN"
+      district: "West Jaintia Hills"
+      also_a: []
+      aliases: ["Thadlaskein Block"]
+      never_fuzzy_to: ["LASKEIN"]
+    - canonical: "TIKRIKILLA"
+      district: "West Garo Hills"
+      also_a: [village]
+      aliases: ["Tikrikila", "Tikrikilla Block"]
+    - canonical: "UMLING"
+      district: "Ri Bhoi"
+      also_a: [village]
+      aliases: ["Umling Block"]
+    - canonical: "UMSNING"
+      district: "Ri Bhoi"
+      also_a: [assembly_constituency, village]
+      aliases: ["Umsning Block"]
+    - canonical: "WAPUNG"
+      district: "East Jaintia Hills"
+      also_a: []
+      aliases: ["Wapung Block"]
+    - canonical: "ZIKZAK"
+      district: "South West Garo Hills"
+      also_a: [village]
+      aliases: ["Zikzak Block"]
+
+  year:
+    columns: { expenditure: year, employment: year }
+    stored_format: { expenditure: "YYYY-YYYY", employment: "YYYY-YY" }
+    distinct: 4
+    closed_set: true
+    sql_predicate_expenditure: "year = '<expenditure form>'"
+    sql_predicate_employment: "year = '<employment form>'"
+    critical: >
+      The same financial year is stored differently in the two tables. Any cross-table
+      filter or join MUST translate. Filtering employment with '2023-2024' returns zero
+      rows silently.
+    values:
+    - canonical: '2022-2023'
+      stored_as: { expenditure: '2022-2023', employment: '2022-23' }
+      aliases: ['2022-23', 'FY2022-23', 'FY 2022-23', 'FY2022-2023', '2022/23',
+                '2022-2023', 'financial year 2022-23', '2022 23']
+    - canonical: '2023-2024'
+      stored_as: { expenditure: '2023-2024', employment: '2023-24' }
+      aliases: ['2023-24', 'FY2023-24', 'FY 2023-24', 'FY2023-2024', '2023/24',
+                '2023-2024', 'financial year 2023-24', '2023 24']
+    - canonical: '2024-2025'
+      stored_as: { expenditure: '2024-2025', employment: '2024-25' }
+      aliases: ['2024-25', 'FY2024-25', 'FY 2024-25', 'FY2024-2025', '2024/25',
+                '2024-2025', 'financial year 2024-25', '2024 25']
+    - canonical: '2025-2026'
+      stored_as: { expenditure: '2025-2026', employment: '2025-26' }
+      aliases: ['2025-26', 'FY2025-26', 'FY 2025-26', 'FY2025-2026', '2025/26',
+                '2025-2026', 'financial year 2025-26', '2025 26', 'current year',
+                'latest year', 'this year']
+    relative_terms:
+      latest / current / most recent: '2025-2026'
+      previous / last year: '2024-2025'
+      earliest / first: '2022-2023'
+      all years / overall / till date: all four, no year filter
+    ambiguous_input:
+      bare_four_digit_year: >
+        "2023" could mean FY 2022-2023 or FY 2023-2024. Return ambiguous and ask which
+        financial year. Do not default.
+      calendar_range_outside_set: >
+        Anything before 2022-23 or after 2025-26 is not in the data. Return not_found
+        and state the available range.
+
+  assembly_constituency:
+    columns:
+      employment: [assembly_constituency_name, assembly_constituency_name_and_number]
+    expenditure: null        # this dimension does not exist in mgnrega_expenditure
+    stored_case: ALL CAPS
+    distinct: 56
+    numbering: >
+      AC numbers run 1-60 with 16, 17, 18 and 19 absent. Those four are urban Shillong
+      constituencies with no MGNREGA village rows. 56 numbers, 56 names.
+    sql_predicate: "UPPER(assembly_constituency_name) = UPPER('<canonical>')"
+    known_gap:
+      null_rows: 1240
+      detail: >
+        1240 employment rows have no constituency. They are exactly the 1240 rows where
+        match_method = 'Via shifted-village list' - the AC mapping was never backfilled
+        after those villages were reassigned. Expected. Exclude them from AC-level
+        aggregates and say so; do not treat it as a resolver failure.
+    spelling_conflict:
+      detail: >
+        assembly_constituency_name and the name embedded in
+        assembly_constituency_name_and_number disagree for 7 constituencies. Treat
+        assembly_constituency_name as canonical and the embedded spelling as an alias.
+      pairs:
+      - { canonical: "RAMBRAI JYRNGAM", in_numbered_field: "RAMBRAI" }
+      - { canonical: "RONGARA-SIJU",    in_numbered_field: "RONGARA" }
+      - { canonical: "AMPATHI",         in_numbered_field: "AMPATI" }
+      - { canonical: "WILLIAM NAGAR",   in_numbered_field: "WILLIAM" }
+      - { canonical: "SUTNGA-SAIPUNG",  in_numbered_field: "SUTNGA" }
+      - { canonical: "TIKRIKILA",       in_numbered_field: "TIKRIKILLA" }
+      - { canonical: "SOHING",          in_numbered_field: "SOHIONG" }
+    values:
+    - canonical: "NARTIANG"
+      number: 1
+      stored_name_and_number: "1 NARTIANG"
+      districts: ["West Jaintia Hills"]
+      also_a: [village]
+      aliases: ["1 NARTIANG", "AC 1", "AC-1", "Nartiang constituency", "Nartiang AC"]
+    - canonical: "JOWAI"
+      number: 2
+      stored_name_and_number: "2 JOWAI"
+      districts: ["West Jaintia Hills"]
+      also_a: []
+      aliases: ["2 JOWAI", "AC 2", "AC-2", "Jowai constituency", "Jowai AC"]
+    - canonical: "RALIANG"
+      number: 3
+      stored_name_and_number: "3 RALIANG"
+      districts: ["West Jaintia Hills"]
+      also_a: [village]
+      aliases: ["3 RALIANG", "AC 3", "AC-3", "Raliang constituency", "Raliang AC"]
+    - canonical: "MOWKAIAW"
+      number: 4
+      stored_name_and_number: "4 MOWKAIAW"
+      districts: ["West Jaintia Hills"]
+      also_a: [village]
+      aliases: ["4 MOWKAIAW", "AC 4", "AC-4", "Mowkaiaw constituency", "Mowkaiaw AC"]
+    - canonical: "SUTNGA-SAIPUNG"
+      number: 5
+      stored_name_and_number: "5 SUTNGA"
+      districts: ["East Jaintia Hills"]
+      also_a: []
+      aliases: ["SUTNGA", "5 SUTNGA", "AC 5", "AC-5", "5 Sutnga-Saipung", "Sutnga-Saipung constituency", "Sutnga-Saipung AC", "Sutnga Saipung"]
+    - canonical: "KHLIEHRIAT"
+      number: 6
+      stored_name_and_number: "6 KHLIEHRIAT"
+      districts: ["East Jaintia Hills"]
+      also_a: [village]
+      aliases: ["6 KHLIEHRIAT", "AC 6", "AC-6", "Khliehriat constituency", "Khliehriat AC"]
+    - canonical: "AMLAREM"
+      number: 7
+      stored_name_and_number: "7 AMLAREM"
+      districts: ["West Jaintia Hills"]
+      also_a: [block, village]
+      aliases: ["7 AMLAREM", "AC 7", "AC-7", "Amlarem constituency", "Amlarem AC"]
+    - canonical: "MAWHATI"
+      number: 8
+      stored_name_and_number: "8 MAWHATI"
+      districts: ["Ri Bhoi"]
+      also_a: [block, village]
+      aliases: ["8 MAWHATI", "AC 8", "AC-8", "Mawhati constituency", "Mawhati AC"]
+    - canonical: "NONGPOH"
+      number: 9
+      stored_name_and_number: "9 NONGPOH"
+      districts: ["Ri Bhoi"]
+      also_a: []
+      aliases: ["9 NONGPOH", "AC 9", "AC-9", "Nongpoh constituency", "Nongpoh AC"]
+    - canonical: "JIRANG"
+      number: 10
+      stored_name_and_number: "10 JIRANG"
+      districts: ["Ri Bhoi"]
+      also_a: [block]
+      aliases: ["10 JIRANG", "AC 10", "AC-10", "Jirang constituency", "Jirang AC"]
+    - canonical: "UMSNING"
+      number: 11
+      stored_name_and_number: "11 UMSNING"
+      districts: ["Ri Bhoi"]
+      also_a: [block, village]
+      aliases: ["11 UMSNING", "AC 11", "AC-11", "Umsning constituency", "Umsning AC"]
+    - canonical: "UMROI"
+      number: 12
+      stored_name_and_number: "12 UMROI"
+      districts: ["Ri Bhoi"]
+      also_a: []
+      aliases: ["12 UMROI", "AC 12", "AC-12", "Umroi constituency", "Umroi AC"]
+    - canonical: "MAWRYNGKNENG"
+      number: 13
+      stored_name_and_number: "13 MAWRYNGKNENG"
+      districts: ["East Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["13 MAWRYNGKNENG", "AC 13", "AC-13", "Mawryngkneng constituency", "Mawryngkneng AC"]
+    - canonical: "PYNTHORUMKHRAH"
+      number: 14
+      stored_name_and_number: "14 PYNTHORUMKHRAH"
+      districts: ["East Khasi Hills"]
+      also_a: []
+      aliases: ["14 PYNTHORUMKHRAH", "AC 14", "AC-14", "Pynthorumkhrah constituency", "Pynthorumkhrah AC"]
+    - canonical: "MAWLAI"
+      number: 15
+      stored_name_and_number: "15 MAWLAI"
+      districts: ["East Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["15 MAWLAI", "AC 15", "AC-15", "Mawlai constituency", "Mawlai AC"]
+    - canonical: "MYLLIEM"
+      number: 20
+      stored_name_and_number: "20 MYLLIEM"
+      districts: ["East Khasi Hills"]
+      also_a: [block]
+      aliases: ["20 MYLLIEM", "AC 20", "AC-20", "Mylliem constituency", "Mylliem AC"]
+    - canonical: "NONGTHYMMAI"
+      number: 21
+      stored_name_and_number: "21 NONGTHYMMAI"
+      districts: ["East Khasi Hills"]
+      also_a: [village]
+      aliases: ["21 NONGTHYMMAI", "AC 21", "AC-21", "Nongthymmai constituency", "Nongthymmai AC"]
+    - canonical: "NONGKREM"
+      number: 22
+      stored_name_and_number: "22 NONGKREM"
+      districts: ["East Khasi Hills"]
+      also_a: [village]
+      aliases: ["22 NONGKREM", "AC 22", "AC-22", "Nongkrem constituency", "Nongkrem AC"]
+    - canonical: "SOHING"
+      number: 23
+      stored_name_and_number: "23 SOHIONG"
+      districts: ["East Khasi Hills"]
+      also_a: []
+      aliases: ["SOHIONG", "23 SOHIONG", "AC 23", "AC-23", "23 Sohing", "Sohing constituency", "Sohing AC"]
+    - canonical: "MAWPHLANG"
+      number: 24
+      stored_name_and_number: "24 MAWPHLANG"
+      districts: ["East Khasi Hills"]
+      also_a: [block]
+      aliases: ["24 MAWPHLANG", "AC 24", "AC-24", "Mawphlang constituency", "Mawphlang AC"]
+    - canonical: "MAWSYNRAM"
+      number: 25
+      stored_name_and_number: "25 MAWSYNRAM"
+      districts: ["East Khasi Hills"]
+      also_a: [block]
+      aliases: ["25 MAWSYNRAM", "AC 25", "AC-25", "Mawsynram constituency", "Mawsynram AC"]
+    - canonical: "SHELLA"
+      number: 26
+      stored_name_and_number: "26 SHELLA"
+      districts: ["East Khasi Hills"]
+      also_a: []
+      aliases: ["26 SHELLA", "AC 26", "AC-26", "Shella constituency", "Shella AC"]
+    - canonical: "PYNURSLA"
+      number: 27
+      stored_name_and_number: "27 PYNURSLA"
+      districts: ["East Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["27 PYNURSLA", "AC 27", "AC-27", "Pynursla constituency", "Pynursla AC"]
+    - canonical: "SOHRA"
+      number: 28
+      stored_name_and_number: "28 SOHRA"
+      districts: ["East Khasi Hills"]
+      also_a: []
+      aliases: ["28 SOHRA", "AC 28", "AC-28", "Sohra constituency", "Sohra AC"]
+    - canonical: "MAWKYNREW"
+      number: 29
+      stored_name_and_number: "29 MAWKYNREW"
+      districts: ["East Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["29 MAWKYNREW", "AC 29", "AC-29", "Mawkynrew constituency", "Mawkynrew AC"]
+    - canonical: "MAIRANG"
+      number: 30
+      stored_name_and_number: "30 MAIRANG"
+      districts: ["Eastern West Khasi Hills"]
+      also_a: [block]
+      aliases: ["30 MAIRANG", "AC 30", "AC-30", "Mairang constituency", "Mairang AC"]
+    - canonical: "MAWTHADRAISHAN"
+      number: 31
+      stored_name_and_number: "31 MAWTHADRAISHAN"
+      districts: ["Eastern West Khasi Hills", "West Khasi Hills"]
+      also_a: [block]
+      aliases: ["31 MAWTHADRAISHAN", "AC 31", "AC-31", "Mawthadraishan constituency", "Mawthadraishan AC"]
+    - canonical: "NONGSTOIN"
+      number: 32
+      stored_name_and_number: "32 NONGSTOIN"
+      districts: ["West Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["32 NONGSTOIN", "AC 32", "AC-32", "Nongstoin constituency", "Nongstoin AC"]
+    - canonical: "RAMBRAI JYRNGAM"
+      number: 33
+      stored_name_and_number: "33 RAMBRAI"
+      districts: ["West Khasi Hills"]
+      also_a: []
+      aliases: ["RAMBRAI", "33 RAMBRAI", "AC 33", "AC-33", "33 Rambrai Jyrngam", "Rambrai Jyrngam constituency", "Rambrai Jyrngam AC"]
+    - canonical: "MAWSHYNRUT"
+      number: 34
+      stored_name_and_number: "34 MAWSHYNRUT"
+      districts: ["West Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["34 MAWSHYNRUT", "AC 34", "AC-34", "Mawshynrut constituency", "Mawshynrut AC"]
+    - canonical: "RANIKOR"
+      number: 35
+      stored_name_and_number: "35 RANIKOR"
+      districts: ["South West Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["35 RANIKOR", "AC 35", "AC-35", "Ranikor constituency", "Ranikor AC"]
+    - canonical: "MAWKYRWAT"
+      number: 36
+      stored_name_and_number: "36 MAWKYRWAT"
+      districts: ["South West Khasi Hills"]
+      also_a: [block, village]
+      aliases: ["36 MAWKYRWAT", "AC 36", "AC-36", "Mawkyrwat constituency", "Mawkyrwat AC"]
+    - canonical: "KHARKUTTA"
+      number: 37
+      stored_name_and_number: "37 KHARKUTTA"
+      districts: ["North Garo Hills"]
+      also_a: [block]
+      aliases: ["37 KHARKUTTA", "AC 37", "AC-37", "Kharkutta constituency", "Kharkutta AC"]
+    - canonical: "MENDIPATHAR"
+      number: 38
+      stored_name_and_number: "38 MENDIPATHAR"
+      districts: ["North Garo Hills"]
+      also_a: []
+      aliases: ["38 MENDIPATHAR", "AC 38", "AC-38", "Mendipathar constituency", "Mendipathar AC"]
+    - canonical: "RESUBELPARA"
+      number: 39
+      stored_name_and_number: "39 RESUBELPARA"
+      districts: ["North Garo Hills"]
+      also_a: [block]
+      aliases: ["39 RESUBELPARA", "AC 39", "AC-39", "Resubelpara constituency", "Resubelpara AC"]
+    - canonical: "BAJENGDOBA"
+      number: 40
+      stored_name_and_number: "40 BAJENGDOBA"
+      districts: ["North Garo Hills"]
+      also_a: [block]
+      aliases: ["40 BAJENGDOBA", "AC 40", "AC-40", "Bajengdoba constituency", "Bajengdoba AC"]
+    - canonical: "SONGSAK"
+      number: 41
+      stored_name_and_number: "41 SONGSAK"
+      districts: ["East Garo Hills"]
+      also_a: [block, village]
+      aliases: ["41 SONGSAK", "AC 41", "AC-41", "Songsak constituency", "Songsak AC"]
+    - canonical: "RONGJENG"
+      number: 42
+      stored_name_and_number: "42 RONGJENG"
+      districts: ["East Garo Hills", "North Garo Hills"]
+      also_a: []
+      aliases: ["42 RONGJENG", "AC 42", "AC-42", "Rongjeng constituency", "Rongjeng AC"]
+    - canonical: "WILLIAM NAGAR"
+      number: 43
+      stored_name_and_number: "43 WILLIAM"
+      districts: ["East Garo Hills"]
+      also_a: []
+      aliases: ["WILLIAM", "43 WILLIAM", "AC 43", "AC-43", "43 William Nagar", "William Nagar constituency", "William Nagar AC"]
+    - canonical: "RAKSAMGRE"
+      number: 44
+      stored_name_and_number: "44 RAKSAMGRE"
+      districts: ["North Garo Hills", "West Garo Hills"]
+      also_a: [village]
+      aliases: ["44 RAKSAMGRE", "AC 44", "AC-44", "Raksamgre constituency", "Raksamgre AC"]
+    - canonical: "TIKRIKILA"
+      number: 45
+      stored_name_and_number: "45 TIKRIKILLA"
+      districts: ["West Garo Hills"]
+      also_a: []
+      aliases: ["TIKRIKILLA", "45 TIKRIKILLA", "AC 45", "AC-45", "45 Tikrikila", "Tikrikila constituency", "Tikrikila AC"]
+    - canonical: "PHULBARI"
+      number: 46
+      stored_name_and_number: "46 PHULBARI"
+      districts: ["West Garo Hills"]
+      also_a: []
+      aliases: ["46 PHULBARI", "AC 46", "AC-46", "Phulbari constituency", "Phulbari AC"]
+    - canonical: "RAJABALA"
+      number: 47
+      stored_name_and_number: "47 RAJABALA"
+      districts: ["West Garo Hills"]
+      also_a: [village]
+      aliases: ["47 RAJABALA", "AC 47", "AC-47", "Rajabala constituency", "Rajabala AC"]
+    - canonical: "SELSELLA"
+      number: 48
+      stored_name_and_number: "48 SELSELLA"
+      districts: ["South West Garo Hills", "West Garo Hills"]
+      also_a: [block, village]
+      aliases: ["48 SELSELLA", "AC 48", "AC-48", "Selsella constituency", "Selsella AC"]
+    - canonical: "DADENGGRE"
+      number: 49
+      stored_name_and_number: "49 DADENGGRE"
+      districts: ["West Garo Hills"]
+      also_a: [village]
+      aliases: ["49 DADENGGRE", "AC 49", "AC-49", "Dadenggre constituency", "Dadenggre AC"]
+    - canonical: "NORTH TURA"
+      number: 50
+      stored_name_and_number: "50 NORTH TURA"
+      districts: ["West Garo Hills"]
+      also_a: []
+      aliases: ["50 NORTH TURA", "AC 50", "AC-50", "North Tura constituency", "North Tura AC"]
+    - canonical: "SOUTH TURA"
+      number: 51
+      stored_name_and_number: "51 SOUTH TURA"
+      districts: ["West Garo Hills"]
+      also_a: []
+      aliases: ["51 SOUTH TURA", "AC 51", "AC-51", "South Tura constituency", "South Tura AC"]
+    - canonical: "RANGSAKONA"
+      number: 52
+      stored_name_and_number: "52 RANGSAKONA"
+      districts: ["South West Garo Hills", "West Garo Hills"]
+      also_a: [village]
+      aliases: ["52 RANGSAKONA", "AC 52", "AC-52", "Rangsakona constituency", "Rangsakona AC"]
+    - canonical: "AMPATHI"
+      number: 53
+      stored_name_and_number: "53 AMPATI"
+      districts: ["South West Garo Hills"]
+      also_a: []
+      aliases: ["AMPATI", "53 AMPATI", "AC 53", "AC-53", "53 Ampathi", "Ampathi constituency", "Ampathi AC"]
+    - canonical: "MAHENDRAGANJ"
+      number: 54
+      stored_name_and_number: "54 MAHENDRAGANJ"
+      districts: ["South West Garo Hills"]
+      also_a: []
+      aliases: ["54 MAHENDRAGANJ", "AC 54", "AC-54", "Mahendraganj constituency", "Mahendraganj AC"]
+    - canonical: "SALMANPARA"
+      number: 55
+      stored_name_and_number: "55 SALMANPARA"
+      districts: ["South West Garo Hills", "West Garo Hills"]
+      also_a: [village]
+      aliases: ["55 SALMANPARA", "AC 55", "AC-55", "Salmanpara constituency", "Salmanpara AC"]
+    - canonical: "GAMBEGRE"
+      number: 56
+      stored_name_and_number: "56 GAMBEGRE"
+      districts: ["South West Garo Hills", "West Garo Hills"]
+      also_a: [block, village]
+      aliases: ["56 GAMBEGRE", "AC 56", "AC-56", "Gambegre constituency", "Gambegre AC"]
+    - canonical: "DALU"
+      number: 57
+      stored_name_and_number: "57 DALU"
+      districts: ["South West Garo Hills", "West Garo Hills"]
+      also_a: [block]
+      aliases: ["57 DALU", "AC 57", "AC-57", "Dalu constituency", "Dalu AC"]
+    - canonical: "RONGARA-SIJU"
+      number: 58
+      stored_name_and_number: "58 RONGARA"
+      districts: ["South Garo Hills"]
+      also_a: []
+      aliases: ["RONGARA", "58 RONGARA", "AC 58", "AC-58", "58 Rongara-Siju", "Rongara-Siju constituency", "Rongara-Siju AC", "Rongara Siju"]
+    - canonical: "CHOKPOT"
+      number: 59
+      stored_name_and_number: "59 CHOKPOT"
+      districts: ["South Garo Hills"]
+      also_a: [block]
+      aliases: ["59 CHOKPOT", "AC 59", "AC-59", "Chokpot constituency", "Chokpot AC"]
+    - canonical: "BAGHMARA"
+      number: 60
+      stored_name_and_number: "60 BAGHMARA"
+      districts: ["South Garo Hills"]
+      also_a: [block, village]
+      aliases: ["60 BAGHMARA", "AC 60", "AC-60", "Baghmara constituency", "Baghmara AC"]
+
+  village:
+    canonical_column: lgd_village_name
+    stored_case: { expenditure: Title Case, employment: ALL CAPS }
+    never_filter_on: [village_clean, village]     # raw pre-LGD text, expenditure/employment
+    identity_column: village_code
+    stored_type: integer (int64 in both workbooks - no float suffix to strip)
+    distinct_names: { expenditure: 4433, employment: 6106, union: 6171 }
+    distinct_codes: { expenditure: 4673, employment: 6419, overlap: 4601 }
+    sql_predicate_preferred: "village_code = <code>"
+    sql_predicate_fallback: "UPPER(lgd_village_name) = UPPER('<canonical>')"
+
+    resolution_strategy:
+    - 1. If the user gave a numeric code, resolve on village_code directly.
+    - 2. Fold the name and look it up in the village catalogue scoped by any district or
+         block the user also gave. Scoping first removes most ambiguity.
+    - 3. If exactly one code survives, resolve. Emit the code, not the name.
+    - 4. If more than one code survives, return ambiguous with the candidate codes and
+         their district/block. Ask which one.
+    - 5. If nothing survives, run fuzzy then embedding per matching_pipeline, then
+         not_found with up to 5 suggestions.
+
+    ambiguity:
+      shared_names: 238
+      detail: >
+        238 village names in the union of both tables are used by two or more physically
+        different villages. Village name alone is NEVER a key. The registry below lists
+        every one of them, the number of distinct village_codes sharing the name, the
+        districts involved, and what the user must supply to disambiguate.
+      resolve_by_district: 191    # naming the district narrows it to one village
+      resolve_by_block: 47        # all copies sit in ONE district - district does not
+                                  # help, you must ask for the block
+      registry_key: "NAME: { codes, districts, resolve_by }"
+      district_codes_used: >
+        EGH East Garo Hills, EJH East Jaintia Hills, EKH East Khasi Hills,
+        EWKH Eastern West Khasi Hills, NGH North Garo Hills, RB Ri Bhoi,
+        SGH South Garo Hills, SWGH South West Garo Hills, SWKH South West Khasi Hills,
+        WGH West Garo Hills, WJH West Jaintia Hills, WKH West Khasi Hills
+      registry:
+        ADUGRE: { codes: 4, districts: [SGH, SWGH, WGH], resolve_by: district }
+        AGALGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        AKINPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        ALLAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        AMBARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        AMONGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        AMPANGGRE: { codes: 3, districts: [EGH, SGH, WGH], resolve_by: district }
+        ANCHENGGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        APALGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        ARAGITTIM: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        ARUAK NOKATGRE: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        ARUAKGRE: { codes: 2, districts: [NGH], resolve_by: block }
+        ASIMGRE: { codes: 7, districts: [EGH, SGH, SWGH, WGH], resolve_by: district }
+        ASIRAGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        BABUPARA: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        BALADINGGRE: { codes: 4, districts: [SGH, SWGH, WGH], resolve_by: district }
+        BALALGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BALSRIGITTIM: { codes: 2, districts: [EGH, NGH], resolve_by: district }
+        BALUPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        BATABARI: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        BAWEGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        BELBARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BERUPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BIBRAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        BILKONA: { codes: 2, districts: [SGH], resolve_by: block }
+        BOKMAGRE: { codes: 2, districts: [NGH, WGH], resolve_by: district }
+        BOLBOKGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        BOLCHUGRE: { codes: 6, districts: [SGH, SWGH, WGH], resolve_by: district }
+        BOLDAMGIRI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BOLDAMGRE: { codes: 6, districts: [SGH, WGH], resolve_by: district }
+        BOLLONGGITOK: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BOLLONGGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BOLSAL ADING: { codes: 2, districts: [EGH, SGH], resolve_by: district }
+        BOLSALGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BORJHORA: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        BORSORA: { codes: 2, districts: [EJH, SWKH], resolve_by: district }
+        BREMGRE: { codes: 2, districts: [SGH], resolve_by: block }
+        BUGAKOLGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        CHAMAGURI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        CHANDIGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        CHERAN SONGGITCHAM: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        CHERANGRE: { codes: 3, districts: [EGH, WGH], resolve_by: district }
+        CHIBOKGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        CHIDEKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        CHIGITCHAKGIRI: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        CHIGITCHAKGRE: { codes: 5, districts: [SGH, SWGH, WGH], resolve_by: district }
+        CHIGRANGGRE: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        CHIOKGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        DABAKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DABIGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DAGALGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DALMAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DAMALGRE: { codes: 4, districts: [SGH, SWGH, WGH], resolve_by: district }
+        DAMJONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DANGSAPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DAPGIRI: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DARECHIKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DASPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DEMTHRING: { codes: 2, districts: [EKH, WJH], resolve_by: district }
+        DENGGAGRE: { codes: 2, districts: [EGH, SGH], resolve_by: district }
+        DEWLIEH: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        DEWSAW: { codes: 3, districts: [EKH, EWKH], resolve_by: district }
+        DIGRANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DILMA SONGGITAL: { codes: 2, districts: [EGH, NGH], resolve_by: district }
+        DILNIGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        DIPLOKGITTIM: { codes: 2, districts: [EGH, NGH], resolve_by: district }
+        DIPOGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DIRANG: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        DOLLONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DOMBAGRE: { codes: 2, districts: [SWGH], resolve_by: block }
+        DOMBAH: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        DOMJRI: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        DOMSOHPIAN: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        DOMTRAW: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        DOPANANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DURAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        GALWANGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        GAMBARIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        GIMBILGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        GOLAGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        GONGGANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        JANGRAPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        JARAIN: { codes: 3, districts: [EJH, EKH, WJH], resolve_by: district }
+        JONGDIKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        KARIPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        KATALBARI: { codes: 2, districts: [SWGH], resolve_by: block }
+        KHONSHNONG: { codes: 2, districts: [EKH, WJH], resolve_by: district }
+        KHYNDAWWASO: { codes: 2, districts: [WJH], resolve_by: block }
+        KIMDEGRE: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        KODALDHOWA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        KONGWANG: { codes: 2, districts: [EKH, WJH], resolve_by: district }
+        KORAIBARI: { codes: 2, districts: [SWKH, WGH], resolve_by: district }
+        KOSIGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        KOTCHUGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        KREMMYRSIANG: { codes: 2, districts: [EJH, WJH], resolve_by: district }
+        LAITKSEH: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        LAITMAWSIANG: { codes: 2, districts: [EKH], resolve_by: block }
+        LALMATI: { codes: 2, districts: [RB, WGH], resolve_by: district }
+        LANGTOR: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        LAPALANG: { codes: 2, districts: [EKH], resolve_by: block }
+        LAWSIEJ: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        LUMDIENGJRI: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        LUMDIENGNGAN: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        LUMKYA: { codes: 2, districts: [RB, WJH], resolve_by: district }
+        LUMMAWBAH: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        LUMPDENG: { codes: 2, districts: [EJH, EKH], resolve_by: district }
+        LUMPYNGNGAD: { codes: 4, districts: [SWKH, WJH, WKH], resolve_by: district }
+        LUMSHYIAP: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        LUMSOHPHOH: { codes: 2, districts: [RB], resolve_by: block }
+        LUTUBARI: { codes: 2, districts: [SWGH], resolve_by: block }
+        LYNGNGAI: { codes: 2, districts: [EKH], resolve_by: block }
+        MAGURMARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        MALCHAPARA: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        MANDAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        MANDALGRE: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        MARAKAPARA: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        MATCHOKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        MATCHOKPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        MAWBEH: { codes: 2, districts: [EKH], resolve_by: block }
+        MAWBLANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWBRI: { codes: 4, districts: [EKH, RB, SWKH, WKH], resolve_by: district }
+        MAWEITKSAR: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        MAWIAPBANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWIONG: { codes: 4, districts: [EKH, RB, SWKH, WKH], resolve_by: district }
+        MAWKHAN: { codes: 3, districts: [EKH, EWKH, RB], resolve_by: district }
+        MAWKHAP: { codes: 3, districts: [EKH, RB, WKH], resolve_by: district }
+        MAWLANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWLEIN: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        MAWLIEH: { codes: 3, districts: [EKH, EWKH, WKH], resolve_by: district }
+        MAWLONG: { codes: 4, districts: [EKH, RB, WJH, WKH], resolve_by: district }
+        MAWNGAP: { codes: 3, districts: [WJH, WKH], resolve_by: district }
+        MAWPAT: { codes: 3, districts: [EWKH, RB, SWKH], resolve_by: district }
+        MAWPDANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWPEN: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        MAWPON: { codes: 3, districts: [EWKH, WKH], resolve_by: district }
+        MAWRAP: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        MAWROH: { codes: 2, districts: [EWKH], resolve_by: block }
+        MAWRYNGKANG: { codes: 3, districts: [EKH, RB], resolve_by: district }
+        MAWSAW: { codes: 3, districts: [SWKH, WKH], resolve_by: district }
+        MAWSAWA: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        MAWSHUT: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        MAWSMAI: { codes: 4, districts: [EKH, EWKH, RB, WKH], resolve_by: district }
+        MEGADOP: { codes: 2, districts: [SGH, WKH], resolve_by: district }
+        MEGAPGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        MEGONGGRE: { codes: 3, districts: [WGH], resolve_by: block }
+        MYNSAIN: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MYRIAW: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        NAWALGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        NAYAPARA: { codes: 3, districts: [SWGH, SWKH, WGH], resolve_by: district }
+        NEPALGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        NIANGDAI: { codes: 2, districts: [EWKH, RB], resolve_by: district }
+        NIKWATGRE: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        NOGORPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        NOKATGIRI: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        NOKATGRE: { codes: 4, districts: [NGH, SGH, SWGH], resolve_by: district }
+        NOLBARI: { codes: 3, districts: [NGH, SGH, WGH], resolve_by: district }
+        NONGBAH: { codes: 2, districts: [WJH, WKH], resolve_by: district }
+        NONGDEWSAW: { codes: 2, districts: [RB, SWKH], resolve_by: district }
+        NONGDHAR: { codes: 2, districts: [WJH, WKH], resolve_by: district }
+        NONGDOM: { codes: 3, districts: [EWKH, WKH], resolve_by: district }
+        NONGJRI: { codes: 3, districts: [RB, SWKH, WKH], resolve_by: district }
+        NONGKASEN: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        NONGKYNDANG: { codes: 2, districts: [WKH], resolve_by: block }
+        NONGKYNRIH: { codes: 2, districts: [RB, WJH], resolve_by: district }
+        NONGLAIT: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        NONGLANG: { codes: 3, districts: [EWKH, SWKH, WKH], resolve_by: district }
+        NONGLUM: { codes: 2, districts: [RB], resolve_by: block }
+        NONGMADAN: { codes: 2, districts: [EKH], resolve_by: block }
+        NONGMAWLEIN: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        NONGMAWLONG: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        NONGPRIANG: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        NONGRAH: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        NONGRIAT: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        NONGRYNGKOH: { codes: 2, districts: [EKH, WJH], resolve_by: district }
+        NONGSDER: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        NONGSPUNG: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        NONGTHYMMAI: { codes: 5, districts: [EKH, EWKH, RB, WKH], resolve_by: district }
+        NONGTHYMME: { codes: 2, districts: [EJH, WJH], resolve_by: district }
+        NONGTRAW: { codes: 3, districts: [EKH, RB, WKH], resolve_by: district }
+        NOONMATI: { codes: 2, districts: [SWGH], resolve_by: block }
+        PANBARI: { codes: 2, districts: [NGH, WGH], resolve_by: district }
+        PHOTJALEI: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        POMLUM: { codes: 2, districts: [EKH], resolve_by: block }
+        PURNONAGAR: { codes: 2, districts: [EKH, WGH], resolve_by: district }
+        PYNDENGMAWLIEH: { codes: 2, districts: [WKH], resolve_by: block }
+        PYRDA: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        RAJABALA: { codes: 2, districts: [RB, WGH], resolve_by: district }
+        RANGMALGRE: { codes: 2, districts: [NGH, WGH], resolve_by: district }
+        RANGSAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        RONGALGRE: { codes: 3, districts: [EGH, WGH], resolve_by: district }
+        RONGBAKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        RONGBILBANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        RONGBOKGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        RONGCHIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RONGDENGGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        RONGJIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RONGKONGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        RONGRAMGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        RONGRONGGRE: { codes: 3, districts: [EGH, SGH, WGH], resolve_by: district }
+        RONGRU ASIM: { codes: 2, districts: [SGH], resolve_by: block }
+        RONGSIGRE: { codes: 2, districts: [SGH], resolve_by: block }
+        RTIANG: { codes: 2, districts: [RB, WJH], resolve_by: district }
+        SALBARI: { codes: 2, districts: [SWGH, WKH], resolve_by: district }
+        SAMPALGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        SHYRWANG: { codes: 2, districts: [EJH, EWKH], resolve_by: district }
+        SIEJIONG: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        SILDUBI: { codes: 2, districts: [NGH, WKH], resolve_by: district }
+        SOHPHOH: { codes: 2, districts: [EKH, WJH], resolve_by: district }
+        TARAPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        TEBRONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        TEKSRAGRE: { codes: 3, districts: [WGH], resolve_by: block }
+        TIEHBAH: { codes: 3, districts: [EKH, EWKH, WKH], resolve_by: district }
+        TIMBOGRE: { codes: 2, districts: [RB, WGH], resolve_by: district }
+        TLUH: { codes: 2, districts: [EJH, EKH], resolve_by: district }
+        TUM TUM: { codes: 2, districts: [WJH, WKH], resolve_by: district }
+        ULUBARI: { codes: 2, districts: [RB, SWGH], resolve_by: district }
+        UMBIR: { codes: 2, districts: [RB, SWKH], resolve_by: district }
+        UMBLAI: { codes: 2, districts: [EKH], resolve_by: block }
+        UMIONG: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        UMKREM: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        UMLYNGKDAIT: { codes: 2, districts: [RB], resolve_by: block }
+        UMPDEM: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        UMPYRDONG: { codes: 2, districts: [RB], resolve_by: block }
+        UMSALANG: { codes: 2, districts: [WJH], resolve_by: block }
+        UMSARANG: { codes: 2, districts: [RB], resolve_by: block }
+        UMSAW: { codes: 7, districts: [EKH, RB, SWKH, WKH], resolve_by: district }
+        UMSOHLANG: { codes: 2, districts: [RB], resolve_by: block }
+        UMTHAM: { codes: 2, districts: [RB], resolve_by: block }
+        UMTHLI: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        UMTHLONG: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        WADAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        WAGEBOKGRE: { codes: 2, districts: [SGH], resolve_by: block }
+        WAHIAJER: { codes: 2, districts: [EJH, WJH], resolve_by: district }
+        WAHLYNGDOH: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        WAKANTAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        WANKOLAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        WARAMGRE: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        WATREGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+
+    name_variation:
+      why: >
+        The raw source name and the LGD-standardised name differ for a large share of
+        rows. The resolver must expect the user to type either. Match against
+        lgd_village_name but be tolerant of the raw form's shape.
+      raw_vs_lgd_rows:
+        expenditure: { differing: 18818, case_only: 16860, real_change: 1958 }
+        employment:  { differing: 2270,  case_only: 0,     real_change: 2270 }
+      distinct_real_pairs: { expenditure: 482, employment: 839, total: 1321 }
+      patterns:
+      - pattern: spacing_shift
+        count: 314
+        rule: >
+          words merge or split between raw and LGD. Always compare on the squashed key
+          as well as the folded key.
+        examples:
+        - ["DARANGDURA", "Darang Dura"]
+        - ["GOKA PEPCHANDAL", "Gokapepchandal"]
+        - ["SIJUTENGKIGITTIM", "Siju Tengkigittim"]
+        - ["KARUKOL A DINGGRE", "Karukol Adinggre"]
+      - pattern: spelling_edit
+        count: 505
+        rule: >
+          one or two character corrections, usually doubled consonants in Garo names
+          (GITTIM/GITIM, NGG/NG). Fuzzy matching handles these; the squash key does not.
+        examples:
+        - ["AGRENGGITTIM", "Agrenggitim"]
+        - ["GITTINGGRE", "Gitinggre"]
+        - ["DIKRONGGRE", "Dikgronggre"]
+        - ["MATMAGITIK", "Matmagittik"]
+        warning: >
+          AGRENGGITTIM vs Agrenggitim looks like a pure case fold but is GITTIM vs GITIM.
+          Never assume case-insensitive equality implies a match - always compare folded.
+      - pattern: qualifier_in_parentheses
+        count: 201
+        rule: >
+          LGD adds a bracketed qualifier the user will not type. Strip ( ) content when
+          matching, and keep it when displaying.
+        examples:
+        - ["CHANDABHOI HAJONGPARA", "Chandabhoi (Hajongpara)"]
+        - ["BANGAL KHATA MUSLIM", "Bangal Khata(Muslim)"]
+        - ["SHYAMDING GARO", "Shyamding ( Garo )"]
+        - ["MEKKA APAL", "Mekka A. Pal"]
+      - pattern: affix_added_or_dropped
+        count: 239
+        rule: >
+          a roman numeral, direction word or A/B suffix is added or removed. Treat
+          I/II/III, -I/-II, A/B and East/West/Upper/Lower suffixes as soft tokens.
+        examples:
+        - ["CHERENGPARA", "Cherengpara I"]
+        - ["JATRAKONA", "Jatrakona-I"]
+        - ["DIMAPARA A", "Dimapara"]
+        - ["DURA", "Dura-Asimgiri"]
+      - pattern: genuine_rename
+        count: 62
+        rule: >
+          the LGD name is a different name. No string rule will find these. They can only
+          be resolved through village_code or the dimension catalogue. If the user types
+          the old name and it is not in lgd_village_name, go to fuzzy/embedding, and if
+          that fails return not_found - do not fabricate.
+        examples:
+        - ["CHAMBIL BADIMAGRE", "Upper Chambil Badimagre"]
+        - ["SIJU DOCHETGITTIM", "Dochetgittim"]
+        - ["RONGKUAKGRE", "Daji Rongkuakgre"]
+        - ["NEW DALCHENGKONA", "Dalchengkona"]
+        - ["NONGSHILLIANG", "Kreit Nongshilliang"]
+
+  match_method:
+    column: { employment: match_method }
+    expenditure: null
+    purpose: ETL provenance for how the source village was mapped to an LGD village.
+    values:
+    - canonical: "Direct - current LGD"
+      rows: 25135
+      confidence: high
+      aliases: ["direct", "direct match", "current LGD"]
+    - canonical: "Via shifted-village list"
+      rows: 1240
+      confidence: medium
+      aliases: ["shifted", "shifted village", "via shifted list"]
+      implication: >
+        These are the same 1240 rows with a null assembly constituency. The village was
+        reassigned between LGD revisions. Prefer lgd_village_name over any older name the
+        user may type.
+    runtime: >
+      ETL metadata. Do not surface or filter on it unless the user explicitly asks about
+      data quality or mapping method.
+
+# ---------------------------------------------------------------------------
+# MEASURE VOCABULARY - user phrasing to column. stage2 owns the aggregation rules.
+# ---------------------------------------------------------------------------
+measure_vocabulary:
+  note: >
+    Resolve the metric the user named to exactly one column before SQL generation. If the
+    phrasing maps to more than one column, ask. Never sum two measures the user did not
+    ask to combine.
+
+  expenditure_table:
+  - column: total_exp
+    aliases: [total expenditure, total spending, total spend, total expense, expenditure,
+              spending, spend, money spent, amount spent, funds spent, outlay]
+    default_for: a bare "expenditure" or "spending" question
+  - column: exp_unskilled_wage
+    aliases: [unskilled wage, unskilled wages, unskilled wage expenditure, unskilled labour
+              wages, wage expenditure, wages]
+    note: >
+      a bare "wages" is ambiguous between unskilled and semi-skilled. Unskilled is by far
+      the larger component; if the user says only "wages", ask or state the assumption.
+  - column: exp_semi_skilled_wage
+    aliases: [semi skilled wage, semi-skilled wages, semiskilled wage expenditure]
+  - column: exp_material
+    aliases: [material, materials, material expenditure, material cost, material spending]
+  - column: exp_tax
+    aliases: [tax, tax expenditure, tax expense, taxes]
+  excluded:
+    columns: [adm_exp_rec, adm_exp_non_rec, adm_exp_total]
+    aliases_that_must_not_resolve: [administrative expenditure, admin cost, admin expense,
+              overhead]
+    behaviour: >
+      These are marked excluded in stage2. If the user asks for administrative
+      expenditure, say it is excluded by policy rather than silently answering with
+      total_exp.
+
+  employment_table:
+  - column: employment_provided_persons
+    aliases: [persons employed, people employed, workers, number of people, persons
+              provided employment, individuals employed]
+  - column: employment_provided_households
+    aliases: [households employed, families employed, households provided employment,
+              households given work]
+  - column: employment_provided_total_person_days
+    aliases: [person days, person-days, mandays, man days, total person days,
+              employment days, days of work generated]
+  - column: households_completed_100_days_work
+    aliases: [100 days, 100 days completed, households completed 100 days,
+              full employment households, hundred days work]
+  - column: job_cards_issued_total
+    aliases: [job cards, job cards issued, total job cards, cards issued]
+  - column: women_employment_provided
+    aliases: [women employed, female employment, women provided employment,
+              women workers, female workers]
+  - column: benefit_to_households
+    aliases: [benefit, household benefit, benefit to households, benefit amount]
+    unit: thousands of currency units
+    caveat: >
+      NULL in 11633 of 26375 rows (44%). NULL means not recorded, not zero. Any AVG over
+      this column silently covers only about half the rows - say so in the answer.
+
+  ambiguous_terms:
+    beneficiary:
+      status: SME_CONFIRMATION_REQUIRED
+      candidates: [employment_provided_households, employment_provided_persons]
+      behaviour: ask whether households or persons are meant. Do not default.
+    wages:
+      candidates: [exp_unskilled_wage, exp_semi_skilled_wage]
+      behaviour: default to exp_unskilled_wage and state the assumption, or ask.
+    employment:
+      candidates: [employment_provided_persons, employment_provided_households,
+                   employment_provided_total_person_days]
+      behaviour: ask which measure of employment is intended.
+
+# ---------------------------------------------------------------------------
+region_groupings:
+  note: >
+    Users group districts by hill range. These are not columns - expand the group into
+    an IN list of districts and say which districts were included.
+  groups:
+    "Garo Hills":
+      districts: [East Garo Hills, North Garo Hills, South Garo Hills,
+                  South West Garo Hills, West Garo Hills]
+      aliases: [Garo, Garo region, Garo Hills region, GH]
+    "Khasi Hills":
+      districts: [East Khasi Hills, Eastern West Khasi Hills, South West Khasi Hills,
+                  West Khasi Hills]
+      aliases: [Khasi, Khasi region, Khasi Hills region, KH]
+    "Jaintia Hills":
+      districts: [East Jaintia Hills, West Jaintia Hills]
+      aliases: [Jaintia, Jaintia region, Jaintia Hills region, JH]
+    "Ri Bhoi":
+      districts: [Ri Bhoi]
+      aliases: [Ri Bhoi region, Bhoi]
+      note: >
+        Ri Bhoi belongs to no hill range - it is its own district and its own group.
+        Do not fold it into Khasi Hills. This is the one name that is both a district
+        and a region; both readings produce the same filter, so no clarification is
+        needed - resolve it as the district.
+  whole_state:
+    aliases: [Meghalaya, state, statewide, whole state, all districts, overall]
+    behaviour: no district filter at all.
+
+# ---------------------------------------------------------------------------
+joins:
+  key: village_code
+  columns: { expenditure: village_code, employment: village_code }
+  employment_source_header: >
+    village_code comes from the SECOND column literally headed "Village" in
+    MGNREGA_Employment.xlsx, which pandas renames Village.1. The first "Village" column
+    is the name. Confusing these destroys the join.
+  coverage:
+    expenditure_codes: 4673
+    employment_codes: 6419
+    overlap: 4601
+    expenditure_only: 72       # villages with expenditure but no employment rows
+    employment_only: 1818      # villages with employment but no expenditure rows
+  unmatched_behaviour: >
+    A village present in only one table must answer "no <other> data recorded for this
+    village", never zero.
+
+  grain_warning:
+    critical: true
+    detail: >
+      (village_code, year) is NOT unique. It repeats 181 times in expenditure and 2069
+      times in employment. Joining the two tables on village_code alone fans out rows and
+      inflates every SUM.
+    required_pattern: >
+      Aggregate each side to (village_code, year) in a subquery FIRST, then join the two
+      aggregates on village_code AND the translated year. Never join the raw tables.
+    counting: >
+      COUNT(*) is a row count, not a village count. Use COUNT(DISTINCT village_code).
+
+  year_translation_required: true
+  join_predicate_template: |
+    WITH exp AS (
+      SELECT village_code, year, SUM(total_exp) AS total_exp
+      FROM mgnrega_expenditure GROUP BY village_code, year
+    ), emp AS (
+      SELECT village_code, year, SUM(employment_provided_persons) AS persons
+      FROM mgnrega_employment GROUP BY village_code, year
+    )
+    SELECT * FROM exp JOIN emp
+      ON exp.village_code = emp.village_code
+     AND LEFT(exp.year, 4) = LEFT(emp.year, 4)   -- '2023-2024' <-> '2023-24'
+
+  fallback_join:
+    use_when: village_code is missing on one side
+    columns: [year, lgd_district, lgd_block, lgd_village_name]
+    mandatory_case_fold: true
+    detail: >
+      Expenditure stores lgd_village_name in Title Case and employment stores it in ALL
+      CAPS - 0 percent of rows match on a raw string compare. Every column in this
+      fallback must be wrapped in UPPER() on both sides, and year must be translated
+      first. Without this the fallback silently returns nothing.
+
+  cross_table_geography_agreement:
+    checked_on: the 4601 shared village codes
+    district_disagreements: 0
+    block_disagreements: 4
+    village_name_disagreements: 1
+    detail: >
+      Geography is consistent across the two tables apart from five codes. Expenditure is
+      canonical where they differ.
+    exceptions:
+    - { village_code: 276472, expenditure_block: SHALLANG,  employment_block: MAWSHYNRUT }
+    - { village_code: 276474, expenditure_block: SHALLANG,  employment_block: MAWSHYNRUT }
+    - { village_code: 276645, expenditure_block: SHALLANG,  employment_block: MAWSHYNRUT }
+    - { village_code: 276888, expenditure_block: NONGSTOIN, employment_block: RAMBRAI,
+        expenditure_village: MAWPHANLUR, employment_village: MAWBYRKONG }
+
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLES - the intended behaviour, end to end
+# ---------------------------------------------------------------------------
+worked_examples:
+
+- user: "total expenditure in EGH for 2023-24"
+  resolve:
+  - { text: EGH, type: district, canonical: East Garo Hills, matched_by: 4_acronym,
+      stored_as_expenditure: "East Garo Hills" }
+  - { text: "2023-24", type: year, canonical: '2023-2024', matched_by: 2_alias,
+      stored_as_expenditure: '2023-2024' }
+  - { text: total expenditure, type: measure, canonical: total_exp }
+  sql_filter: "lgd_district = 'East Garo Hills' AND year = '2023-2024'"
+
+- user: "e garo hill spending"
+  resolve:
+  - { text: "e garo hill", type: district, canonical: East Garo Hills, matched_by: 2_alias }
+  note: >
+    Demonstrates the alias family: EGH, E Garo Hills, East Garo Hill, East Garo and
+    EAST GARO HILLS all land on the same canonical district.
+
+- user: "person days in East Garo Hills in 2023-24"
+  resolve:
+  - { text: East Garo Hills, type: district, canonical: East Garo Hills,
+      stored_as_employment: "EAST GARO HILLS" }
+  - { text: "2023-24", type: year, canonical: '2023-2024',
+      stored_as_employment: '2023-24' }
+  - { text: person days, type: measure, canonical: employment_provided_total_person_days }
+  sql_filter: "UPPER(lgd_district) = 'EAST GARO HILLS' AND year = '2023-24'"
+  note: >
+    Same district, same year, same question shape as the first example - but because this
+    one hits the employment table, BOTH the district casing and the year format change.
+    This is the single most common source of silent zero-row answers.
+
+- user: "expenditure in Asimgre"
+  resolve:
+  - { text: Asimgre, type: village, status: ambiguous }
+  response:
+    status: ambiguous
+    candidates: 7 distinct village_codes named ASIMGRE
+    districts: [East Garo Hills, South Garo Hills, South West Garo Hills, West Garo Hills]
+    question: "Asimgre exists in four districts. Which one did you mean?"
+  note: never pick the first row.
+
+- user: "expenditure in Asimgre, West Garo Hills"
+  resolve:
+  - { text: West Garo Hills, type: district, canonical: West Garo Hills }
+  - { text: Asimgre, type: village, scoped_by: district }
+  note: >
+    Scoping by district narrows ASIMGRE to the codes in West Garo Hills. If exactly one
+    remains, resolve it and emit village_code. If more than one remains, ask for the block.
+
+- user: "how much was spent in Aruakgre"
+  resolve:
+  - { text: Aruakgre, type: village, status: ambiguous, resolve_by: block }
+  note: >
+    ARUAKGRE has 2 codes and both are in North Garo Hills. Naming the district does not
+    help - ask for the block. This is the resolve_by: block case, 47 names behave this way.
+
+- user: "spending in Mawlai"
+  resolve:
+  - { text: Mawlai, type: block, canonical: MAWLAI, assumption: default_level }
+  note: >
+    MAWLAI is simultaneously a block, an assembly constituency (15 MAWLAI) and a village
+    name. With no qualifier the default is block. State the assumption in the answer.
+
+- user: "spending in Mawlai constituency"
+  resolve:
+  - { text: Mawlai, type: assembly_constituency, canonical: MAWLAI, number: 15 }
+  note: >
+    The word "constituency" flips the level. But assembly_constituency exists only in
+    mgnrega_employment - there is no expenditure by constituency. Say that rather than
+    silently answering at block level.
+
+- user: "expenditure in Khatarshnong Laitkroh"
+  resolve:
+  - { text: Khatarshnong Laitkroh, type: block, canonical: KHATARSHNONG LAITKROH,
+      in_tables: [employment] }
+  response: >
+    Resolves cleanly, but there are no expenditure rows for this block. Answer "no
+    expenditure data recorded for KHATARSHNONG LAITKROH", not zero.
+
+- user: "expenditure in 2023"
+  resolve:
+  - { text: "2023", type: year, status: ambiguous }
+  question: "Do you mean FY 2022-2023 or FY 2023-2024?"
+
+- user: "expenditure in Nagaland"
+  resolve:
+  - { text: Nagaland, type: unknown, status: not_found }
+  response: >
+    Not in the MGNREGA data - this dataset covers the 12 districts of Meghalaya only.
+    Do not guess a district.
+
+- user: "how many beneficiaries in Ri Bhoi"
+  resolve:
+  - { text: Ri Bhoi, type: district, canonical: Ri Bhoi }
+  - { text: beneficiaries, type: measure, status: ambiguous }
+  question: >
+    "Beneficiaries" could mean households or persons. Which do you want?
+
+# ---------------------------------------------------------------------------
+maintenance:
+  source_files:
+  - quadrent/datasets/Updated MNGREGA Expenditure WIth Year.xlsx
+  - quadrent/datasets/MGNREGA_Employment.xlsx
+  expenditure_sheet_name: "Mactched Village MNGREGA"   # the typo is in the file
+  employment_sheet_name: Sheet1
+  row_counts_at_generation: { mgnrega_expenditure: 18818, mgnrega_employment: 26375 }
+  last_generated: '2026-08-21'
+  regeneration_rules:
+  - Re-profile both workbooks and diff every count in this file. Explain each change.
+  - APPEND new canonical values and aliases. Never delete one - old questions about old
+    years and old village names must keep resolving.
+  - Re-run the ambiguity registry. If a name gains a code, it must appear here.
+  - Check any new district acronym against the existing 12 before adding it.
+  - Re-check cross_dimension_collisions when blocks or constituencies change.
+  - Bump resolver_version.
+  see_also: Annotations/README.md

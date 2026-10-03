@@ -1,0 +1,249 @@
+# foreign_key_augmentation.yaml
+#
+# Join edges and the materialised join graph for MGNREGA - node 5.9.
+#
+#   nodes       what each table is, its grain, and whether it may be aggregated
+#   edges       every join, with the exact ON clause the generator must emit
+#   join_graph  adjacency list, listed from the many side, traversed undirected
+#
+# declared: true      the edge is a real constraint in information_schema
+# declared: false     the edge exists only here
+# is_prohibited: true the generator must refuse this join and use `use_instead`
+
+foreign_key_augmentation:
+
+  database: megh_db
+  read_role: megh_readonly
+
+  # =======================================================================
+  nodes:
+
+    curated.fact_mgnrega_employment:
+      role: fact
+      primary_key: employment_fact_id
+      grain: one row per source row of the employment workbook
+      unique_on_year_and_geography: false
+      aggregate_before_reporting: true
+      note: "COUNT(*) is a record count, never a village count."
+
+    curated.fact_mgnrega_expenditure:
+      role: fact
+      primary_key: expenditure_fact_id
+      grain: one row per source row of the expenditure workbook
+      unique_on_year_and_geography: false
+      aggregate_before_reporting: true
+      unit: lakh_rupees
+      note: "Divide by 100 for crore."
+
+    curated.dim_year:
+      role: dimension
+      primary_key: year_key
+      grain: one row per financial year
+      note: "year_key is the FY start year. Carries data_quality_note, which must travel with any answer covering that year."
+
+    curated.dim_geography:
+      role: dimension
+      primary_key: geography_key
+      natural_key: village_code
+      grain: one row per LGD village or ward
+      note: "geography_key is surrogate and not stable across a reload - use village_code anywhere the value leaves this database."
+
+    curated.dim_geography_alias:
+      role: lookup
+      primary_key: alias_key
+      grain: one row per source spelling of a village
+      safe_to_aggregate: false
+      note: "Resolve a typed name here, then filter the fact on geography_key. Never group on this table."
+
+    curated.bridge_geography_source:
+      role: bridge
+      primary_key: [geography_key, source_system]
+      grain: one row per village per source system
+      note: "Answer coverage questions here instead of joining the two facts."
+
+    curated.v_employment:
+      role: view
+      grain: source row
+      joins_needed: none
+      aggregate_before_reporting: true
+      note: "Employment fact with year and geography resolved, including year_note. Prefer this over the raw fact."
+
+    curated.v_expenditure:
+      role: view
+      grain: source row
+      joins_needed: none
+      aggregate_before_reporting: true
+      unit: lakh_rupees
+      note: "Expenditure fact with year and geography resolved. Prefer this over the raw fact."
+
+    curated.v_district_year_summary:
+      role: view
+      grain: one row per district per financial year
+      joins_needed: none
+      aggregate_before_reporting: false
+      note: "The only sanctioned way to combine the two facts. Precomputes unskilled_wage_share_pct and cost_per_person_day_rupees."
+
+    raw.source_rows:
+      role: lineage
+      readable_by_read_role: false
+      note: "megh_readonly has no access to the raw schema, so no generated query may reference it."
+
+  # =======================================================================
+  edges:
+
+    # ---- the join that must never be made -------------------------------
+    - from_table: curated.fact_mgnrega_employment
+      from_column: [geography_key, year_key]
+      to_table: curated.fact_mgnrega_expenditure
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_district_year_summary
+      on_clause: null
+      reason: >
+        No FK exists by design. Both facts are at source-row grain, so a row-level join
+        inflates totals and at the same time drops village-years present in only one
+        fact. Use v_district_year_summary, or aggregate each fact to
+        (year_key, geography_key) in a subquery and join the aggregates.
+
+    # ---- employment fact ------------------------------------------------
+    - from_table: curated.fact_mgnrega_employment
+      from_column: year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.fact_mgnrega_employment.year_key = curated.dim_year.year_key
+      reason: Conformed financial year.
+
+    - from_table: curated.fact_mgnrega_employment
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.fact_mgnrega_employment.geography_key = curated.dim_geography.geography_key
+      reason: The only safe path from employment to geography. Group and count on this column, or on village_code.
+
+    - from_table: curated.fact_mgnrega_employment
+      from_column: alias_key
+      to_table: curated.dim_geography_alias
+      to_column: alias_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.fact_mgnrega_employment.alias_key = curated.dim_geography_alias.alias_key
+      reason: Name lookup only - never a grouping key, and never a second route to dim_geography.
+
+    - from_table: curated.fact_mgnrega_employment
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: one_to_one
+      declared: true
+      is_prohibited: true
+      on_clause: null
+      reason: Lineage only. A query using this edge fails on permissions.
+
+    # ---- expenditure fact -----------------------------------------------
+    - from_table: curated.fact_mgnrega_expenditure
+      from_column: year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.fact_mgnrega_expenditure.year_key = curated.dim_year.year_key
+      reason: Conformed financial year.
+
+    - from_table: curated.fact_mgnrega_expenditure
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.fact_mgnrega_expenditure.geography_key = curated.dim_geography.geography_key
+      reason: The only safe path from expenditure to geography.
+
+    - from_table: curated.fact_mgnrega_expenditure
+      from_column: alias_key
+      to_table: curated.dim_geography_alias
+      to_column: alias_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.fact_mgnrega_expenditure.alias_key = curated.dim_geography_alias.alias_key
+      reason: Name lookup only - never a grouping key.
+
+    - from_table: curated.fact_mgnrega_expenditure
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: one_to_one
+      declared: true
+      is_prohibited: true
+      on_clause: null
+      reason: Lineage only. Not readable by megh_readonly.
+
+    # ---- alias and bridge -----------------------------------------------
+    - from_table: curated.dim_geography_alias
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.dim_geography_alias.geography_key = curated.dim_geography.geography_key
+      reason: Use for name resolution, then filter the fact on geography_key or village_code.
+
+    - from_table: curated.bridge_geography_source
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.bridge_geography_source.geography_key = curated.dim_geography.geography_key
+      reason: Coverage of each village per source system.
+
+    - from_table: curated.bridge_geography_source
+      from_column: first_year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.bridge_geography_source.first_year_key = curated.dim_year.year_key
+      reason: Column names differ, so USING will not work here.
+
+    - from_table: curated.bridge_geography_source
+      from_column: last_year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      on_clause: curated.bridge_geography_source.last_year_key = curated.dim_year.year_key
+      reason: Column names differ, so USING will not work here.
+
+  # =======================================================================
+  join_graph:
+
+    curated.fact_mgnrega_employment:
+      - curated.dim_year
+      - curated.dim_geography
+      - curated.dim_geography_alias
+
+    curated.fact_mgnrega_expenditure:
+      - curated.dim_year
+      - curated.dim_geography
+      - curated.dim_geography_alias
+
+    curated.dim_geography_alias:
+      - curated.dim_geography
+
+    curated.bridge_geography_source:
+      - curated.dim_geography
+      - curated.dim_year
+
+    curated.dim_year: []
+    curated.dim_geography: []
+
+    # an empty list on a view means the view is self-contained - join nothing
+    curated.v_employment: []
+    curated.v_expenditure: []
+    curated.v_district_year_summary: []

@@ -1,0 +1,158 @@
+# mgnrega_classification_rules.yaml
+# Clarification rules for MGNREGA. First rule that fires wins; its question is asked
+# and the pipeline pauses. Editable by analysts - no code change needed.
+# {placeholders} are filled from the user's query at runtime.
+# Order matters: requests the source cannot answer are caught before missing detail
+# is asked for, so the bot never collects details for a question it cannot answer.
+
+clarification_rules:
+
+  # ---- the source cannot answer this at all -----------------------------
+  - condition: "finer_than_financial_year_requested"
+    question: "Figures are recorded by financial year only - there is no month, quarter or week. Shall I use a full financial year?"
+
+  - condition: "pending_dues_requested"
+    question: "Pending dues and unpaid liabilities are not held in this data. Would expenditure actually incurred help instead?"
+
+  - condition: "fund_availability_requested"
+    question: "Fund releases, opening balance and availability are not held in this data. Did you mean expenditure incurred?"
+
+  - condition: "works_or_assets_requested"
+    question: "Works and assets created are not held in this data. Did you mean person-days generated, or expenditure?"
+
+  - condition: "wage_rate_requested"
+    question: "A daily wage rate is not stored. Would expenditure per person-day work instead?"
+
+  - condition: "per_capita_requested"
+    question: "Population figures are not held here, so per-capita cannot be calculated. Would per-village or per-household work instead?"
+
+  - condition: "budget_vs_actual_requested"
+    question: "Only actual expenditure is recorded - there is no sanctioned budget to compare against. Shall I report actual expenditure?"
+
+  - condition: "individual_person_requested"
+    question: "Data is held at village level, not per person. Which village or block should I report on?"
+
+  - condition: "other_scheme_requested"
+    question: "Only MGNREGA is loaded at present. Shall I answer for MGNREGA alone?"
+
+  # ---- measures that exist but must not be reported as asked -------------
+  - condition: "women_share_requested"
+    question: "The women's employment column has an unconfirmed definition, so a share or percentage cannot be published. Would you like the recorded count instead?"
+
+  - condition: "women_metric_in_2025_26"
+    question: "The women's employment column is zero on every row in 2025-26. Shall I use 2024-25 instead?"
+
+  - condition: "benefit_to_households_requested"
+    question: "The household benefit column is unverified and not reported. Did you mean total expenditure, or households provided employment?"
+
+  - condition: "administrative_expenditure_requested"
+    question: "Administrative expenditure is excluded from reporting. Did you mean total expenditure?"
+
+  - condition: "job_cards_across_multiple_years"
+    question: "Job cards issued is a running total, not a yearly figure, so it cannot be added across years. Which single year should I report?"
+
+  # ---- time -------------------------------------------------------------
+  - condition: "missing_time_period"
+    question: "Which financial year? Data covers 2022-23, 2023-24, 2024-25 and 2025-26."
+
+  - condition: "ambiguous_year"
+    question: "'{value}' could mean FY {fy_earlier} or FY {fy_later}. Which one?"
+
+  - condition: "calendar_year_vs_financial_year"
+    question: "Data is stored by financial year. Do you mean FY {fy_later}, running April {value} to March {next_year}?"
+
+  - condition: "year_outside_available_range"
+    question: "Data is available for 2022-23 to 2025-26 only. Which of those years?"
+
+  - condition: "vague_recency"
+    question: "'{value}' is not a fixed period. Which financial year - or shall I use the latest, 2025-26?"
+
+  - condition: "trend_spanning_partial_year"
+    question: "2024-25 employment appears to be a partial extract, so the trend will show a sharp dip. Include it with a caveat, or leave it out?"
+
+  - condition: "growth_period_missing"
+    question: "Growth between which two financial years?"
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "missing_metric_for_ranking"
+    question: "Top by what - total expenditure, person-days, persons employed, or households employed?"
+
+  - condition: "missing_metric_for_trend"
+    question: "Which measure should the trend show - expenditure, person-days, or persons employed?"
+
+  - condition: "vague_qualifier"
+    question: "What should '{value}' be measured by - expenditure, person-days, or 100-day completions?"
+
+  - condition: "ambiguous_beneficiary"
+    question: "Do you mean households or persons?"
+
+  - condition: "ambiguous_employment_measure"
+    question: "Which measure of employment - persons employed, households employed, or person-days?"
+
+  - condition: "ambiguous_wages"
+    question: "Unskilled wages or semi-skilled wages?"
+
+  - condition: "ambiguous_expenditure_component"
+    question: "Which expenditure - total, unskilled wages, semi-skilled wages, material, or tax?"
+
+  - condition: "ambiguous_hundred_days"
+    question: "Do you mean households that completed 100 days of work, or total person-days generated?"
+
+  - condition: "ambiguous_count_subject"
+    question: "A count of what - villages, households, persons, or job cards?"
+
+  # ---- geography --------------------------------------------------------
+  - condition: "missing_geography_level_for_breakdown"
+    question: "Broken down by which level - district, block, or village?"
+
+  - condition: "ambiguous_geography_level"
+    question: "'{value}' is a block, a constituency and a village name. Which level did you mean?"
+
+  - condition: "ambiguous_village_needs_district"
+    question: "'{value}' exists in {districts}. Which district?"
+
+  - condition: "ambiguous_village_needs_block"
+    question: "There is more than one {value} in {district}. Which block - {blocks}?"
+
+  - condition: "unmatched_geography_name"
+    question: "I could not match '{value}'. Did you mean {suggestions}?"
+
+  - condition: "constituency_requested_for_expenditure"
+    question: "Constituency is recorded only for employment; expenditure is not held at that level. Shall I answer by block instead?"
+
+  - condition: "constituency_without_villages"
+    question: "Constituencies 16 to 19 are urban Shillong and have no MGNREGA villages. Which other constituency?"
+
+  - condition: "constituency_unassigned_rows"
+    question: "1,240 employment records have no constituency recorded. Exclude them, or show them as unassigned?"
+
+  - condition: "geography_only_in_one_dataset"
+    question: "{value} has {available} recorded but no {requested}. Shall I answer for {available} instead?"
+
+  - condition: "geography_source_conflict"
+    question: "Sources disagree on which block {value} belongs to. Shall I use the official roster's {block}?"
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_level"
+    question: "At what level - statewide, by district, by block, or by village?"
+
+  - condition: "ambiguous_total_vs_average"
+    question: "Total across the whole period, or an average per year?"
+
+  - condition: "ambiguous_average_denominator"
+    question: "Average per what - per village, per year, or per household?"
+
+  - condition: "count_rows_vs_distinct_villages"
+    question: "Number of villages, or number of records? A village can hold more than one record in a year, so the two differ."
+
+  - condition: "ranking_direction_unclear"
+    question: "Highest or lowest?"
+
+  - condition: "missing_comparison_target"
+    question: "Compare {value} with which other district, or against which other year?"
+
+  - condition: "share_denominator_missing"
+    question: "As a share of what - the district total, or the state total?"
+
+  - condition: "cross_measure_below_district_level"
+    question: "Expenditure and employment can only be combined at district and year level. Shall I answer by district?"

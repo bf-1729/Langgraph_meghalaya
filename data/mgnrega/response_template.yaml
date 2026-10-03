@@ -1,0 +1,184 @@
+# response_template.yaml
+#
+# Response templates for MGNREGA - node 5.15, the response composer.
+# Editable by analysts - no code change needed.
+# Numbers are locked from the result set; templates only shape the wording around them.
+
+response_templates:
+
+  # ---- how the answer text is shaped ------------------------------------
+  formatting:
+    number_format: "indian"            # 9,09,15,181 not 90,915,181
+    currency_symbol: "₹"
+    decimal_places: 2
+    percent_decimal_places: 2
+    financial_year_format: "YYYY-YY"   # 2025-26; the source has no date finer than FY
+    expenditure_unit: "crore"          # stored in lakh, reported in crore
+    show_unit_always: true
+    show_assumptions: true             # surface the defaults that fired
+    geography_display_case: "title"    # stored ALL CAPS, shown as West Garo Hills
+    null_display: "not recorded"
+    zero_display: "0"                  # a recorded zero is a real value, not a blank
+    tie_behaviour: "show_all"
+    empty_result_message: "No data recorded for that selection."
+    max_rows_inline: 20
+
+  # =======================================================================
+  templates:
+
+    # ---- result shapes --------------------------------------------------
+    single_value: "{metric} for {scope} in {period} is {value}."
+    multi_metric: "For {scope} in {period}: {metric_list}."
+    count: "{scope} has {value} {entity} in {period}."
+    average_value: "Average {metric} per {denominator} for {scope} in {period} is {value}."
+    ratio_value: "{metric} for {scope} in {period} works out to {value}."
+    share_percentage: "{metric} for {scope} in {period} is {value}%."
+    proportion_of_total: "{scope} accounts for {value}% of the state total for {metric} in {period}."
+
+    ranked_list: "Top {n} {entity} by {metric} in {period}:"
+    bottom_list: "Bottom {n} {entity} by {metric} in {period}:"
+    extremes: "Highest is {top_entity} at {top_value}; lowest is {bottom_entity} at {bottom_value}."
+    rank_position: "{scope} ranks {rank} of {total} {entity} by {metric} in {period}."
+    tie_at_top: "{tied_entities} are level at {value}."
+
+    breakdown: "{metric} by {level} for {period}:"
+    time_series: "{metric} by financial year, {start} to {end}:"
+    comparison: "{entity_a} {value_a} against {entity_b} {value_b} - a difference of {change}."
+    growth_change: "{metric} for {scope} moved from {value_start} in {start} to {value_end} in {end}, a change of {change} ({change_pct}%)."
+    period_comparison: "{metric} for {scope}: {value_a} in {period_a} against {value_b} in {period_b}."
+
+    entity_detail: "{scope} sits in {block} block, {district} district, village code {village_code}."
+    lookup_list: "Matches for '{value}':"
+    entity_list: "{entity} in {scope}:"
+    year_list: "Financial years available: {years}."
+    coverage_statement: "{value} villages have {requested} recorded."
+
+    # ---- situations that need specific wording ---------------------------
+    stock_value: "{value} job cards issued as at {period}. This is a running total carried forward, not a figure for that year alone."
+    empty_result: "No {metric} recorded for {scope} in {period}."
+    all_zero_result: "{scope} recorded zero {metric} in {period}. The zero is a real recorded value, not missing data."
+    no_data_in_source: "{scope} has {available} recorded but no {requested}, so there is nothing to report rather than a zero."
+    partial_coverage: "{covered} of {requested_total} {entity} have {metric} recorded; the rest are not reported rather than zero."
+    unavailable_in_source: "{requested} is not held in this data."
+    entity_not_found: "'{value}' is not in the MGNREGA data. Closest matches: {suggestions}."
+    ambiguous_entity_resolved: "Read '{value}' as {resolved} in {district}. There are {count} places with that name."
+    period_trimmed: "Data runs from {first_period} to {last_period}, so the period was trimmed to {applied_range}."
+    permission_denied: "That level of detail is above your access. The finest level available to you is {allowed_level}."
+    execution_failed: "The query could not be completed. Please try a narrower period or a smaller area."
+
+    # ---- lines that travel alongside the answer --------------------------
+    unit_statement: "Amounts are in {unit} rupees."
+    assumption_prefix: "Assumed: {assumptions}."
+    data_quality_note: "Note on {period}: {year_note}"
+    partial_year_caveat: "2024-25 employment appears to be a partial extract, so figures for that year are lower than the trend would suggest."
+    women_definition_caveat: "The women's employment figure is shown as recorded. Its definition is unconfirmed, so no share or percentage is derived from it."
+    wage_floor_note: "The statutory floor for unskilled wages is 60% of total expenditure."
+    threshold_breach: "{scope} is below the {threshold} floor at {value}."
+    threshold_pass: "{scope} meets the {threshold} floor at {value}."
+    outlier_note: "{entity} is well clear of the rest and pulls the average up."
+    record_grain_note: "One village can hold more than one record in a year, so villages are counted by village code rather than by row."
+    nulls_excluded_note: "{excluded} records have no value recorded and are left out of the average rather than counted as zero."
+    excluded_rows_note: "{excluded} records with no constituency recorded are excluded from constituency totals."
+    constituency_scope_note: "Constituency is recorded for employment only; there is no expenditure at that level."
+    cross_measure_level_note: "Expenditure and employment are combined at district and year level, so this cannot be shown any finer."
+    region_expansion_note: "{region} covers {districts}."
+    wards_included_note: "Wards are counted alongside villages."
+    large_result: "Showing the first {shown} of {total} rows."
+
+  # =======================================================================
+  follow_up_rules:
+
+    # ---- move up or down the hierarchy ----------------------------------
+    - condition: "result_is_statewide"
+      suggestion: "Split this by district?"
+
+    - condition: "result_by_district"
+      suggestion: "Break this down by block?"
+
+    - condition: "result_by_block"
+      suggestion: "Break this down by village?"
+
+    - condition: "result_is_single_village"
+      suggestion: "Compare this against the rest of the block?"
+
+    - condition: "result_is_single_district"
+      suggestion: "See how this compares with the other districts?"
+
+    # ---- move across time -----------------------------------------------
+    - condition: "result_has_single_year"
+      suggestion: "Compare this against the previous year?"
+
+    - condition: "result_is_single_value"
+      suggestion: "See how this has moved across the four years?"
+
+    - condition: "result_is_time_series"
+      suggestion: "See which districts drove the change?"
+
+    - condition: "result_is_comparison"
+      suggestion: "See the same comparison for the other years?"
+
+    - condition: "result_includes_2024_25"
+      suggestion: "Exclude 2024-25, since that year looks like a partial extract?"
+
+    # ---- move across measures -------------------------------------------
+    - condition: "result_is_expenditure"
+      suggestion: "See the split between wages, material and tax?"
+
+    - condition: "result_is_expenditure_by_district"
+      suggestion: "Check the unskilled wage share against the 60% floor?"
+
+    - condition: "result_is_wage_share"
+      suggestion: "See the expenditure components behind that share?"
+
+    - condition: "result_is_person_days"
+      suggestion: "See the cost per person-day for the same period?"
+
+    - condition: "result_is_cost_per_person_day"
+      suggestion: "See the expenditure and person-days behind that rate separately?"
+
+    - condition: "result_is_employment_measure"
+      suggestion: "See how many households completed 100 days?"
+
+    - condition: "result_is_hundred_days"
+      suggestion: "See the person-days generated over the same period?"
+
+    - condition: "result_is_women_count"
+      suggestion: "See total persons employed for the same period?"
+
+    - condition: "result_is_job_card_stock"
+      suggestion: "See the stock for an earlier year?"
+
+    # ---- work with the list just returned --------------------------------
+    - condition: "result_is_ranked_list"
+      suggestion: "Would you like to see the lowest as well?"
+
+    - condition: "result_is_ranked_list_top_n"
+      suggestion: "See what share of the state total these account for?"
+
+    - condition: "result_has_tie"
+      suggestion: "Break the tie on a second measure?"
+
+    - condition: "result_has_outlier"
+      suggestion: "See the figures with that entry set aside?"
+
+    - condition: "result_row_count_exceeds_display"
+      suggestion: "Export the full list?"
+
+    # ---- recover from a thin or failed answer ----------------------------
+    - condition: "result_is_empty"
+      suggestion: "Try a wider period, or the district this village sits in?"
+
+    - condition: "result_is_all_zero"
+      suggestion: "Check a year when this village did record activity?"
+
+    - condition: "entity_not_found"
+      suggestion: "List the villages in that district instead?"
+
+    - condition: "entity_resolved_by_assumption"
+      suggestion: "Did you mean one of the others with that name?"
+
+    - condition: "result_has_partial_coverage"
+      suggestion: "See which of them have nothing recorded?"
+
+    - condition: "measure_unavailable_in_source"
+      suggestion: "See what is recorded for that area instead?"

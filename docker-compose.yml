@@ -1,0 +1,59 @@
+# Meghalaya NL Assistant — local / single-host stack.
+#
+#   docker compose build          # build the app image
+#   docker compose up -d          # run just the app (Postgres + Qwen gateway are remote)
+#   docker compose --profile local-infra up -d   # also run Qdrant + Redis locally
+#
+# The app reads its config from .env (same file the bare-metal deploy uses).
+# At minimum set DATABASE_URL, JWT_SECRET, ADMIN_TOKEN and the six model roles.
+# When running the local-infra profile, point QDRANT_URL at http://qdrant:6333
+# and REDIS_URL at redis://redis:6379/0 in .env.
+
+services:
+  nlp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: megh-nlp:latest
+    container_name: megh-nlp
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:8301:8300"
+        ## - "8300:8300"
+    volumes:
+      # Persist the JSONL audit mirror and uvicorn logs outside the container.
+      - ./logs:/opt/meghalaya/logs
+      # Keep the downloaded embedding model across container rebuilds.
+      - hf_cache:/opt/hf-cache
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8300/health', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+
+  # ── Optional local infra (opt in with: --profile local-infra) ──────────────
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: megh-qdrant
+    profiles: ["local-infra"]
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  redis:
+    image: redis:7-alpine
+    container_name: megh-redis
+    profiles: ["local-infra"]
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+
+volumes:
+  hf_cache:
+  qdrant_data:

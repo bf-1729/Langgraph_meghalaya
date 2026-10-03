@@ -1,0 +1,1085 @@
+schema_version: '2.0'
+schema_name: pmay_curated_semantic_schema
+display_name: PMAY-G Curated Star-Schema Semantic Schema (megh_db)
+
+# ===========================================================================
+# v2.0 - 2026-08-24 - REWRITTEN AGAINST THE LIVE DATABASE
+#
+# v1.0 described the flat Excel table `pmay_beneficiaries` (171,107 rows,
+# 18 columns, no joins). That table does not exist in megh_db. PMAY-G is now
+# loaded into the curated star schema and this file describes THAT.
+#
+# Authority: SCHEMA_FOR_DEVELOPERS.md, rewritten 2026-08-24 from the live
+# information_schema extract (data-1787574891914.csv).
+#
+# What moved:
+#   pmay_beneficiaries        -> curated.v_pmay (query here) over
+#                                curated.fact_pmay_house
+#   pmay_fy_summary           -> GONE. Financial year is now dim_year;
+#                                curated.v_pmay_monthly_sanctions is the
+#                                pre-aggregate, at MONTH grain, in crore.
+#   house_status              -> status_key -> dim_pmay_house_status.status_name
+#                                (+ is_completed / is_in_progress flags)
+#   installment_paid          -> installments_paid   (spelling changed)
+#   mapped_district_lgd_name  -> lgd_district
+#   mapped_block_lgd_name     -> lgd_block
+#   mapped_village_lgd_name   -> lgd_village_name
+#   mapped_village_lgd_code   -> village_code
+#   mapping_status            -> mapping_status_raw (fact) + mapping_category (view)
+#   beneficiary_name          -> DROPPED AT INGEST. Not in the curated layer.
+#   father_mother_name        -> DROPPED AT INGEST. Not in the curated layer.
+#   mapped_district_lgd_code  -> NO EQUIVALENT. dim_geography carries village_code
+#   mapped_block_lgd_code        only; district and block exist as NAMES, not codes.
+#
+# What is new and has no v1.0 counterpart:
+#   amount_pending            stored, no longer derived
+#   sanction_month            stored month truncation
+#   year_key / financial_year financial year is a real dimension now
+#   is_placeholder            rows that are not real houses
+#   completed_underfunded     completed but released < sanctioned
+#   mapping_confidence_pct    numeric confidence, not just a label
+#   on_roster                 geography roster membership
+#
+# PROVENANCE OF NUMBERS IN THIS FILE
+#   Column names, types, nullability, defaults, PKs, FKs  -> live DB, 2026-08-24. Trust.
+#   Record counts, distinct counts, value distributions   -> source workbook, 2026-08-21.
+#                                                            NOT re-verified against megh_db.
+#                                                            Marked `unverified_in_db: true`.
+#   No PMAY figure may be published until it is measured against the database.
+# ===========================================================================
+
+architecture_alignment:
+  schema_linking: Enriched table and column documents are embedded for scheme-partitioned Qdrant retrieval.
+  entity_resolution: Dimension catalogue plus approved aliases, RapidFuzz, and BGE-small fallback.
+  join_discovery: information_schema FKs plus SME-reviewed implicit FK YAML; LLM never invents joins.
+  sql_generation: Retrieved schema, resolved entities, graph-generated joins, and curated question-to-SQL examples.
+  safety: SQLGlot read-only validation, enforced LIMIT, SELECT-only database role.
+  observability: Inputs, outputs, rule firings, SQL, results, chart spec, and response are traceable.
+
+database:
+  name: megh_db
+  schema: curated
+  read_role: megh_readonly
+  primary_query_surface: curated.v_pmay
+  structure_verified: '2026-08-24'
+  volumes_verified: false
+
+datasets:
+
+  # =========================================================================
+  # PRIMARY QUERY SURFACE - query this, not the fact table
+  # =========================================================================
+  v_pmay:
+    table_name: curated.v_pmay
+    object_type: view
+    over: curated.fact_pmay_house
+    column_count: 28
+    grain: one row per sanctioned PMAY-G house
+    row_count: unverified_in_db
+    row_count_note: >
+      The source workbook held 171,107 rows. The curated row count has not been
+      measured. Do not quote a total until it is.
+    aggregate_before_reporting: false
+    grain_note: >
+      One row IS one house, so COUNT(*) is a house count with no prior aggregation
+      needed. This is the finest grain in megh_db and the only fact with a
+      within-year date.
+    money_unit: rupees
+    money_unit_authority: curated.dim_scheme.money_unit
+    columns:
+
+    # ---- keys -------------------------------------------------------------
+    - name: pmay_fact_id
+      source_column: fact_pmay_house.pmay_fact_id
+      meaning: Surrogate primary key of the PMAY house fact.
+      type: bigint
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [record id, row id, fact id]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - Not stable across a reload. Never export it or store it outside the database.
+
+    - name: source_house_id
+      source_column: fact_pmay_house.source_house_id
+      meaning: The source system's own house id, carried through for lineage.
+      type: integer
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [source id, original id, house id]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - This is the v1.0 `id` column. Queries written against the flat table map here.
+
+    - name: reg_no
+      source_column: fact_pmay_house.reg_no
+      meaning: PMAY beneficiary registration number.
+      type: varchar(30)
+      nullable: true
+      category: beneficiary_identifier
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT, COUNT DISTINCT]
+      synonyms: [registration number, registration no, beneficiary registration number, reg no]
+      sample_values: [MG123676572, MG123676931, MG123677458, MG123677709, MG145054254]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - NOT unique. 368 duplicates in the source workbook (unverified_in_db).
+      - Nullable in the curated layer. Handle NULL before using it as a lookup key.
+
+    - name: sanction_no
+      source_column: fact_pmay_house.sanction_no
+      meaning: PMAY house sanction reference number. One sanction order covers many houses.
+      type: varchar(60)
+      nullable: true
+      category: sanction_identifier
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT, COUNT DISTINCT]
+      synonyms: [sanction number, sanction no, sanction reference, sanction order]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - Strongly non-unique - a median of 2 houses per order, up to 322 (unverified_in_db).
+      - Sanction-level questions are GROUP BY sanction_no or COUNT(DISTINCT sanction_no).
+
+    # ---- time -------------------------------------------------------------
+    - name: year_key
+      source_column: fact_pmay_house.year_key
+      meaning: Financial-year key of the sanction, resolved against dim_year.
+      type: smallint
+      nullable: true
+      category: time_key
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [year key, financial year key]
+      business_rules:
+      - "CRITICAL: NULLABLE. A sanction outside FY 2022-23..2025-26 has no key."
+      - A bare GROUP BY year_key silently drops those rows. Count them before reporting any time series.
+      - Value is the FY start year - 2023 means FY 2023-24.
+
+    - name: financial_year
+      source_column: dim_year.financial_year
+      meaning: Canonical financial year of the sanction.
+      type: char(9)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [financial year, FY, fiscal year]
+      sample_values: ['2022-2023', '2023-2024', '2024-2025', '2025-2026']
+      business_rules:
+      - "NEW IN v2.0. Financial year is now a real column - do NOT derive it from sanction_date."
+      - The v1.0 rule 'no FY column exists, derive it inline' is OBSOLETE. Delete that SQL pattern.
+      - NULL wherever year_key is NULL.
+
+    - name: financial_year_short
+      source_column: dim_year.financial_year_short
+      meaning: Short form of the financial year.
+      type: char(7)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [FY short, financial year short]
+      sample_values: ['2022-23', '2023-24', '2024-25', '2025-26']
+      business_rules:
+      - Prefer this for display; prefer financial_year for canonical matching.
+
+    - name: sanction_date
+      source_column: fact_pmay_house.sanction_date
+      meaning: Date on which the house was sanctioned.
+      type: date
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, MIN, MAX]
+      synonyms: [sanction date, date sanctioned, house sanction date]
+      business_rules:
+      - The only true date in megh_db. Both MGNREGA facts are financial-year only.
+      - Use for exact-date and calendar-year questions.
+      - For financial-year questions use financial_year, NOT a derived CASE expression.
+      - NULL is missing. 126 dateless records in the source workbook (unverified_in_db).
+
+    - name: sanction_month
+      source_column: fact_pmay_house.sanction_month
+      meaning: Month truncation of sanction_date, stored.
+      type: date
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [sanction month, month, monthly]
+      business_rules:
+      - "NEW IN v2.0. GROUP BY sanction_month - never date_trunc('month', sanction_date)."
+      - Monthly analysis is possible for PMAY and impossible for MGNREGA. Do not offer it for MGNREGA.
+
+    # ---- geography --------------------------------------------------------
+    - name: geography_key
+      source_column: fact_pmay_house.geography_key
+      meaning: Surrogate key into the conformed geography dimension.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [geography key]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - NOT stable across a reload. Use village_code for anything leaving the database.
+
+    - name: village_code
+      source_column: fact_pmay_house.village_code
+      meaning: LGD village code - the national village identifier, denormalised onto the row.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [village code, LGD village code, mapped village code]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "VILLAGE IDENTITY. 198 village names are shared by two or more villages, so count villages with COUNT(DISTINCT village_code), never by name."
+      - Denormalised on the row - filter on it directly, no join to dim_geography needed.
+      - This is v1.0 `mapped_village_lgd_code`.
+
+    - name: lgd_village_name
+      source_column: dim_geography.lgd_village_name
+      meaning: LGD-standardised village name.
+      type: varchar(200)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [village, LGD village, mapped village, village name]
+      business_rules:
+      - Display and filter name. NOT an identity - see village_code.
+      - This is v1.0 `mapped_village_lgd_name`.
+
+    - name: lgd_block
+      source_column: dim_geography.lgd_block
+      meaning: LGD-standardised block name, uppercased in the dimension.
+      type: varchar(150)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [block, LGD block, mapped block, block name]
+      business_rules:
+      - "CASE CHANGED IN v2.0. dim_geography stores block UPPERCASED; the v1.0 flat table stored Title Case. Compare case-folded and emit the stored form."
+      - "NO BLOCK CODE EXISTS in the curated layer. v1.0 `mapped_block_lgd_code` has no equivalent - the block is a name only."
+      - 26 block names are also village names. Resolve the level before filtering.
+      - This is v1.0 `mapped_block_lgd_name`.
+
+    - name: lgd_district
+      source_column: dim_geography.lgd_district
+      meaning: LGD-standardised district name, uppercased in the dimension.
+      type: varchar(100)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [district, LGD district, mapped district, district name]
+      business_rules:
+      - "CASE CHANGED IN v2.0. dim_geography stores district UPPERCASED. Compare case-folded and emit the stored form."
+      - "NO DISTRICT CODE EXISTS in the curated layer. v1.0 `mapped_district_lgd_code` has no equivalent."
+      - 12 districts in Meghalaya.
+      - This is v1.0 `mapped_district_lgd_name`.
+
+    - name: on_roster
+      source_column: dim_geography.on_roster
+      meaning: Whether the village is in the official LGD roster or was only seen in a data file.
+      type: boolean
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [on roster, official village, in roster]
+      business_rules:
+      - NEW IN v2.0. Shared with MGNREGA through dim_geography.
+      - Off-roster villages are real; do not filter them out unless the question is about roster coverage.
+
+    # ---- construction status ---------------------------------------------
+    - name: status_key
+      source_column: fact_pmay_house.status_key
+      meaning: Key into the construction-status dimension.
+      type: smallint
+      nullable: true
+      category: status_key
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [status key]
+      business_rules:
+      - Identifier only. Prefer status_name for display and is_completed for filtering.
+      - NULL means no status recorded.
+
+    - name: status_name
+      source_column: dim_pmay_house_status.status_name
+      meaning: Recorded construction stage of the house.
+      type: varchar(60)
+      nullable: true
+      category: house_status_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [house status, construction status, house stage, construction stage, status]
+      sample_values: [Completed, Roof Cast, Plinth, House Sanctioned, 'Existing site(Old House)', Proposed Site]
+      business_rules:
+      - "RENAMED IN v2.0. This is v1.0 `house_status`. Every WHERE house_status = ... must become WHERE status_name = ..."
+      - The only authoritative construction stage. Never infer stage from amount_released or installments_paid.
+      - "For 'completed' prefer the is_completed flag over a string comparison."
+      - NULL is missing, not a stage. Exclude from status breakdowns and say so.
+
+    - name: is_completed
+      source_column: dim_pmay_house_status.is_completed
+      meaning: Precomputed roll-up flag - does this status mean the house is finished.
+      type: boolean
+      nullable: true
+      category: house_status_rollup
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [completed, finished, done, built, constructed]
+      business_rules:
+      - "NEW IN v2.0. Use this instead of status_name = 'Completed'."
+      - "NULLABLE. A status whose roll-up is undecided is NULL, not false."
+      - "WHERE is_completed excludes NULL correctly. `NOT is_completed` is NOT the complement - it also drops NULL. For 'not completed' write: (is_completed IS DISTINCT FROM TRUE)."
+
+    - name: is_in_progress
+      source_column: dim_pmay_house_status.is_in_progress
+      meaning: Precomputed roll-up flag - is the house under construction.
+      type: boolean
+      nullable: true
+      category: house_status_rollup
+      nlp_sql_priority: high
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [in progress, ongoing, under construction, work in progress]
+      business_rules:
+      - NEW IN v2.0. Replaces the v1.0 derived group `in_progress`.
+      - Same NULL caveat as is_completed.
+
+    # ---- allotment --------------------------------------------------------
+    - name: house_alloted_to
+      source_column: fact_pmay_house.house_alloted_to
+      meaning: Category/person relationship the house is allotted to.
+      type: varchar(40)
+      nullable: true
+      category: allotment_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [house allotted to, allotted to, ownership category, beneficiary category]
+      sample_values: ['Joint(Husband and Wife)', Woman-Married, Man, Woman-Widow, Woman-Unmarried, Self, Woman]
+      business_rules:
+      - Unchanged from v1.0 in name and stored values.
+      - "'Women' means ALL FOUR Woman-* categories - see the resolver's women_any group."
+      - Never infer gender or marital status beyond the stored category. There is no gender column.
+      - "NULLABLE in the curated layer (it was NOT NULL in the flat source). Handle NULL."
+
+    # ---- money ------------------------------------------------------------
+    - name: sanctioned_amount
+      source_column: fact_pmay_house.sanctioned_amount
+      meaning: Amount sanctioned for the house.
+      type: numeric(12)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [sanctioned amount, sanction amount, amount sanctioned, approved amount]
+      business_rules:
+      - "UNIT IS RUPEES. Divide by 1e7 for crore. Do not confuse with MGNREGA expenditure, which is LAKH."
+      - "Effectively a per-house constant (Rs 130,000 in the source workbook). A total-sanctioned question is a house-count question in disguise. WHETHER THE CONSTANT SURVIVED THE LOAD IS UNVERIFIED - check the distribution before relying on it."
+      - amount_released is the measure that actually varies.
+
+    - name: amount_released
+      source_column: fact_pmay_house.amount_released
+      meaning: Amount released to the beneficiary against the sanction.
+      type: numeric(12)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [amount released, released amount, funds released, payment released, disbursed]
+      business_rules:
+      - UNIT IS RUPEES. Divide by 1e7 for crore.
+      - The default measure for a bare 'amount' question.
+      - NULL is missing, never zero. AVG ignores NULL correctly; SUM treats it as absent.
+
+    - name: amount_pending
+      source_column: fact_pmay_house.amount_pending
+      meaning: Amount sanctioned but not yet released.
+      type: numeric(12)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [pending amount, unreleased amount, outstanding, balance, not yet released]
+      business_rules:
+      - "NEW IN v2.0 AND STORED. Do NOT derive it as sanctioned_amount - amount_released any more. That v1.0 pattern is OBSOLETE."
+      - UNIT IS RUPEES.
+      - "Do not confuse with 'pending houses', which means construction not completed - that is is_completed, not money."
+
+    - name: installments_paid
+      source_column: fact_pmay_house.installments_paid
+      meaning: Number of installments recorded as paid.
+      type: smallint
+      nullable: true
+      category: payment_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX, WHERE, GROUP BY]
+      synonyms: [installments paid, installment count, number of installments, payments made]
+      business_rules:
+      - "RENAMED IN v2.0 - was `installment_paid` (singular). Every reference must be updated."
+      - "'How many houses received 3 installments' is COUNT(*) WHERE installments_paid = 3, not SUM."
+      - "'Total installments' is SUM(installments_paid)."
+      - NULL is missing, never zero.
+
+    # ---- mapping quality --------------------------------------------------
+    - name: mapping_category
+      source_column: fact_pmay_house.mapping_category
+      meaning: Bucketed LGD mapping quality.
+      type: varchar(20)
+      nullable: true
+      category: mapping_quality_metadata
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [mapping category, mapping quality, match quality]
+      business_rules:
+      - "NEW IN v2.0. This replaces LIKE 'Fuzzy Mapped%' against the 44 raw labels - filter on this instead."
+      - The raw label survives as fact_pmay_house.mapping_status_raw, which the view does NOT expose.
+      - Low-confidence rows are still real houses; they are only less certain about WHERE.
+      - Never a grouping key unless the question is about mapping confidence.
+
+    - name: mapping_confidence_pct
+      source_column: fact_pmay_house.mapping_confidence_pct
+      meaning: Numeric confidence of the LGD mapping.
+      type: numeric(5)
+      nullable: true
+      category: mapping_quality_metadata
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, AVG, MIN, MAX]
+      synonyms: [mapping confidence, match confidence, confidence]
+      business_rules:
+      - NEW IN v2.0. The confidence is now a number, not embedded in a label string.
+      - Report it when a geography-sensitive answer rests on fuzzy-mapped rows.
+
+    # ---- data-quality flags ------------------------------------------------
+    - name: is_placeholder
+      source_column: fact_pmay_house.is_placeholder
+      meaning: The row is a placeholder, not a real sanctioned house.
+      type: boolean
+      nullable: false
+      default: false
+      category: data_quality_flag
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [placeholder, not a real house, dummy record]
+      business_rules:
+      - "NEW IN v2.0 AND CRITICAL. Exclude with `WHERE NOT is_placeholder` from EVERY count and EVERY sum."
+      - The only exception is a question explicitly about data completeness.
+      - NOT NULL, so a plain boolean test is safe here.
+
+    - name: completed_underfunded
+      source_column: fact_pmay_house.completed_underfunded
+      meaning: House recorded complete although released is less than sanctioned.
+      type: boolean
+      nullable: false
+      default: false
+      category: data_quality_flag
+      nlp_sql_priority: high
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [completed underfunded, complete but underpaid, short released]
+      business_rules:
+      - NEW IN v2.0. A real finding about the data, not a defect to filter away.
+      - Surface the count whenever a question touches completion or disbursement.
+      - NOT NULL, so a plain boolean test is safe here.
+
+  # =========================================================================
+  # UNDERLYING FACT - documented for lineage; query v_pmay instead
+  # =========================================================================
+  fact_pmay_house:
+    table_name: curated.fact_pmay_house
+    object_type: table
+    column_count: 26
+    grain: one row per sanctioned PMAY-G house
+    primary_key: pmay_fact_id
+    row_count: unverified_in_db
+    query_preference: >
+      Use curated.v_pmay. It pre-joins dim_year, dim_geography, dim_scheme and
+      dim_pmay_house_status, so the generator never has to emit those joins.
+    foreign_keys:
+    - {column: scheme_key,    references: curated.dim_scheme.scheme_key,                declared: true, nullable: false}
+    - {column: year_key,      references: curated.dim_year.year_key,                    declared: true, nullable: true}
+    - {column: geography_key, references: curated.dim_geography.geography_key,          declared: true, nullable: false}
+    - {column: status_key,    references: curated.dim_pmay_house_status.status_key,     declared: true, nullable: true}
+    - {column: raw_id,        references: raw.source_rows.raw_id,                       declared: true, nullable: true}
+    columns_not_in_v_pmay:
+    - name: scheme_key
+      meaning: FK to dim_scheme. Constant for this partition.
+      business_rules: [Never a grouping key within PMAY - it has one value.]
+    - name: mapping_status_raw
+      type: varchar(60)
+      meaning: The LGD mapping status label exactly as recorded, 44 distinct labels in the source.
+      business_rules:
+      - Prefer mapping_category. Reach for this only when the user asks for the raw label.
+    - name: raw_id
+      meaning: FK to raw.source_rows for full lineage back to the source cell.
+      business_rules: [Not readable by megh_readonly - raw is outside the read boundary.]
+    - name: source_row_num
+      meaning: Audit.
+    - name: batch_id
+      type: uuid
+      meaning: Audit - the load batch.
+    - name: source_system
+      type: varchar(50)
+      default: "'pmay'"
+      meaning: Audit - constant 'pmay' for this partition.
+    - name: ingested_at
+      type: timestamptz
+      meaning: Audit.
+    dropped_at_ingest:
+    - column: beneficiary_name
+      reason: >
+        Personal name. Not carried into the curated layer. Any v1.0 SQL or template
+        that selects it will fail. Do not build a beneficiary-lookup feature.
+    - column: father_mother_name
+      reason: Personal name. Not carried into the curated layer.
+
+  # =========================================================================
+  # DIMENSIONS
+  # =========================================================================
+  dim_pmay_house_status:
+    table_name: curated.dim_pmay_house_status
+    object_type: table
+    column_count: 5
+    grain: one row per construction stage
+    primary_key: status_key
+    scheme_scoped: true
+    columns:
+    - {name: status_key,   type: smallint,    nullable: false, meaning: PK.}
+    - {name: status_name,  type: varchar(60), nullable: false, meaning: The stage as recorded.}
+    - {name: is_completed, type: boolean,     nullable: true,  meaning: Roll-up - the house is finished.}
+    - {name: is_in_progress, type: boolean,   nullable: true,  meaning: Roll-up - the house is under construction.}
+    - {name: created_at,   type: timestamptz, nullable: false, meaning: Audit.}
+    business_rules:
+    - Pre-joined into v_pmay. Do not join it yourself.
+    - Both flags are NULLABLE - an undecided roll-up is NULL, not false.
+    - The stage ordering used for charts lives in the resolver, not here.
+
+  dim_scheme:
+    table_name: curated.dim_scheme
+    object_type: table
+    column_count: 8
+    grain: one row per scheme
+    primary_key: scheme_key
+    shared_across_schemes: true
+    columns:
+    - {name: scheme_key,     type: smallint,     nullable: false, meaning: PK.}
+    - {name: scheme_code,    type: varchar(20),  nullable: false, meaning: Short scheme code.}
+    - {name: scheme_name,    type: text,         nullable: false, meaning: Full scheme name.}
+    - {name: ministry,       type: varchar(100), nullable: true,  meaning: Owning ministry.}
+    - {name: grain_note,     type: text,         nullable: false, meaning: What one fact row means for this scheme.}
+    - {name: money_unit,     type: varchar(20),  nullable: false, meaning: The scheme's money unit.}
+    - {name: time_semantics, type: text,         nullable: false, meaning: What the year on a row means.}
+    - {name: created_at,     type: timestamptz,  nullable: false, meaning: Audit.}
+    business_rules:
+    - "AUTHORITY ON MONEY UNIT. Read money_unit rather than hardcoding 'rupees' - three units are live across megh_db."
+    - "time_semantics distinguishes PMAY's sanction financial year from MGNREGA's reporting year. Carry it into comparative answers."
+    - Only fact_pmay_house carries a scheme_key FK. The MGNREGA facts identify their scheme through a source_system default.
+
+  dim_year:
+    table_name: curated.dim_year
+    object_type: table
+    column_count: 9
+    row_count: 4
+    grain: one row per financial year
+    primary_key: year_key
+    shared_across_schemes: true
+    coverage: FY 2022-23 through FY 2025-26
+    business_rules:
+    - "REPLACES the v1.0 rule that PMAY has no financial-year dimension. It has one now."
+    - Pre-joined into v_pmay as financial_year and financial_year_short.
+    - "Only 4 years exist. A PMAY sanction outside that window loads with year_key NULL - it is NOT dropped, it is unresolved."
+    - data_quality_note on a year must be surfaced with any answer covering that year.
+
+  dim_geography:
+    table_name: curated.dim_geography
+    object_type: table
+    column_count: 13
+    row_count: 7364
+    grain: one row per LGD village or ward
+    primary_key: geography_key
+    natural_key: village_code
+    shared_across_schemes: true
+    business_rules:
+    - "CONFORMED WITH MGNREGA. This is what makes cross-scheme comparison possible at all."
+    - Pre-joined into v_pmay. Do not join it yourself.
+    - District and block exist as NAMES only - there is no district or block LGD code column.
+    - "Names are stored UPPERCASE for block and district. The v1.0 'every value is Title Case' rule does not hold here."
+    - 16 villages carry has_geo_conflict = TRUE, resolved to the roster value.
+    - PMAY does NOT use dim_geography_alias. It has no alias_key.
+
+  # =========================================================================
+  # PRE-AGGREGATES AND CROSS-SCHEME VIEWS - read, never join
+  # =========================================================================
+  v_pmay_monthly_sanctions:
+    table_name: curated.v_pmay_monthly_sanctions
+    object_type: view
+    column_count: 4
+    grain: one row per sanction month, statewide
+    aggregate_before_reporting: false
+    money_unit: crore_rupees
+    replaces: pmay_fy_summary
+    columns:
+    - {name: sanction_month,    type: date,    meaning: The month.}
+    - {name: houses_sanctioned, type: bigint,  meaning: Houses sanctioned that month.}
+    - {name: sanctioned_cr,     type: numeric, unit: crore_rupees, meaning: Sanctioned amount that month.}
+    - {name: released_cr,       type: numeric, unit: crore_rupees, meaning: Released amount that month.}
+    business_rules:
+    - "ALREADY AGGREGATED AND ALREADY IN CRORE. Never SUM its money columns against the RUPEE columns of v_pmay."
+    - "NO GEOGRAPHY BREAKDOWN. Statewide only. For district-level money use v_cross_scheme_money_district_year."
+    - Read it or ignore it, never join it to v_pmay - that repeats every monthly figure once per house.
+    - "Replaces the v1.0 pmay_fy_summary, which does not exist in megh_db. Grain changed from financial year to MONTH."
+
+  v_cross_scheme_money_district_year:
+    table_name: curated.v_cross_scheme_money_district_year
+    object_type: view
+    column_count: 6
+    grain: one row per scheme x district x financial year
+    money_unit: crore_rupees
+    cross_scheme: true
+    columns:
+    - {name: scheme_code,           type: text,         meaning: Which scheme the row is for.}
+    - {name: year_key,              type: smallint,     meaning: Financial year key.}
+    - {name: financial_year_short,  type: char(7),      meaning: Financial year, display form.}
+    - {name: lgd_district,          type: varchar(100), meaning: District.}
+    - {name: amount_crore,          type: numeric,      unit: crore_rupees, meaning: The scheme's amount for that district-year.}
+    - {name: measure_semantics,     type: text,         meaning: What the amount actually means for that scheme.}
+    business_rules:
+    - "THE ONLY SANCTIONED WAY to compare PMAY and MGNREGA money. Both sides normalised to crore."
+    - "CRITICAL: the two amounts are NOT the same kind of number - MGNREGA is expenditure incurred, PMAY is money released against sanctions. ALWAYS carry measure_semantics into the answer. A bare 'MGNREGA vs PMAY spend' comparison without it is misleading."
+    - Long format - filter scheme_code = the PMAY code for PMAY-only questions, though v_pmay is better for those.
+
+  v_cross_scheme_village_coverage:
+    table_name: curated.v_cross_scheme_village_coverage
+    object_type: view
+    column_count: 4
+    grain: one row per village
+    cross_scheme: true
+    columns:
+    - {name: village_code,        type: integer,      meaning: LGD village code.}
+    - {name: lgd_district,        type: varchar(100), meaning: District.}
+    - {name: pmay_houses,         type: bigint,       meaning: PMAY houses in that village.}
+    - {name: mgnrega_person_days, type: bigint,       meaning: MGNREGA person-days in that village.}
+    business_rules:
+    - Answers 'which villages get both schemes / only one' with no fact-to-fact join.
+    - Expect NULL on either measure - that is the finding, not a defect.
+
+# ===========================================================================
+semantic_rules:
+
+  geography_hierarchy:
+  - lgd_district
+  - lgd_block
+  - lgd_village_name
+
+  geography_codes:
+  - village_code
+  geography_codes_note: >
+    v1.0 listed three codes. Only the village code survives into the curated layer.
+    District and block have no code column - they are names on dim_geography.
+    A question asking for a district or block LGD code cannot be answered.
+
+  time_dimension: sanction_date
+  time_dimensions_available: [financial_year, financial_year_short, year_key, sanction_date, sanction_month]
+  time_runtime_rule: >
+    v2.0 CHANGE. A financial-year question uses the stored financial_year column.
+    Do NOT derive the financial year from sanction_date with a CASE expression -
+    that v1.0 pattern is obsolete. Use sanction_date for calendar-year and exact-date
+    questions, sanction_month for monthly grouping, financial_year for FY grouping.
+  time_null_rule: >
+    year_key, financial_year and sanction_date are all nullable. A GROUP BY on any of
+    them drops the unresolved rows silently. Count them and say so.
+
+  beneficiary_term:
+    status: DEFINED_AS_HOUSE_COUNT
+    reason: >
+      v2.0 CHANGE. The curated grain is one row per HOUSE, and the beneficiary name
+      columns were dropped at ingest. 'Beneficiary' can no longer mean a named person -
+      it means a house record.
+    runtime_behavior: >
+      For 'how many beneficiaries' use COUNT(*) with NOT is_placeholder, and state that
+      the answer is a house count.
+    distinct_behavior: >
+      Use COUNT(DISTINCT reg_no) only when the user asks for distinct/unique
+      registrations. reg_no is nullable in the curated layer, so distinct counts exclude
+      NULL - say so.
+    name_lookup: >
+      NOT POSSIBLE. beneficiary_name and father_mother_name are not in the curated
+      layer. A name lookup must return 'not held in this data', never an improvised join.
+
+  financial_measures:
+    sanctioned_amount: SUM(sanctioned_amount) - rupees.
+    amount_released: SUM(amount_released) - rupees. Default for a bare 'amount'.
+    amount_pending: SUM(amount_pending) - rupees. STORED, not derived.
+    obsolete_derivation: >
+      v1.0 told the generator to compute sanctioned_amount - amount_released for a
+      pending-amount question. amount_pending is now a stored column. Do not derive it.
+    unit_rule: >
+      v_pmay is in RUPEES. v_pmay_monthly_sanctions and v_cross_scheme_money_district_year
+      are in CRORE. MGNREGA expenditure is in LAKH. Three units are live at once - read
+      dim_scheme.money_unit and state the unit in every answer.
+
+  house_status_dimension: status_name
+  house_status_rollups: [is_completed, is_in_progress]
+  house_status_rule: >
+    Prefer the boolean roll-ups over string comparison. is_completed and is_in_progress
+    are NULLABLE, so `NOT is_completed` is not the complement of `is_completed` -
+    for 'not completed' write (is_completed IS DISTINCT FROM TRUE).
+
+  allotment_dimension: house_alloted_to
+
+  mapping_quality_dimension: mapping_category
+  mapping_quality_raw: fact_pmay_house.mapping_status_raw
+  mapping_quality_rule: >
+    v2.0 CHANGE. Filter on mapping_category, not LIKE 'Fuzzy Mapped%'. The 44 raw
+    labels survive only on the fact table, which the view does not expose.
+
+  placeholder_rule:
+    critical: true
+    text: >
+      is_placeholder = TRUE rows are not real houses. Every count and every sum must
+      carry WHERE NOT is_placeholder unless the question is explicitly about data
+      completeness. This has no v1.0 counterpart - the flat table had no such flag.
+
+  underfunded_rule: >
+    completed_underfunded marks houses recorded complete with released < sanctioned.
+    Surface the count when a question touches completion or disbursement. It is a
+    finding, not noise.
+
+  null_behavior: NULL is missing; never silently coerce NULL to zero.
+
+  identifier_behavior:
+  - pmay_fact_id and source_house_id are technical identifiers.
+  - reg_no is a beneficiary registration identifier and is NOT unique.
+  - sanction_no is a sanction identifier and is strongly NOT unique.
+  - village_code and geography_key are geographic identifiers.
+  - status_key, year_key and scheme_key are dimension keys.
+  - Identifiers and keys must never be SUMed or AVGed.
+  - geography_key and pmay_fact_id are unstable across a reload - never export them.
+
+# ===========================================================================
+nlp_sql_rules:
+  read_only: true
+  allowed_operations: [SELECT]
+  default_from: curated.v_pmay
+
+  aggregation_defaults:
+    houses: COUNT(*)
+    records: COUNT(*)
+    distinct_registrations: COUNT(DISTINCT reg_no)
+    sanctioned_amount: SUM(sanctioned_amount)
+    amount_released: SUM(amount_released)
+    amount_pending: SUM(amount_pending)
+    installments_paid: SUM(installments_paid)
+    average_sanctioned_amount: AVG(sanctioned_amount)
+    average_amount_released: AVG(amount_released)
+    completed_houses: COUNT(*) FILTER (WHERE is_completed)
+    distinct_villages: COUNT(DISTINCT village_code)
+
+  mandatory_predicate:
+    clause: NOT is_placeholder
+    applies_to: every count and every sum over v_pmay
+    exception: questions explicitly about data completeness or placeholder rows
+
+  date_behavior: >
+    A financial-year request filters or groups financial_year / financial_year_short.
+    A calendar-year request filters sanction_date on a calendar range. A monthly request
+    groups sanction_month. Never derive a financial year with a CASE expression.
+
+  comparison: >
+    Filter the requested period and GROUP BY the requested time dimension; preserve the
+    distinction between calendar-year, financial-year and exact-date questions.
+
+  ranking: >
+    ORDER BY the requested aggregate and default top 5 when N is omitted for plural
+    'top' requests; singular 'highest/lowest' uses LIMIT 1.
+
+  entity_behavior: >
+    Resolve exact district, block, village, status, allotment category and registration
+    values using canonical stored values and approved aliases before SQL generation.
+    Note that district and block are stored UPPERCASE in dim_geography.
+
+  unknown_entity: Do not guess; return not-found/did-you-mean.
+
+  join_behavior: >
+    v2.0 CHANGE. PMAY is a star schema now, but v_pmay pre-joins every dimension, so the
+    generator should still emit no joins for ordinary questions. Never join v_pmay to
+    v_pmay_monthly_sanctions, and never join fact_pmay_house to either MGNREGA fact -
+    see pmay_foreign_key_augmentation.yaml.
+
+  cross_scheme_behavior: >
+    v2.0 CHANGE. Cross-scheme questions are now answerable. Use
+    v_cross_scheme_money_district_year for money and v_cross_scheme_village_coverage for
+    coverage. Always carry measure_semantics into a money comparison. Never join the
+    facts directly.
+
+  money_behavior: >
+    v_pmay is rupees. Convert explicitly and state the unit. Divide by 1e7 for crore.
+    Do not mix a rupee figure with a crore figure from the pre-aggregate views.
+
+  beneficiary_count_behavior: >
+    COUNT(*) is a house count. COUNT(DISTINCT reg_no) is required for explicitly
+    unique/distinct registration questions. A beneficiary NAME question cannot be
+    answered - the columns were dropped at ingest.
+
+# ===========================================================================
+few_shot_examples:
+
+- question: How many PMAY houses are there?
+  explanation: One row is one house. Placeholders are excluded from every count.
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+
+- question: How many distinct beneficiaries are there?
+  explanation: reg_no is the registration identifier and repeats, so a distinct-beneficiary request uses COUNT(DISTINCT reg_no). It is nullable, so NULLs are excluded.
+  sql: |
+    SELECT COUNT(DISTINCT reg_no) AS distinct_registrations
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+
+- question: How many PMAY houses are there in West Garo Hills?
+  explanation: District is a name on dim_geography, pre-joined into the view and stored uppercase.
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'WEST GARO HILLS';
+
+- question: How many houses were completed?
+  explanation: Use the precomputed is_completed roll-up rather than comparing status_name to a string.
+  sql: |
+    SELECT COUNT(*) AS completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_completed;
+
+- question: How many houses are not completed?
+  explanation: is_completed is nullable, so NOT is_completed would also drop the undecided rows. IS DISTINCT FROM TRUE keeps them.
+  sql: |
+    SELECT COUNT(*) AS not_completed
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_completed IS DISTINCT FROM TRUE;
+
+- question: How many houses are at plinth stage in Ri Bhoi?
+  explanation: Plinth has no boolean roll-up of its own, so filter status_name on the exact stored stage.
+  sql: |
+    SELECT COUNT(*) AS plinth_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'RI BHOI'
+      AND status_name = 'Plinth';
+
+- question: What is the total amount released in FY 2023-24?
+  explanation: Financial year is a stored column now. Money is rupees in this view, so convert to crore explicitly.
+  sql: |
+    SELECT ROUND(SUM(amount_released) / 1e7, 2) AS released_cr
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND financial_year_short = '2023-24';
+
+- question: What is the total amount released in calendar year 2023?
+  explanation: A calendar-year request filters sanction_date on a date range, which is a different answer from the financial year.
+  sql: |
+    SELECT ROUND(SUM(amount_released) / 1e7, 2) AS released_cr
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date >= DATE '2023-01-01'
+      AND sanction_date <  DATE '2024-01-01';
+
+- question: How much sanctioned amount has not yet been released?
+  explanation: amount_pending is stored in v2.0. Do not derive it from sanctioned_amount minus amount_released.
+  sql: |
+    SELECT ROUND(SUM(amount_pending) / 1e7, 2) AS pending_cr
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+
+- question: How many houses received 3 installments?
+  explanation: The question counts houses matching an installment count, so COUNT(*) rather than SUM(installments_paid).
+  sql: |
+    SELECT COUNT(*) AS houses_with_three_installments
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND installments_paid = 3;
+
+- question: How many houses went to women?
+  explanation: Women means all four Woman-* categories. Joint allotments are excluded here and should be offered separately.
+  sql: |
+    SELECT COUNT(*) AS houses_to_women
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND house_alloted_to IN ('Woman-Married','Woman-Widow','Woman-Unmarried','Woman');
+
+- question: Which district has the highest number of completed houses?
+  explanation: Singular superlative, so group by district, order descending and LIMIT 1.
+  sql: |
+    SELECT lgd_district, COUNT(*) AS completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_completed
+    GROUP BY lgd_district
+    ORDER BY completed_houses DESC
+    LIMIT 1;
+
+- question: Top 5 blocks by total amount released
+  explanation: No N supplied, so the ranking rule defaults to top 5.
+  sql: |
+    SELECT lgd_block, ROUND(SUM(amount_released) / 1e7, 2) AS released_cr
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_block
+    ORDER BY released_cr DESC
+    LIMIT 5;
+
+- question: How many distinct villages have PMAY houses in South Garo Hills?
+  explanation: Village identity is the LGD code, never the name - 198 names are shared.
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'SOUTH GARO HILLS';
+
+- question: Show PMAY houses in Ambare Ading village
+  explanation: Beneficiary names are not in the curated layer, so the detail list is registration, sanction, money and stage.
+  sql: |
+    SELECT reg_no, sanction_no, sanction_date, sanctioned_amount,
+           amount_released, amount_pending, status_name
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_village_name = 'Ambare Ading'
+    LIMIT 100;
+
+- question: Find the house with registration number MG123676572
+  explanation: reg_no is the registration identifier and repeats, so more than one row can come back.
+  sql: |
+    SELECT reg_no, sanction_no, sanction_date, lgd_district, lgd_block,
+           lgd_village_name, status_name, sanctioned_amount, amount_released
+    FROM curated.v_pmay
+    WHERE reg_no = 'MG123676572'
+    LIMIT 10;
+
+- question: How many houses were sanctioned each month?
+  explanation: The monthly pre-aggregate is already grouped and already in crore. Read it; never join it to the detail view.
+  sql: |
+    SELECT sanction_month, houses_sanctioned, sanctioned_cr, released_cr
+    FROM curated.v_pmay_monthly_sanctions
+    ORDER BY sanction_month;
+
+- question: Show PMAY sanctions by month from the detail records
+  explanation: sanction_month is stored on the row, so group on it directly rather than truncating the date.
+  sql: |
+    SELECT sanction_month, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_month IS NOT NULL
+    GROUP BY sanction_month
+    ORDER BY sanction_month;
+
+- question: How many houses are completed but underfunded?
+  explanation: The flag is precomputed. Report it as a finding rather than filtering it away.
+  sql: |
+    SELECT COUNT(*) AS completed_underfunded_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND completed_underfunded;
+
+- question: How many PMAY houses could not be matched to a financial year?
+  explanation: year_key is nullable, so these rows vanish from any time series. Count them before reporting one.
+  sql: |
+    SELECT COUNT(*) AS houses_without_financial_year
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND year_key IS NULL;
+
+- question: How many houses are on low-confidence geography mappings?
+  explanation: mapping_category buckets the 44 raw labels. Low-confidence rows are real houses, less certain about where.
+  sql: |
+    SELECT mapping_category, COUNT(*) AS houses,
+           ROUND(AVG(mapping_confidence_pct), 1) AS avg_confidence_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY mapping_category
+    ORDER BY houses DESC;
+
+- question: Compare PMAY and MGNREGA spending by district for 2024-25
+  explanation: The cross-scheme view is the only sanctioned comparison. measure_semantics must travel into the answer because the two amounts mean different things.
+  sql: |
+    SELECT lgd_district, scheme_code, amount_crore, measure_semantics
+    FROM curated.v_cross_scheme_money_district_year
+    WHERE financial_year_short = '2024-25'
+    ORDER BY lgd_district, scheme_code;
+
+- question: Which villages have PMAY houses but no MGNREGA activity?
+  explanation: The coverage view aggregates each scheme independently, so no fact-to-fact join is needed.
+  sql: |
+    SELECT village_code, lgd_district, pmay_houses
+    FROM curated.v_cross_scheme_village_coverage
+    WHERE pmay_houses > 0
+      AND (mgnrega_person_days IS NULL OR mgnrega_person_days = 0)
+    ORDER BY pmay_houses DESC;
+
+- question: What is the sanctioned amount per house?
+  explanation: Effectively a constant in the source workbook, but that has not been re-verified in the database. Show the distribution rather than asserting one figure.
+  sql: |
+    SELECT sanctioned_amount, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY sanctioned_amount
+    ORDER BY houses DESC;
+
+# ---- questions that must be refused -----------------------------------
+- question: What is the name of the beneficiary with registration MG123676572?
+  explanation: >
+    beneficiary_name and father_mother_name were dropped at ingest and are not in the
+    curated layer. There is no join that recovers them. Return 'not held in this data'.
+  sql: null
+
+- question: What is the LGD code of East Khasi Hills district?
+  explanation: >
+    dim_geography carries village_code only. District and block exist as names, with no
+    code column. The v1.0 mapped_district_lgd_code and mapped_block_lgd_code have no
+    equivalent in the curated layer.
+  sql: null
+
+- question: What is the total of all village LGD codes in Meghalaya?
+  explanation: >
+    LGD codes are identifiers, not measures. SUM on village_code is semantically invalid.
+    Decline and offer COUNT(DISTINCT village_code) instead.
+  sql: null
+
+- question: Update the sanctioned amount for a PMAY house
+  explanation: The read role permits SELECT only. Refuse rather than translating into write SQL.
+  sql: null
+
+- question: What was the administrative expenditure under PMAY?
+  explanation: >
+    PMAY holds sanction, payment, construction, allotment and geography fields. There is
+    no administrative-expenditure column. Do not invent one, and do not borrow the
+    MGNREGA admin columns - they belong to a different scheme and a different unit.
+  sql: null
+
+- question: What is the total expenditure for PMAY?
+  explanation: >
+    There is no generic expenditure column. The stored financial measures are
+    sanctioned_amount, amount_released and amount_pending. Ask which one is meant rather
+    than silently choosing.
+  sql: null
+
+- question: Show me MGNREGA person-days for the villages in this PMAY result
+  explanation: >
+    A row-level join from fact_pmay_house to either MGNREGA fact is prohibited - house
+    grain against village-year grain multiplies both sides. Use
+    v_cross_scheme_village_coverage instead.
+  sql: null

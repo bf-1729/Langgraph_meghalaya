@@ -1,0 +1,381 @@
+# pmay_classification_rules.yaml
+#
+# ===========================================================================
+# v2.0 - 2026-08-24 - RETARGETED TO THE CURATED STAR SCHEMA
+#
+# Most of this file survives unchanged: a clarification gate asks about the
+# USER'S INTENT, and intent did not change when the storage did. Four groups of
+# conditions did change, and they are marked v2_note below:
+#
+#   1. Everything about BENEFICIARY AND PARENT NAMES is retired. Those columns
+#      were dropped at ingest, so questions that offered a name search as an
+#      alternative now have nothing to offer.
+#   2. Conditions citing house_status now cite the construction status dimension.
+#   3. Conditions citing the 44 raw mapping labels now cite mapping_category.
+#   4. NEW conditions were added for placeholder rows, the nullable financial
+#      year, and cross-scheme comparison - none of which could arise in v1.0.
+#
+# Every count in a question below is a source-workbook figure (2026-08-21) and
+# has NOT been re-measured against megh_db.
+# ===========================================================================
+# Clarification rules for PMAY-G. First rule that fires wins; its question is asked
+# and the pipeline pauses. Editable by analysts - no code change needed.
+# {placeholders} are filled from the user's query at runtime.
+# Order matters: requests the source cannot answer are caught before missing detail
+# is asked for, so the bot never collects details for a question it cannot answer.
+# Conditions already filled silently by pmay_default_rules.yaml are absent here.
+
+clarification_rules:
+
+  # ---- the source cannot answer this at all -----------------------------
+  - condition: "pmay_urban_requested"
+    question: "This data covers PMAY-Gramin only - urban housing is not held. Shall I answer for rural PMAY-G?"
+
+  - condition: "other_state_comparison_requested"
+    question: "Only Meghalaya is held here, so other states cannot be compared. Shall I compare districts within Meghalaya instead?"
+
+  - condition: "administrative_expenditure_requested"
+    question: "Administrative and programme expenditure are not held - only the per-house sanctioned and released amounts. Did you mean amount released?"
+
+  - condition: "centre_state_share_requested"
+    question: "The centre-state funding split is not held - the data records one flat sanctioned amount per house. Shall I report the total released instead?"
+
+  - condition: "material_labour_cost_split_requested"
+    question: "There is no material or labour breakdown - PMAY-G pays a flat unit assistance per house. Did you mean the installments released?"
+
+  - condition: "budget_or_target_requested"
+    question: "Targets, allocations and sanctioned budgets are not held - only houses actually sanctioned. Shall I report houses sanctioned instead?"
+
+  - condition: "saturation_or_coverage_requested"
+    question: "Total households and eligible families are not held, so coverage or saturation cannot be calculated. Would houses per village work instead?"
+
+  - condition: "per_capita_requested"
+    question: "Population figures are not held here, so per-capita cannot be calculated. Would houses per village work instead?"
+
+  - condition: "beneficiary_income_or_caste_requested"
+    question: "Income, caste, SECC category and BPL status are not held. The only beneficiary category recorded is who the house is allotted to - woman, man or joint. Shall I use that?"
+
+  - condition: "gender_column_requested"
+    question: "There is no gender column - only the allotment category, which covers Woman-Married, Woman-Widow, Woman-Unmarried, Woman, Man and Joint. Shall I use that?"
+
+  - condition: "age_or_disability_requested"
+    question: "Age, disability and PWD status are not held. Shall I answer on allotment category instead?"
+
+  - condition: "land_ownership_requested"
+    question: "Land ownership and plot details are not held. The closest recorded value is the 'Existing site(Old House)' stage on 73 records - did you mean that?"
+
+  - condition: "house_specification_requested"
+    question: "Plinth area, house type, room count and cost estimates are not held. Did you mean the construction stage recorded in house status?"
+
+  - condition: "convergence_benefits_requested"
+    question: "Toilet, LPG, electricity, water and MGNREGA convergence are not held in this data. Shall I answer on houses and payments only?"
+
+  - condition: "geotag_or_inspection_requested"
+    question: "Geotagged photographs, inspections and site verification are not held. The only progress field is house status - shall I use it?"
+
+  - condition: "grievance_status_requested"
+    question: "Grievances, appeals and complaints are not held. Shall I answer on house status and payments instead?"
+
+  - condition: "contractor_or_agency_requested"
+    question: "Implementing agency, contractor and mason details are not held. Shall I answer on the beneficiary and house records?"
+
+  - condition: "waitlist_or_selection_requested"
+    question: "The permanent waitlist and selection process are not held - only houses already sanctioned. Shall I report sanctioned houses?"
+
+  - condition: "cancelled_or_rejected_houses_requested"
+    question: "Cancelled, rejected and withdrawn cases are not flagged in this data - every record is a sanctioned house. Did you mean houses not yet completed?"
+
+  - condition: "stalled_houses_requested"
+    question: "There is no date of last activity, so a stalled house cannot be identified. Shall I list houses not recorded as Completed?"
+
+  - condition: "dbt_or_bank_status_requested"
+    question: "Bank transfer status, DBT failures and account details are not held - only the amount released and the number of installments. Shall I use those?"
+
+  - condition: "installment_dates_requested"
+    question: "Individual installment dates are not held - only how many installments were paid. Shall I use the sanction date and the installment count?"
+
+  - condition: "completion_or_release_date_requested"
+    question: "Only the sanction date is recorded - there is no completion date or payment date. Shall I use houses sanctioned in {value} and their current status?"
+
+  - condition: "employment_or_wages_requested"
+    question: "Person-days, workers and wages belong to MGNREGA, which is a separate source and cannot be joined to PMAY. Shall I answer for PMAY houses instead?"
+
+  - condition: "other_scheme_requested"
+    question: "This source holds PMAY-G only. Shall I answer for PMAY-G alone?"
+
+  - condition: "personal_contact_details_requested"
+    question: "Aadhaar, mobile numbers, bank accounts and addresses are not held. I can show registration number, name, village and house status - shall I?"
+
+  - condition: "below_village_geography_requested"
+    question: "Geography runs down to village only - there is no habitation, ward or household location. Which village should I report on?"
+
+  - condition: "villages_without_houses_requested"
+    question: "Shall I list villages with no PMAY houses from the cross-scheme village coverage view, or show the villages with the fewest houses?"
+    v2_note:
+      critical: true
+      text: >
+        CHANGED - THIS IS NOW ANSWERABLE. v1.0 correctly refused, because the flat table
+        only held villages that had houses. curated.dim_geography holds all 7,364 LGD
+        villages and curated.v_cross_scheme_village_coverage is keyed on village, so
+        villages with no PMAY houses CAN be listed.
+
+  # ---- data quality - NEW IN v2.0 ---------------------------------------
+  - condition: "placeholder_rows_explicitly_requested"
+    question: "Some rows are flagged as placeholders rather than real sanctioned houses. Shall I exclude them, as usual, or is this a question about data completeness?"
+    v2_note: NEW. is_placeholder has no v1.0 counterpart - the flat table had no such flag.
+
+  - condition: "time_series_with_unresolved_years"
+    question: "Some houses have a sanction date that falls outside the financial years held in the database, so they cannot be placed on a timeline. Shall I report them as a separate 'no year' group?"
+    v2_note:
+      critical: true
+      text: >
+        NEW, AND HIGH RISK. year_key is nullable. The source workbook spans FY 2017-18 to
+        2023-24 while dim_year was last verified holding only FY 2022-23 to 2025-26 - if
+        it was not extended at the PMAY load, roughly a third of houses have no year and
+        vanish from any GROUP BY. UNVERIFIED. See the coverage_conflict note in
+        pmay_entity_resolver.yaml.
+
+  - condition: "cross_scheme_money_comparison"
+    question: "PMAY and MGNREGA amounts mean different things - PMAY records money released against sanctions, MGNREGA records expenditure incurred. Compare them anyway, with that stated?"
+    v2_note:
+      critical: true
+      text: >
+        NEW. v1.0 refused cross-scheme questions outright because there was no path.
+        curated.v_cross_scheme_money_district_year provides one, and it carries a
+        measure_semantics column precisely because the two numbers are not like for like.
+        Ask before comparing, and carry the string into the answer.
+
+  - condition: "cross_scheme_row_level_request"
+    question: "PMAY is recorded per house and MGNREGA per village-year, so the two cannot be listed side by side row by row. Shall I compare them by district and year, or by village coverage?"
+    v2_note: NEW. Redirects a prohibited join to the two cross-scheme views.
+
+  - condition: "district_or_block_code_requested"
+    question: "The database holds district and block as names only - there is no district or block LGD code. Shall I use the name, or the village LGD code?"
+    v2_note:
+      critical: true
+      text: >
+        NEW. v1.0 had mapped_district_lgd_code and mapped_block_lgd_code and treated code
+        and name as interchangeable. Neither column survived into the curated layer.
+
+  # ---- measures that exist but must not be reported as asked -------------
+  - condition: "sanctioned_amount_variation_requested"
+    question: "Sanctioned amount is a flat per-house entitlement, so it does not vary between districts or years. Did you mean amount released, or amount pending?"
+    v2_note: >
+      CHANGED. amount_pending is a stored column now and is a third sensible reading.
+      Whether sanctioned_amount is still a flat 1,30,000 after the load is UNVERIFIED -
+      check the distribution before repeating the figure.
+
+  - condition: "installment_or_release_as_completion_proof"
+    question: "Payments are not proof of completion - many houses have all three installments without being recorded as completed. Shall I use the recorded construction status?"
+    v2_note: >
+      CHANGED. Counts removed pending re-measurement, and the answer path is now the
+      is_completed flag. Note the database also carries completed_underfunded, which
+      marks the opposite case - recorded complete with less money released than
+      sanctioned. Offer that count when this condition fires.
+
+  - condition: "house_status_as_occupancy"
+    question: "The recorded status is the construction stage, not whether the house is occupied or handed over. Shall I report construction stage?"
+    v2_note: >
+      Column renamed - house_status became status_name, backed by
+      dim_pmay_house_status with is_completed and is_in_progress roll-ups.
+
+  - condition: "completion_rate_across_mixed_years"
+    question: "An overall completion rate mixes older houses, which are nearly all finished, with recent ones still under construction - they differ mainly by age. Report the overall rate, or year by year?"
+    v2_note: >
+      CHANGED. The 99.63% / 67.57% figures are workbook values and are not re-verified.
+      Note also that a year-by-year split may drop houses whose year_key is NULL.
+
+  - condition: "mapping_status_as_performance"
+    question: "Mapping category records how confidently a house was matched to its LGD village, not how the scheme is performing. Did you mean construction status?"
+    v2_note: >
+      CHANGED. mapping_status became mapping_category, with the numeric confidence split
+      out into mapping_confidence_pct.
+
+  - condition: "fuzzy_village_precision_warning"
+    question: "Some houses are fuzzy-matched to their village, so village figures may be imprecise. Continue, or restrict to confidently mapped houses?"
+    v2_note: >
+      CHANGED. The 34,966 / 20.4% / 43-labels figures describe the workbook's raw labels.
+      The curated layer buckets them into mapping_category and the bucket values are
+      unknown - do not quote a share until it is measured.
+
+  - condition: "individual_person_tracking_requested"
+    question: "Beneficiary names are not held in the database, and registration numbers repeat, so one person cannot be tracked. Shall I answer at house level?"
+    v2_note: >
+      CHANGED. The v1.0 wording leaned on names being non-unique. There are no names at
+      all now - beneficiary_name was dropped at ingest.
+
+  - condition: "parent_name_filter_requested"
+    question: "Parent names are not held in the database. Shall I answer by district, village, construction status or allotment category instead?"
+    v2_note:
+      critical: true
+      text: >
+        REWRITTEN. father_mother_name was dropped at ingest, so the v1.0 offer to
+        "filter on it anyway" is impossible. This is now a not-held message with a
+        redirect, not a genuine choice.
+
+  - condition: "singleton_category_focus"
+    question: "'Self' and 'Woman' hold one record each and look like data-entry artefacts. Did you mean Woman-Married, or all women together?"
+
+  # ---- time -------------------------------------------------------------
+  - condition: "calendar_year_vs_financial_year"
+    question: "'{value}' could mean the calendar year ({calendar_count} records) or FY {value}-{next_short} ({fy_count} records). Which one?"
+
+  - condition: "ambiguous_year_shorthand"
+    question: "'{value}' could be FY {fy_label} or the calendar years {year_a} and {year_b}. Which did you mean?"
+
+  - condition: "vague_recency"
+    question: "'{value}' is not a fixed period. Which financial year - or shall I cover all sanctions from FY 2017-18 to FY 2023-24?"
+
+  - condition: "growth_period_missing"
+    question: "Growth between which two financial years?"
+
+  - condition: "partial_year_comparison_requested"
+    question: "FY 2023-24 holds only April to June 2023, so it is not comparable to a full year. Compare it as it stands, or against the same three months of {comparison_year}?"
+
+  - condition: "monthly_trend_across_full_period"
+    question: "A monthly trend over the whole period gives 72 points, most of them near zero. Shall I show it by financial year instead, or restrict it to one year?"
+
+  - condition: "quarter_without_year"
+    question: "Which year's {value}? Sanctions run from August 2017 to July 2023."
+
+  - condition: "reversed_date_range"
+    question: "'{value}' runs backwards. Did you mean {corrected_range}?"
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "missing_metric_for_ranking"
+    question: "Top by what - houses sanctioned, houses completed, amount released, or completion rate?"
+
+  - condition: "missing_metric_for_trend"
+    question: "Which measure should the trend show - houses sanctioned, houses completed, or amount released?"
+
+  - condition: "vague_qualifier"
+    question: "What should '{value}' be measured by - completion rate, fund utilisation, or number of houses?"
+
+  - condition: "efficiency_term_unclear"
+    question: "What counts as efficient here - the completion rate, or the share of sanctioned funds released?"
+
+  - condition: "ambiguous_progress_term"
+    question: "Progress measured how - by construction stage, or by funds released?"
+
+  - condition: "ambiguous_pending_houses_or_amount"
+    question: "Pending houses, or pending amount? 41,154 houses are not yet Completed, and the unreleased amount is a separate figure."
+
+  - condition: "sanctioned_reading_unclear"
+    question: "'Sanctioned' could mean houses at the House Sanctioned stage (2,057), the sanctioned amount, or houses sanctioned on a date. Which did you mean?"
+
+  - condition: "ambiguous_count_subject"
+    question: "A count of what - houses, distinct beneficiaries, villages, or sanction orders?"
+
+  - condition: "ambiguous_status_group"
+    question: "Which houses - those not yet Completed (41,154), or only those under construction at Plinth, Roof Cast or House Sanctioned (41,041)?"
+
+  - condition: "women_ownership_scope_unclear"
+    question: "Houses allotted to women alone (46,520), or including the 110,365 joint husband-and-wife allotments (156,885 in all)?"
+
+  - condition: "rate_vs_count_unclear"
+    question: "The number of completed houses, or the completion rate as a percentage?"
+
+  # ---- geography --------------------------------------------------------
+  - condition: "missing_geography_level_for_breakdown"
+    question: "Broken down by which level - district, block, or village?"
+
+  - condition: "ambiguous_geography_level"
+    question: "'{value}' is both a block and a village name. Which level did you mean?"
+
+  - condition: "ambiguous_village_needs_district"
+    question: "'{value}' exists in {districts}. Which district?"
+
+  - condition: "ambiguous_village_needs_block"
+    question: "There is more than one {value} in {district}. Which block - {blocks}?"
+
+  - condition: "blocked_fuzzy_pair"
+    question: "'{value}' is close to both {candidate_a} and {candidate_b}, which are different places. Which one?"
+
+  - condition: "district_split_boundary"
+    question: "{district} was split - {new_district} is recorded separately with {new_district_records} records. Include it, or keep the two apart?"
+
+  - condition: "code_and_name_conflict"
+    question: "LGD code {code} is {code_name}, not {value}. Which one should I use?"
+
+  - condition: "mixed_geography_levels_compared"
+    question: "{value_a} is a {level_a} and {value_b} is a {level_b}, so comparing them is not like-for-like. Compare at {level_b} level instead?"
+
+  - condition: "village_level_breakdown_size"
+    question: "A village-level breakdown returns up to 5,121 rows. Shall I show the top 10, or restrict it to one district or block?"
+
+  - condition: "unmatched_geography_name"
+    question: "I could not match '{value}' to any district, block or village in the PMAY data. Did you mean {suggestions}?"
+
+  # ---- identifiers and values -------------------------------------------
+  - condition: "unmatched_registration_number"
+    question: "No PMAY house carries registration number '{value}'. Shall I search by sanction number, or by village?"
+    v2_note: >
+      CHANGED. The v1.0 fallback offered a name search, which no longer exists. Sanction
+      number and geography are the remaining lookup paths.
+
+  - condition: "reg_no_format_invalid"
+    question: "'{value}' is not a PMAY registration number - they run as MG followed by nine digits, such as MG123676572. Shall I search by sanction number instead?"
+    v2_note: CHANGED. The name-search fallback is gone.
+
+  - condition: "ambiguous_beneficiary_name"
+    question: "Beneficiary names are not held in this database, so '{value}' cannot be looked up. Shall I answer by village, district or registration number?"
+    v2_note:
+      critical: true
+      text: >
+        RETIRED AS AN AMBIGUITY. It is no longer a question of which of several people is
+        meant - no person can be named at all. Do not ask the user to disambiguate
+        something the database cannot return.
+
+  - condition: "name_matches_parent_field_only"
+    status: RETIRED_v2.0
+    question: "Personal names are not held in this database."
+    v2_note: >
+      RETIRED. This condition cannot fire - neither the beneficiary name nor the parent
+      name column exists in the curated layer. Kept only so a stale retrieval hit is
+      recognised as stale.
+
+  - condition: "sanction_no_covers_many_houses"
+    question: "Sanction number '{value}' covers {house_count} houses - one order can cover up to 322. Do you want all the records, or a summary?"
+
+  - condition: "sanction_no_partial_reference"
+    question: "'{value}' looks like part of a sanction number. Shall I match every sanction beginning {prefix}?"
+
+  - condition: "unmatched_status_or_category"
+    question: "'{value}' is not a recorded {dimension}. Did you mean {suggestions}?"
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_level"
+    question: "At what level - statewide, by district, by block, or by village?"
+
+  - condition: "ambiguous_total_vs_average"
+    question: "Total across the whole period, or an average per year?"
+
+  - condition: "ambiguous_average_denominator"
+    question: "Average per what - per house, per village, or per year?"
+
+  - condition: "count_houses_vs_sanctions"
+    question: "Number of houses, or number of sanction orders? One sanction order can cover up to 322 houses, so the two differ."
+
+  - condition: "ranking_direction_unclear"
+    question: "Highest or lowest?"
+
+  - condition: "missing_comparison_target"
+    question: "Compare {value} with which other district, or against which other year?"
+
+  - condition: "share_denominator_missing"
+    question: "As a share of what - the district total, or the state total of 171,107 houses?"
+
+  - condition: "percentage_vs_count"
+    question: "As percentages, or as counts?"
+
+  - condition: "district_by_year_grid"
+    question: "District by financial year gives 84 rows. Shall I show it as a chart, or restrict it to one district or one year?"
+
+  - condition: "multi_measure_table"
+    question: "Which measures should the table carry - houses, completed, amount released, completion rate?"
+
+  - condition: "columns_for_record_listing"
+    question: "Which fields do you need - registration number, name, village, sanction date, amount released and house status are the usual set?"
+
+  - condition: "list_vs_aggregate"
+    question: "Do you want the individual records listed, or a summary count?"

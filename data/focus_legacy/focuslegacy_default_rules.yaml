@@ -1,0 +1,390 @@
+# focuslegacy_default_rules.yaml
+#
+# Default rules for Focus Legacy - node 5.5. Runs after the clarification gate.
+# Each rule fills a missing detail silently and hands the response composer an
+# assumption line, so the user can correct it without being interrupted first.
+# Editable by analysts - no code change needed.
+#
+# A condition must live in EITHER focuslegacy_classification_rules.yaml OR this
+# one. The gate runs first, so any condition present in both will always ask and
+# never default. {placeholders} are filled from the resolved query at runtime.
+#
+# ===========================================================================
+# v1.0 - 2026-09-21 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Legacy was loaded straight into curated, so there is no flat-table
+# ancestor and no migration to record. Four things shape this file and have no
+# PMAY counterpart:
+#
+#   1. THERE IS NO ALWAYS-ON FILTER. PMAY carries WHERE NOT is_placeholder on
+#      every count and sum. That column does not exist here - do not carry the
+#      habit over. The only conditional filter is the Unresolved exclusion, and
+#      it applies to village answers ONLY.
+#   2. THE MONEY IS FULLY DERIVED. amount = members x 5000 on every row, so
+#      several defaults exist purely to state that relationship back rather than
+#      let a rupee figure read as a finding about policy.
+#   3. THE MONEY UNIT IS NOT ASSUMED. PMAY defaults to crore. Here the unit is
+#      unconfirmed, so the default is to read curated.dim_scheme.money_unit and
+#      state whatever it says. When it cannot answer, the gate asks - that
+#      condition is reserved, not defaulted.
+#   4. FY2023-24 HOLDS NO PAYMENTS. Several time defaults exist only to stop a
+#      range or a "previous year" quietly stepping into the gap.
+#
+# EVERY NUMBER IN AN assumption_text BELOW IS A SOURCE-WORKBOOK FIGURE
+# (2026-09-21) AND HAS NOT BEEN MEASURED AGAINST megh_db. They are kept because a
+# stated assumption with an unverified number is still better than a silent one,
+# but re-verify before these reach a user. The two exceptions the database
+# independently confirms are the 14,569 / 3 / 14,566 reconciliation and the
+# x5000 identity.
+#
+# Reserved for focuslegacy_classification_rules.yaml, not defaulted here: what
+# "beneficiaries" means when asked bare, payments versus groups when the two
+# would differ, the money unit when dim_scheme cannot supply it, any conversion
+# to lakh or crore, a product question outside FY2021-22 and FY2022-23, a monthly
+# or daily trend, a district inferred from a PG id, anything touching account
+# numbers or the account holder's name, and anything the source cannot answer at
+# all.
+# ===========================================================================
+
+default_rules:
+
+  # ---- data quality - no always-on filter exists, unlike PMAY ------------
+  - condition: "unresolved_rows_in_non_village_answer"
+    default_value: "include"
+    assumption_text: "All payments are counted, including 1,101 whose village could not be matched; they are held under their district so the totals reconcile."
+
+  - condition: "geo_conflict_rows_in_non_geographic_answer"
+    default_value: "include"
+    assumption_text: "All payments are included; a few villages have conflicting district or block records between sources and are counted under the registry's value."
+
+  - condition: "quarantined_rows_in_totals"
+    default_value: "exclude_silently"
+    assumption_text: "Three records from the source file are not in the database - one suspected duplicate payment and two with malformed group ids - so figures are 3 payments and Rs 95,000 below the spreadsheet's."
+
+  - condition: "outlier_group_in_total"
+    default_value: "include"
+    assumption_text: "The 190-member group is included in totals; it is a real payment, and it is excluded only from averages and maximums where it would dominate."
+
+  - condition: "total_reported_without_verification"
+    default_value: "attach_caveat"
+    assumption_text: "Focus Legacy totals have not yet been checked against the database's reconciliation view, so this figure is provisional."
+
+  # ---- the entitlement identity - no PMAY counterpart --------------------
+  - condition: "bare_amount_term"
+    default_value: "sum_amount_disbursed"
+    assumption_text: "Using the amount disbursed, summed across the selected payments."
+    sql_effect: "SUM(amount_disbursed)"
+
+  - condition: "amount_answer_without_membership_context"
+    default_value: "state_identity"
+    assumption_text: "Every payment is Rs 5,000 per member, so this amount is the number of memberships paid for, multiplied by 5,000."
+
+  - condition: "amount_ranking"
+    default_value: "report_as_membership_ranking"
+    assumption_text: "Ranking by amount is the same as ranking by members, because the amount is fixed at Rs 5,000 per member; both columns are shown."
+
+  - condition: "per_member_rate_reference"
+    default_value: 5000
+    assumption_text: "The rate is Rs 5,000 per member and does not vary by year, district, group type or product."
+
+  # ---- time -------------------------------------------------------------
+  - condition: "missing_time_period"
+    default_value: "all_available_years"
+    assumption_text: "Covering all payments, FY2021-22 to FY2025-26; no payments exist in FY2023-24."
+
+  - condition: "relative_year_latest"
+    default_value: "2025-26"
+    assumption_text: "Taking the latest year as FY2025-26, which holds 8,812 of the 14,569 payments."
+
+  - condition: "relative_year_previous"
+    default_value: "2024-25"
+    assumption_text: "Taking last year as FY2024-25."
+
+  - condition: "relative_year_earliest"
+    default_value: "2021-22"
+    assumption_text: "Taking the earliest year as FY2021-22, which opens on 31 August 2021."
+
+  - condition: "multi_year_request_without_years"
+    default_value: "all_available_years"
+    assumption_text: "Covering the four years that hold payments - FY2021-22, FY2022-23, FY2024-25 and FY2025-26."
+
+  - condition: "trend_without_period"
+    default_value: "all_years_with_gap_marked"
+    assumption_text: "Trend shown across the four years that hold payments, with FY2023-24 marked as a gap rather than plotted as zero."
+
+  - condition: "comparison_without_second_period"
+    default_value: "preceding_year_with_payments"
+    assumption_text: "Compared against FY{previous_year}, the preceding year that holds payments; FY2023-24 is skipped because it holds none."
+
+  - condition: "year_range_spanning_the_gap"
+    default_value: "show_gap_explicitly"
+    assumption_text: "The period covers FY2023-24, which holds no Focus Legacy payments; it is shown as a gap, not as zero."
+
+  - condition: "year_range_partly_outside_data"
+    default_value: "clamp_to_available_range"
+    assumption_text: "Payments run from 31 August 2021 to 31 March 2026, so the period has been trimmed to {applied_range}."
+
+  - condition: "no_records_in_requested_period"
+    default_value: "state_data_span"
+    assumption_text: "No payments are recorded for {value}; the data covers FY2021-22, FY2022-23, FY2024-25 and FY2025-26."
+
+  - condition: "time_dimension_unspecified"
+    default_value: "financial_year"
+    assumption_text: "Grouped by financial year, which covers every payment; the remittance date is missing on 171 of them."
+
+  - condition: "dateless_rows_in_date_based_answer"
+    default_value: "exclude_and_state"
+    assumption_text: "171 payments have no remittance date and are left out of date-based figures, so this total is below the scheme total."
+
+  - condition: "month_or_quarter_without_type"
+    default_value: "calendar"
+    assumption_text: "Quarters and months are calendar-based, so Q1 is January to March."
+
+  - condition: "date_based_answer_batch_note"
+    default_value: "attach_batch_caveat"
+    assumption_text: "Money is released in bulk runs - only 30 payment dates exist - so a date-based view shows disbursement batches, not a payment rate."
+
+  - condition: "trend_includes_top_up_year"
+    default_value: "include_with_note"
+    assumption_text: "FY2025-26 includes 706 Focus (Addnl) top-up payments that the earlier years do not have, so part of the rise is a one-off round."
+
+  # ---- geography --------------------------------------------------------
+  - condition: "missing_geography"
+    default_value: "all_districts"
+    assumption_text: "Covering all 12 districts of Meghalaya."
+
+  - condition: "whole_state_reference"
+    default_value: "no_district_filter"
+    assumption_text: "Figures are statewide."
+
+  - condition: "missing_breakdown_level"
+    default_value: "district"
+    assumption_text: "Broken down by district."
+
+  - condition: "geography_filter_form_unspecified"
+    default_value: "lgd_name_uppercase"
+    assumption_text: "Filtered on the LGD district name as recorded in the geography registry."
+    sql_effect: "WHERE lgd_district = UPPER({value})"
+
+  - condition: "region_group_named"
+    default_value: "expand_to_member_districts"
+    assumption_text: "{region} covers {districts}."
+
+  - condition: "ri_bhoi_as_region"
+    default_value: "single_district"
+    assumption_text: "Ri Bhoi is its own group and is not counted under Khasi Hills."
+
+  - condition: "bifurcated_district_scope"
+    default_value: "keep_separate"
+    assumption_text: "Eastern West Khasi Hills is reported separately from West Khasi Hills, and South West Garo Hills separately from West Garo Hills, as the registry records them - even where the groups' ids still carry the older district letters."
+
+  - condition: "colliding_name_without_level"
+    default_value: "block"
+    assumption_text: "Reading {value} as a block, which is the level users usually mean."
+
+  - condition: "village_count_requested"
+    default_value: "count_distinct_village_code_excluding_unresolved"
+    assumption_text: "Villages are counted by LGD code, excluding 1,101 payments with no matched village, so the village figures do not add up to the scheme total."
+    sql_effect: "COUNT(DISTINCT village_code) ... WHERE entity_type <> 'Unresolved'"
+
+  - condition: "block_level_answer_shortfall"
+    default_value: "state_shortfall"
+    assumption_text: "1,013 payments have a block in the source but no matched village, so block figures may fall short of the scheme total; the difference is stated."
+
+  - condition: "constituency_source_unspecified"
+    default_value: "registry_ac_name"
+    assumption_text: "Constituency is taken from the geography registry for each village, not from the scheme's own record, which was not carried into the database."
+
+  # ---- producer groups - no PMAY counterpart -----------------------------
+  - condition: "group_identity_unspecified"
+    default_value: "pg_id"
+    assumption_text: "Groups are identified by PG id; group names are recorded inconsistently and cannot identify a group."
+
+  - condition: "group_count_requested"
+    default_value: "count_distinct_pg_id"
+    assumption_text: "Groups are counted by PG id - 11,906 in the source - not by name, of which there are only 10,678."
+    sql_effect: "COUNT(DISTINCT pg_id)"
+
+  - condition: "repeat_payments_in_group_count"
+    default_value: "count_each_group_once"
+    assumption_text: "Each group is counted once even where it was paid more than once; 2,647 groups were paid twice and 8 three times."
+
+  - condition: "group_name_display_source"
+    default_value: "current_name_with_caveat"
+    assumption_text: "The group name shown is the best-effort recorded name; 1,634 groups appear under more than one spelling."
+
+  - condition: "pg_id_match_form"
+    default_value: "exact_uppercase"
+    assumption_text: "PG ids are matched exactly as recorded, in upper case."
+
+  - condition: "entity_type_breakdown_unspecified"
+    default_value: "all_three_types"
+    assumption_text: "Covering all three producer-group types; the type is fixed for a group and derived from its id prefix."
+
+  - condition: "member_count_requested"
+    default_value: "sum_no_of_pg_members"
+    assumption_text: "Memberships are summed across payments, so a group paid in two years is counted twice; there is no person identifier in this data."
+    sql_effect: "SUM(no_of_pg_members)"
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "missing_scheme"
+    default_value: "focus_legacy"
+    assumption_text: "Answering for Focus Legacy, which pays producer groups - not Focus Plus, which pays individuals."
+
+  - condition: "bare_count_term"
+    default_value: "count_payments"
+    assumption_text: "Counted as payments - one row is one payment to one group."
+
+  - condition: "bare_group_term"
+    default_value: "count_distinct_pg_id"
+    assumption_text: "Counted as producer groups, each counted once."
+
+  - condition: "bare_member_term"
+    default_value: "sum_no_of_pg_members"
+    assumption_text: "Counted as memberships paid for, not as distinct people."
+
+  - condition: "product_filter_form_unspecified"
+    default_value: "case_folded_match"
+    assumption_text: "Product names are matched with case and spacing ignored; the same product is recorded under up to three spellings."
+    sql_effect: "GROUP BY UPPER(TRIM(product_raw))"
+
+  - condition: "product_answer_period_unspecified"
+    default_value: "fy2021_22_and_fy2022_23"
+    assumption_text: "Product figures cover FY2021-22 and FY2022-23, the only years the field was captured - 3,112 of 14,569 payments."
+
+  - condition: "bank_breakdown_source"
+    default_value: "bank_name"
+    assumption_text: "Grouped by the bank recorded on the payment; two banks handle about 92% of payments."
+
+  - condition: "branch_level_question_column"
+    default_value: "ifsc_code"
+    assumption_text: "Using the IFSC code, which is on every payment; the branch name was only recorded on 3,192 of 14,569."
+
+  - condition: "current_account_reading"
+    default_value: "inferred_from_latest_payment"
+    assumption_text: "Whether an account is a group's current one is inferred from its most recent payment; no field in the source declares it."
+
+  # ---- which table ------------------------------------------------------
+  - condition: "query_surface_unspecified"
+    default_value: "curated.v_focus_legacy"
+    assumption_text: "Answered from the Focus Legacy payment records."
+
+  - condition: "fact_table_named_in_request"
+    default_value: "use_the_view_instead"
+    assumption_text: "Answered from the approved payment view; the underlying table holds unmasked bank details and is not queried."
+
+  - condition: "group_history_question_table"
+    default_value: "dim_producer_group"
+    assumption_text: "Answered from the producer-group record, which stores each group's first and last payment year."
+
+  - condition: "cross_scheme_money_question"
+    default_value: "aggregate_each_scheme_independently"
+    assumption_text: "Focus Legacy is not in the ready-made cross-scheme view, so each scheme is summarised separately and the two summaries compared by district and year."
+
+  - condition: "cross_scheme_coverage_question"
+    default_value: "aggregate_then_compare_by_village_code"
+    assumption_text: "Village coverage is compared by LGD village code, with each scheme counted independently."
+
+  - condition: "money_unit_source_unspecified"
+    default_value: "curated.dim_scheme.money_unit"
+    assumption_text: "The money unit is read from the scheme record rather than assumed."
+
+  # ---- units ------------------------------------------------------------
+  - condition: "money_unit_supplied_by_dim_scheme"
+    default_value: "state_as_recorded"
+    assumption_text: "Amounts are in {money_unit}, as recorded for this scheme."
+
+  - condition: "single_payment_money_value"
+    default_value: "as_stored"
+    assumption_text: "The amount is shown as stored, without conversion."
+
+  - condition: "percentage_precision_unspecified"
+    default_value: 2
+    assumption_text: "Percentages are rounded to two decimal places."
+
+  - condition: "number_grouping_unspecified"
+    default_value: "indian_digit_grouping"
+    assumption_text: "Large numbers are grouped in the Indian format - 51,01,05,000 rather than 510,105,000."
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_function"
+    default_value: "count_payments"
+    assumption_text: "Figures are counts of payments."
+
+  - condition: "money_aggregation_unspecified"
+    default_value: "SUM"
+    assumption_text: "Amounts are summed across the selected payments."
+
+  - condition: "missing_top_n"
+    default_value: 5
+    assumption_text: "Showing the top 5."
+
+  - condition: "singular_superlative_without_n"
+    default_value: 1
+    assumption_text: "Showing the single highest."
+
+  - condition: "ranking_direction_unspecified"
+    default_value: "descending"
+    assumption_text: "Ranked highest first."
+
+  - condition: "missing_sort_column"
+    default_value: "requested_metric"
+    assumption_text: "Sorted by {metric}."
+
+  - condition: "missing_result_limit"
+    default_value: 10
+    assumption_text: "Showing the first 10 rows."
+
+  - condition: "payment_row_listing_limit"
+    default_value: 100
+    assumption_text: "Showing the first 100 matching payments."
+
+  - condition: "account_number_display_form"
+    default_value: "masked"
+    assumption_text: "Account numbers are shown masked to the last four digits."
+    sql_effect: "SELECT account_no_masked"
+
+  - condition: "multi_measure_columns_unspecified"
+    default_value: "payments_groups_members_amount"
+    assumption_text: "Showing payments, groups, memberships and amount disbursed."
+
+  - condition: "year_ordering_unspecified"
+    default_value: "chronological"
+    assumption_text: "Years are listed in order, with FY2023-24 omitted because it holds no payments."
+
+  - condition: "output_format_unspecified"
+    default_value: "table"
+    assumption_text: "Shown as a table."
+
+  - condition: "chart_type_unspecified"
+    default_value: "auto_by_result_shape"
+    assumption_text: "Chart type chosen to suit the shape of the result."
+
+  # ---- nulls and zeros --------------------------------------------------
+  - condition: "null_measure_values"
+    default_value: "none_exist"
+    assumption_text: "Every payment carries a member count and an amount, so no records are dropped from sums or averages."
+
+  - condition: "null_product_in_breakdown"
+    default_value: "exclude_from_breakdown_only"
+    assumption_text: "Payments with no product recorded are left out of product breakdowns but still counted in totals; the field was only captured for two years."
+
+  - condition: "null_bank_name_in_breakdown"
+    default_value: "label_not_recorded"
+    assumption_text: "276 payments have no bank name recorded and are shown as not recorded rather than merged into another bank."
+
+  - condition: "null_branch_in_breakdown"
+    default_value: "exclude_from_breakdown_only"
+    assumption_text: "Payments with no branch recorded are left out of branch breakdowns but still counted in totals."
+
+  - condition: "null_date_in_non_time_answer"
+    default_value: "include"
+    assumption_text: "Payments with no remittance date are included; they still carry a financial year."
+
+  - condition: "null_bank_details_current"
+    default_value: "read_as_not_current"
+    assumption_text: "A payment not linked to the group's current account is treated as having gone to an earlier account, which is normal when a group changes bank."
+
+  - condition: "null_year_key_rows"
+    default_value: "report_separately"
+    assumption_text: "Any payment without a financial year is reported separately rather than dropped; every source record carries one, so a missing year would be a loading fault."

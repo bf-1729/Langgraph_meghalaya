@@ -1,0 +1,385 @@
+# focuslegacy_response_template.yaml
+#
+# ===========================================================================
+# v1.0 - 2026-09-21 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Response templates for Focus Legacy - node 5.15, the response composer.
+# Editable by analysts - no code change needed.
+# Numbers are locked from the result set; templates only shape the wording
+# around them.
+#
+# Focus Legacy was loaded straight into curated, so there is no flat-table
+# ancestor and no v1 wording to retire.
+#
+# SEVEN CAVEATS MUST TRAVEL WITH THE ANSWERS THEY BELONG TO. They are not
+# decoration - each one is a way this partition produces a true number that
+# reads as a false claim:
+#
+#   1. THE UNIT IS UNCONFIRMED. The fact's own comment does not state one.
+#      Read curated.dim_scheme.money_unit, and if it does not answer, say the
+#      unit is unconfirmed rather than printing a rupee symbol.
+#   2. MONEY IS MEMBERSHIP. amount = members x 5000 on every row, so a rupee
+#      figure is a membership figure and an average amount is an average group
+#      size. Never let a money answer read as a finding about policy.
+#   3. PAYMENTS ARE NOT GROUPS ARE NOT PEOPLE. Three counts, three numbers,
+#      and no person-level count exists at all.
+#   4. FY2023-24 IS A GAP, NOT A ZERO.
+#   5. DATES ARE BATCHES. Thirty payment dates in five years.
+#   6. PRODUCT COVERS TWO YEARS. FY2021-22 and FY2022-23, 21% of payments.
+#   7. VILLAGE ANSWERS EXCLUDE PLACEHOLDERS, so they do not reconcile to the
+#      scheme total.
+#
+# Every figure quoted inside a template below is a source-workbook observation
+# (2026-09-21) and is not re-verified against megh_db.
+# ===========================================================================
+
+response_templates:
+
+  # ---- how the answer text is shaped ------------------------------------
+  formatting:
+    number_format: "indian"              # 51,01,05,000 not 510,105,000
+    currency_symbol: "₹"
+    currency_symbol_rule: >
+      DO NOT PRINT THE SYMBOL UNTIL THE UNIT IS CONFIRMED. If
+      curated.dim_scheme.money_unit did not answer, print the bare figure and say the
+      unit is unconfirmed. A ₹ sign is itself a claim about the unit.
+    decimal_places: 2
+    percent_decimal_places: 1
+    financial_year_format: "YYYY-YY"     # 2025-26; a stored column, never derived
+    date_format: "DD Month YYYY"         # 11 September 2025
+    money_unit: "unverified"
+    money_unit_authority: curated.dim_scheme.money_unit
+    money_unit_warning: >
+      Four units are live across megh_db - lakh for MGNREGA, rupees for PMAY, crore for
+      the cross-scheme and pre-aggregate views, and unverified for this scheme and Focus
+      Plus. Never add across them, and state the unit on every figure.
+    row_level_money_unit: "as stored"    # a single payment is never converted
+    show_unit_always: true
+    show_assumptions: true               # surface the defaults that fired
+    rate_statement_always: true          # the Rs 5,000 per member rule accompanies every money answer
+    geography_display_case: "title"      # district and block are stored UPPERCASE in
+                                         # dim_geography - title-case them for display,
+                                         # but filter with the uppercase literal
+    village_display_case: "as_stored"    # village names are NOT uppercased - pass them through
+    bank_display_case: "as_stored"       # bank names are Title Case in the source
+    product_display_case: "title"        # product_raw is folded for grouping, title-cased for display
+    account_display: "masked_only"       # last four digits, and never in a bulk listing
+    null_display: "not recorded"
+    zero_display: "0"                    # a recorded zero is a real value, not a blank
+    tie_behaviour: "show_all"
+    empty_result_message: "No Focus Legacy payments for that selection."
+    unresolved_rule: >
+      Village counts and village lists exclude the Unresolved placeholders, so they do not
+      add up to the scheme total. Say so whenever a village figure is given. Do NOT apply
+      the exclusion to a money, district, block or programme total, and do not mention it
+      there.
+    no_mandatory_predicate_note: >
+      Unlike PMAY, nothing is routinely excluded from a count. Never write "excluding
+      placeholder records" - there are none.
+    max_rows_inline: 20
+
+  # =======================================================================
+  templates:
+
+    # ---- result shapes --------------------------------------------------
+    single_value: "{metric} for {scope} in {period} is {value}."
+    multi_metric: "For {scope} in {period}: {metric_list}."
+    payment_count: "{scope} recorded {value} Focus Legacy payments in {period}."
+    group_count: "{value} producer groups in {scope} were paid in {period}."
+    membership_count: "{value} memberships were paid for in {scope} in {period}."
+    three_counts: "{scope} in {period}: {payments} payments to {groups} producer groups, covering {memberships} memberships."
+    amount_value: "{value} was disbursed in {scope} in {period}, covering {memberships} memberships."
+    average_value: "Average {metric} per {denominator} for {scope} in {period} is {value}."
+    average_group_size: "Groups paid in {scope} averaged {value} members."
+    share_percentage: "{metric} for {scope} in {period} is {value}%."
+    proportion_of_total: "{scope} accounts for {value}% of the Focus Legacy total for {metric} in {period}."
+
+    ranked_list: "Top {n} {entity} by {metric} in {period}:"
+    bottom_list: "Bottom {n} {entity} by {metric} in {period}:"
+    extremes: "Highest is {top_entity} at {top_value}; lowest is {bottom_entity} at {bottom_value}."
+    rank_position: "{scope} ranks {rank} of {total} {entity} by {metric} in {period}."
+    tie_at_top: "{tied_entities} are level at {value}."
+
+    breakdown: "{metric} by {level} for {period}:"
+    programme_breakdown: "Payments in {scope} by programme variant:"
+    entity_type_breakdown: "Payments in {scope} by producer group type:"
+    product_breakdown: "Payments in {scope} by product, FY2021-22 and FY2022-23 only:"
+    bank_breakdown: "Payments in {scope} by bank:"
+    time_series: "{metric} by financial year, {start} to {end}:"
+    batch_list: "Focus Legacy money left in {value} payment runs between {first_date} and {last_date}:"
+    comparison: "{entity_a} {value_a} against {entity_b} {value_b} - a difference of {change}."
+    growth_change: "{metric} for {scope} moved from {value_start} in {start} to {value_end} in {end}, a change of {change} ({change_pct}%)."
+    period_comparison: "{metric} for {scope}: {value_a} in {period_a} against {value_b} in {period_b}."
+
+    # ---- entity detail ---------------------------------------------------
+    group_detail: "{pg_id}, recorded as '{pg_name}', sits in {village} village, {block} block, {district} district."
+    payment_detail: "Paid on {date_of_remittance} for {members} members, {amount}, to {bank} account {account_no_masked}."
+    group_history: "{pg_id} was paid {payments} times between {first_date} and {last_date}, {total_amount} in all."
+    lookup_list: "Producer groups matching '{value}':"
+    entity_list: "{entity} in {scope}:"
+    year_list: "Financial years with Focus Legacy payments: {years}."
+    coverage_statement: "{value} villages in {scope} have Focus Legacy payments recorded."
+
+    # ---- situations that need specific wording ---------------------------
+    empty_result: "No {metric} recorded for {scope} in {period}."
+    all_zero_result: "{scope} recorded zero {metric} in {period}. The zero is a real recorded value, not missing data."
+    no_data_in_source: "{scope} has {available} recorded but no {requested}, so there is nothing to report rather than a zero."
+    partial_coverage: "{covered} of {requested_total} {entity} have {metric} recorded; the rest are not reported rather than zero."
+    unavailable_in_source: "{requested} is not held in this data."
+    outside_data_span: "No payments are recorded for {period}. Focus Legacy runs from 31 August 2021 to 31 March 2026, with no payments at all in FY2023-24."
+    period_trimmed: "Payments run from {first_period} to {last_period}, so the period was trimmed to {applied_range}."
+    execution_failed: "The query could not be completed. Please try a narrower period or a smaller area."
+    permission_denied: "That level of detail is above your access. The finest level available to you is {allowed_level}."
+
+    # ---- the seven caveats that travel with the answer -------------------
+    unit_statement: "Amounts are in {unit}."
+    unit_unconfirmed: "The money unit for Focus Legacy is not confirmed in the database, so this figure is shown as stored."
+    rate_note: "Every Focus Legacy payment is ₹5,000 per member, so this figure is {memberships} memberships at that rate."
+    amount_is_membership_note: "Amount and membership are the same measure here - the amount is fixed at ₹5,000 per member - so this is one finding, not two."
+    average_amount_note: "The average amount is the average group size multiplied by ₹5,000, so it measures membership rather than entitlement."
+    per_member_note: "The rate is ₹5,000 per member and does not vary by year, district, group type or product."
+    payment_not_group_note: "This counts payments, not groups - {repeat_groups} groups were paid more than once."
+    membership_not_people_note: "These are memberships paid for, not distinct people. A group paid in two years is counted twice, and its recorded size can differ between the two."
+    no_person_data_note: "Focus Legacy records payments to producer groups. There is no individual-level record in this data."
+    fy_gap_note: "FY2023-24 holds no Focus Legacy payments at all, so the series has a gap between FY2022-23 and FY2024-25 rather than a zero."
+    fy_gap_comparison_note: "The preceding year with payments is {previous_year}, because FY2023-24 has none."
+    batch_note: "Focus Legacy money moves in bulk runs - {date_count} payment dates in five years - so this shows disbursement batches rather than a payment rate."
+    single_batch_note: "All {value} payments went out on {date}, in one run."
+    product_coverage_note: "Product was only recorded for FY2021-22 and FY2022-23 - {covered} of {total} payments - so this covers those two years."
+    product_absent_note: "The product field stopped being recorded after FY2022-23, so there is nothing to report for {period}. That is a gap in the records, not an absence of products."
+    product_folded_note: "Product spellings were grouped together - the same product is recorded in up to three different ways."
+    unresolved_excluded: "{value} payments could not be matched to a village and are left out of the village figures, so those do not add up to the scheme total."
+    unresolved_included: "Payments that could not be matched to a village are included here under their district."
+
+    # ---- other lines that travel alongside the answer --------------------
+    assumption_prefix: "Assumed: {assumptions}."
+    village_identity_note: "Villages are counted by LGD code, since {shared_names} village names are shared by more than one village."
+    group_name_note: "Group names are recorded inconsistently - {multi_spelling} groups appear under more than one spelling - so groups are identified by their PG id."
+    pg_id_token_note: "The district letters inside a PG id record where the group enrolled. {stale_count} payments now map to a different district after boundary changes, so the district here comes from the geography registry."
+    district_bifurcation_note: "{new_district} is reported separately from {old_district}, as the geography registry records them."
+    region_expansion_note: "{region} covers {districts}."
+    dateless_note: "{excluded} payments have no remittance date and are left out of date-based figures; they are still counted in financial-year figures."
+    outlier_note: "One group with {members} members is well clear of the rest and pulls the average up."
+    outlier_excluded_note: "The {members}-member group is set aside here; it is the only payment above {threshold} members."
+    bank_concentration_note: "{top_two_pct}% of payments go through two banks - {bank_a} and {bank_b}."
+    bank_missing_note: "{missing} payments have no bank name recorded and are shown separately rather than merged into another bank."
+    ifsc_sponsor_note: "One IFSC covers {value} payments because it is a sponsor-bank code rather than a single branch, so these are not branch counts."
+    branch_sparse_note: "Branch names were only recorded on {covered} of {total} payments, almost all in the first two years."
+    current_account_inferred_note: "Whether an account is a group's current one is inferred from its most recent payment - no field in the records states it."
+    account_masked_note: "Account numbers are shown masked to the last four digits."
+    quarantine_note: "Three records from the source file are not in the database - one suspected duplicate payment and two with malformed group ids - so this figure is ₹95,000 below the spreadsheet's."
+    unverified_total_note: "This total has not yet been checked against the database's own reconciliation view."
+    geo_conflict_note: "{value} of these villages have conflicting district or block records between sources; the geography registry's value was used."
+    constituency_provenance_note: "Constituencies come from the geography registry for each village, not from the scheme's own records, and exclude the payments with no matched village."
+    cross_scheme_caveat: "Focus Legacy records money remitted; {other_scheme} records {other_semantics}. The two are not like for like and are not added together."
+    cross_scheme_absent_note: "Focus Legacy is not part of the ready-made cross-scheme comparison, so each scheme was summarised separately."
+    scheme_disambiguation_note: "This answers for Focus Legacy, which pays producer groups - not Focus Plus, which pays individuals."
+    entity_not_found: "'{value}' is not in the Focus Legacy data. Closest matches: {suggestions}."
+    ambiguous_entity_resolved: "Read '{value}' as {resolved} in {district}. There are {count} places with that name."
+    colliding_name_resolved: "Read '{value}' as a block. It is also the name of a village - say 'village {value}' for that reading."
+    enumerated_not_filtered_note: "All {value} categories are shown, including any with no payments in this scope."
+    threshold_breach: "{scope} is below {threshold} at {value}."
+    threshold_pass: "{scope} is at or above {threshold} at {value}."
+    large_result: "Showing the first {shown} of {total} rows."
+
+    # ---- refusals, worded so they do not sound like a failure ------------
+    refusal_account_number: "Full account numbers are held for audit only and are not available here. I can show the masked number - last four digits - for a single group's payment history."
+    refusal_account_holder: "The name on the bank account is personal data and is not available through this data. I can answer on the group name and its payments instead."
+    refusal_person_count: "Focus Legacy records payments to producer groups, so there is no count of individuals. I can give you payments, producer groups, or memberships paid for - which did you mean?"
+    refusal_person_lookup: "There is no individual-level record in Focus Legacy - no names, no member ids. Groups can be looked up by PG id or by name."
+    refusal_focus_plus_link: "There is no link between Focus Legacy groups and Focus Plus beneficiaries - the two schemes share no identifier. I can report each separately."
+    refusal_status: "Focus Legacy has no status or approval field - every record is a payment that was made. There is no pending or rejected population to report."
+    refusal_target: "Targets, budgets and the number of eligible groups are not held, so coverage as a percentage cannot be calculated. I can give counts per village, block or district."
+    refusal_outcome: "What the groups did with the money is not recorded - the data ends at the remittance."
+    refusal_fy_2023_24: "There are no Focus Legacy payments in FY2023-24. The scheme has a one-year gap between FY2022-23 and FY2024-25."
+    refusal_product_period: "The product field was only recorded for FY2021-22 and FY2022-23, so a product answer for {period} is not possible. Shall I use the two years that have it?"
+    refusal_district_code: "District and block are held as names only - there is no LGD code for them in this data. The village LGD code is available."
+    refusal_write: "I can only read this data, not change it."
+
+  # =======================================================================
+  follow_up_rules:
+
+    # ---- move up or down the hierarchy ----------------------------------
+    - condition: "result_is_statewide"
+      suggestion: "Split this by district?"
+
+    - condition: "result_by_district"
+      suggestion: "Break this down by block?"
+
+    - condition: "result_by_block"
+      suggestion: "Break this down by village?"
+
+    - condition: "result_is_single_village"
+      suggestion: "Compare this against the rest of the block?"
+
+    - condition: "result_is_single_district"
+      suggestion: "See how this compares with the other districts?"
+
+    - condition: "result_is_region"
+      suggestion: "See the districts inside that region separately?"
+
+    # ---- move between the three counting subjects -----------------------
+    - condition: "result_is_payment_count"
+      suggestion: "See how many distinct producer groups that covers?"
+
+    - condition: "result_is_group_count"
+      suggestion: "See how many of those groups were paid more than once?"
+
+    - condition: "result_is_membership_count"
+      suggestion: "See the number of groups behind those memberships?"
+
+    - condition: "result_is_amount"
+      suggestion: "See the memberships behind that figure?"
+
+    - condition: "result_is_average_amount"
+      suggestion: "See the average group size instead, which is the same measure?"
+
+    # ---- move across time -----------------------------------------------
+    - condition: "result_has_single_year"
+      suggestion: "Compare this against the preceding year with payments?"
+
+    - condition: "result_is_single_value"
+      suggestion: "See how this has moved across the four years with payments?"
+
+    - condition: "result_is_time_series"
+      suggestion: "See which districts drove the change?"
+
+    - condition: "result_spans_the_year_gap"
+      suggestion: "See the two years either side of the FY2023-24 gap on their own?"
+
+    - condition: "result_is_calendar_year"
+      suggestion: "See the same figure by financial year instead?"
+
+    - condition: "result_is_monthly_series"
+      suggestion: "See the actual payment dates instead, since money moves in batches?"
+
+    - condition: "result_is_batch_list"
+      suggestion: "See the same totals grouped by financial year?"
+
+    # ---- move across the scheme's own dimensions ------------------------
+    - condition: "result_is_programme_breakdown"
+      suggestion: "See the same split by financial year, since the additional round was a single year?"
+
+    - condition: "result_is_entity_type_breakdown"
+      suggestion: "See how the group types are spread across districts?"
+
+    - condition: "result_is_product_breakdown"
+      suggestion: "See how many payments have no product recorded?"
+
+    - condition: "result_is_bank_breakdown"
+      suggestion: "See the same split by district?"
+
+    - condition: "result_is_group_detail"
+      suggestion: "See the other groups in that village?"
+
+    - condition: "result_is_group_list"
+      suggestion: "See which of those were paid in more than one year?"
+
+    - condition: "result_is_village_list"
+      suggestion: "See which of those villages also have PMAY houses?"
+
+    # ---- follow the caveat that was just stated -------------------------
+    - condition: "caveat_unresolved_villages_stated"
+      suggestion: "See the payments that could not be matched to a village?"
+
+    - condition: "caveat_product_coverage_stated"
+      suggestion: "See the product profile for the two years that have it?"
+
+    - condition: "caveat_batch_structure_stated"
+      suggestion: "See the size of each payment run?"
+
+    - condition: "caveat_rate_stated"
+      suggestion: "See the distribution of group sizes?"
+
+    - condition: "caveat_outlier_stated"
+      suggestion: "See the figures with that group set aside?"
+
+    - condition: "caveat_unit_unconfirmed_stated"
+      suggestion: "Shall I report the figure as stored until the unit is confirmed?"
+
+    - condition: "caveat_quarantine_stated"
+      suggestion: "See what the three held-back records were?"
+
+    # ---- work with the list just returned --------------------------------
+    - condition: "result_is_ranked_list"
+      suggestion: "Would you like to see the lowest as well?"
+
+    - condition: "result_is_ranked_list_top_n"
+      suggestion: "See what share of the scheme total these account for?"
+
+    - condition: "result_has_tie"
+      suggestion: "Break the tie on a second measure?"
+
+    - condition: "result_row_count_exceeds_display"
+      suggestion: "Narrow this to one district, or see the summary instead?"
+
+    - condition: "result_is_record_listing"
+      suggestion: "Summarise these payments by year instead?"
+
+    # ---- recover from a thin or failed answer ----------------------------
+    - condition: "result_is_empty"
+      suggestion: "Try a wider period, or the block this village sits in?"
+
+    - condition: "entity_not_found"
+      suggestion: "List the producer groups in that district instead?"
+
+    - condition: "entity_resolved_by_assumption"
+      suggestion: "Did you mean the village of that name rather than the block?"
+
+    - condition: "group_name_ambiguous"
+      suggestion: "Shall I list the matching PG ids so you can pick one?"
+
+    - condition: "refusal_person_count_given"
+      suggestion: "Shall I give you producer groups, or memberships paid for?"
+
+    - condition: "refusal_focus_plus_link_given"
+      suggestion: "See the Focus Plus figures on their own instead?"
+
+    - condition: "refusal_product_period_given"
+      suggestion: "See the product profile for FY2021-22 and FY2022-23?"
+
+    - condition: "measure_unavailable_in_source"
+      suggestion: "See what is recorded for that area instead?"
+
+  # =======================================================================
+  composer_checks:
+    critical: true
+    note: >
+      Assertions the composer runs against its own draft before sending. Each one catches
+      a failure this partition is specifically prone to.
+    checks:
+    - "Every money figure states its unit, or says the unit is unconfirmed. No bare ₹ symbol appears unless dim_scheme.money_unit was read."
+    - "Every money figure is accompanied by the membership figure or by the ₹5,000-per-member rate. No amount stands alone as a separate finding."
+    - "No average amount is described as an entitlement, a benefit level or a change in policy."
+    - "Every count says whether it is payments, producer groups or memberships. The word 'beneficiaries' does not appear unqualified."
+    - "The words 'people', 'individuals' or 'persons' are not used for a membership figure."
+    - "If a time series was given, FY2023-24 is named as a gap and is not shown as zero."
+    - "If a monthly or daily view was given, the answer says the money moves in batches."
+    - "If a product figure was given, the answer names FY2021-22 and FY2022-23 as the coverage."
+    - "If a village count or list was given, the answer says the unmatched payments were excluded and that the figure does not reconcile to the scheme total."
+    - "If a district or block name appears, it is title-cased for display even though the filter used uppercase."
+    - "No unmasked account number and no account-holder name appears anywhere in the draft."
+    - "If a group was named, its PG id appears alongside the name."
+    - "If a district was reported for a named group, it came from the geography registry and not from the letters in the PG id."
+    - "If the answer refused something, it offered the nearest real question and named it as a different question."
+    - "The phrase 'excluding placeholder records' does not appear - that is PMAY's rule, and this partition has no such column."
+    - "If a cross-scheme comparison was made, the two measures are named separately and are not added together."
+
+  # =======================================================================
+  maintenance:
+    companion_files:
+    - Annotations/Focus_Legacy/focuslegacy_schema_partitions.yaml
+    - Annotations/Focus_Legacy/focuslegacy_classification_rules.yaml
+    - Annotations/Focus_Legacy/focuslegacy_default_rules.yaml
+    - Annotations/Focus_Legacy/focuslegacy_entity_resolver.yaml
+    - Annotations/Focus_Legacy/focuslegacy_few_shot.yaml
+    - Annotations/Focus_Legacy/focuslegacy_foreign_key_augmentation.yaml
+    - Annotations/Focus_Legacy/README.md
+    - Annotations/PMAY/pmay_response_template.yaml   # the file format this one follows
+    regeneration_rules:
+    - "Every assumption_text in focuslegacy_default_rules.yaml should have a template here that can state it back. When a default is added, check the wording exists."
+    - "Every caveat in the seven-caveat list at the top of this file must have both a template and a composer_check. Adding a caveat means adding both."
+    - "If dim_scheme.money_unit is confirmed, set formatting.money_unit and delete the currency_symbol_rule - but keep the unit_statement template."
+    - "If FY2023-24 ever holds payments, the gap templates and their composer_check must be removed rather than left to contradict the data."
+    - "If the product field starts being captured again, narrow the coverage wording rather than deleting it."
+    - APPEND templates. Never delete one - a caveat that quietly disappears is how a wrong claim ships.

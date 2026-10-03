@@ -1,0 +1,832 @@
+# cmelevate_foreign_key_augmentation.yaml
+#
+# Join edges and the materialised join graph for CM Elevate - node 5.9.
+#
+#   nodes         what each object is, its grain, and whether it may be aggregated
+#   edges         every join, with the exact ON clause the generator must emit
+#   absent_edges  joins a generator will REACH FOR and that do not exist here
+#   join_graph    adjacency list, listed from the many side, traversed undirected
+#
+# declared: true      the edge is a real constraint in information_schema
+# declared: false     the edge exists only here
+# is_prohibited: true the generator must refuse this join and use `use_instead`
+#
+# ===========================================================================
+# v1.0 - 2026-09-04 - FIRST VERSION, WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# There is no flat-table predecessor for CM Elevate, so nothing here is a
+# rewrite and there are no retired edges. What this file has instead is
+# `absent_edges` - a list of the joins a generator trained on PMAY or MGNREGA
+# will naturally try and that DO NOT EXIST for this scheme.
+#
+# HOW THE CM ELEVATE GRAPH DIFFERS FROM PMAY'S
+#
+#   FOUR declared foreign keys, not five:
+#     cm_scheme_key -> dim_cm_elevate_scheme   NOT NULL   (no PMAY counterpart)
+#     geography_key -> dim_geography           NOT NULL
+#     scheme_key    -> dim_scheme              NOT NULL
+#     raw_id        -> raw.source_rows         nullable, outside the read boundary
+#
+#   NO year_key EDGE AT ALL. The column does not exist. PMAY has a nullable
+#   year_key needing a LEFT join; CM Elevate has nothing to join. This is the
+#   single most important line in this file - see absent_edges.dim_year.
+#
+#   NO status_key EDGE. dim_pmay_house_status is PMAY-only.
+#   NO alias_key EDGE. Geography was resolved at ingest.
+#
+#   EVERY NON-LINEAGE KEY IS NOT NULL, so curated.v_cm_elevate's two INNER
+#   joins are LOSSLESS - the view row count equals the fact row count. PMAY
+#   cannot say that: its year_key and status_key are nullable and its view has
+#   to use LEFT joins to avoid silently deleting rows.
+#
+#   TEN PROHIBITED FACT PAIRS EXIST IN megh_db, not six. There are five facts
+#   now, and CM Elevate is prohibited against all four of the others.
+#
+# Authority: SCHEMA_FOR_DEVELOPERS.md, rewritten 2026-09-04 from the live
+# database extract (DATABASE_SCHEMA.md, generated 2026-09-04 09:59 UTC).
+#
+# What is the same as PMAY: the generator emits no joins for ordinary questions,
+# because curated.v_cm_elevate already pre-joins both dimensions it needs. The
+# one routine exception is a scheme_specific containment query, which must run
+# against the fact so the GIN index applies.
+# ===========================================================================
+
+foreign_key_augmentation:
+
+  version: '1.0'
+  database: megh_db
+  schema: curated
+  read_role: megh_readonly
+  structure_verified: '2026-09-04'
+  primary_query_surface: curated.v_cm_elevate
+
+  # =======================================================================
+  nodes:
+
+    curated.v_cm_elevate:
+      role: fact_view
+      object_type: view
+      over: curated.fact_cm_elevate_application
+      primary_key: cm_elevate_fact_id
+      natural_key: none
+      grain: one row per application (request_id) across all 15 CM Elevate schemes
+      column_count: 22
+      aggregate_before_reporting: false
+      unit: none
+      row_count: unverified_in_db
+      note: >
+        THE DEFAULT FROM CLAUSE FOR EVERY CM ELEVATE QUESTION. Pre-joins
+        dim_cm_elevate_scheme and dim_geography, so the generator emits WHERE and
+        GROUP BY only. COUNT(*) is an APPLICATION count - a request, not an award.
+        request_id repeats, so it is not a key; cm_elevate_fact_id is.
+        UNLIKE PMAY THERE IS NO MANDATORY PREDICATE - no is_placeholder equivalent
+        exists. The one conditional rule is geography: add entity_type <> 'Unresolved'
+        to VILLAGE counts and lists, and to nothing else.
+      lossless_joins:
+        critical: true
+        text: >
+          BOTH JOINS IN THIS VIEW ARE INNER AND BOTH KEYS ARE NOT NULL ON THE FACT, so
+          the view loses no rows - its row count equals the fact's. This is a real
+          contrast with curated.v_pmay and curated.v_focus_plus, whose nullable year_key
+          forces LEFT joins. No "count the dropped rows" check is needed here.
+      no_measure:
+        critical: true
+        text: >
+          There is no numeric measure on this view. COUNT(*) is the entire aggregate
+          vocabulary. Any generated SQL containing SUM or AVG over one of its columns is
+          wrong by construction.
+
+    curated.fact_cm_elevate_application:
+      role: fact
+      object_type: table
+      primary_key: cm_elevate_fact_id
+      natural_key: none
+      grain: one row per application (request_id) across all 15 CM Elevate schemes
+      column_count: 20
+      aggregate_before_reporting: false
+      unit: none
+      row_count: unverified_in_db
+      note: >
+        The underlying fact. Reach for it when the question needs a column the view does
+        not expose - scheme_key or the audit columns - or when a scheme_specific
+        containment query should use the GIN index. Otherwise use v_cm_elevate, which
+        saves two joins.
+      gin_index:
+        name: idx_cm_elevate_specific_gin
+        on: scheme_specific
+        note: >
+          THE ONE ROUTINE REASON TO BYPASS THE VIEW. A containment query
+          (scheme_specific @> '{...}') uses this index only when it runs against the
+          fact. The same predicate against v_cm_elevate cannot use it.
+
+    curated.dim_cm_elevate_scheme:
+      role: dimension
+      object_type: table
+      primary_key: cm_scheme_key
+      natural_keys: [scheme_name, endpoint]
+      row_count: 15
+      grain: one row per individual scheme under the CM Elevate umbrella
+      scheme_scoped: true
+      safe_to_aggregate: false
+      note:
+        critical: true
+        text: >
+          NO PMAY COUNTERPART, AND THE MOST IMPORTANT DIMENSION IN THIS PARTITION.
+          CM Elevate is 15 schemes under one scheme_code, and cm_scheme_key is the only
+          column that separates them. Pre-joined into v_cm_elevate as scheme_name and
+          endpoint, so ordinary questions need no join.
+          READ IT DIRECTLY, not a DISTINCT over the fact, whenever the question is
+          "how many schemes" or "list the schemes" - a scheme with zero applications is
+          invisible in the fact. That is the one sanctioned LEFT JOIN in this partition.
+
+    curated.dim_scheme:
+      role: dimension
+      object_type: table
+      primary_key: scheme_key
+      row_count: 4
+      grain: one row per scheme
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        Constant within the CM Elevate partition - always the CM_ELEVATE row - so never
+        a grouping key for a CM Elevate question. Do not confuse dim_scheme.scheme_name
+        (the programme) with dim_cm_elevate_scheme.scheme_name (one of the 15); the view
+        exposes the latter.
+        Its money_unit column is NOT usable here: it carries a value only because the
+        column is NOT NULL, and there is no amount on the fact for it to describe.
+
+    curated.dim_geography:
+      role: dimension
+      object_type: table
+      primary_key: geography_key
+      natural_key: village_code
+      row_count: 7377
+      grain: one row per LGD village, ward or Unresolved placeholder
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        The conformed dimension that makes cross-scheme comparison possible at all.
+        NOT NULL on the fact side, so the join is lossless. District and block are NAMES
+        here - there is no district or block code exposed, and the source's block_lgd_code
+        is never trusted. Pre-joined into v_cm_elevate.
+        entity_type has THREE values - Village, Ward and Unresolved. CM Elevate reaches
+        urban wards, unlike rural-only PMAY-G.
+
+    curated.dim_year:
+      role: dimension
+      object_type: table
+      primary_key: year_key
+      row_count: 9
+      grain: one row per financial year
+      shared_across_schemes: true
+      reachable: true
+      used_by_cm_elevate: false
+      note:
+        critical: true
+        text: >
+          REACHABLE IN megh_db BUT NOT PART OF THE CM ELEVATE GRAPH, AND THIS IS THE
+          DEFINING FACT OF THIS FILE. fact_cm_elevate_application has NO year_key column
+          and no FK to this table. There is nothing to join on.
+          PMAY's equivalent edge exists and is merely nullable, needing a LEFT join.
+          CM Elevate's does not exist at all, so there is no join to write, no LEFT
+          fallback, and no "count the NULLs" check. A time question is refused, not
+          degraded. See absent_edges.dim_year.
+
+    curated.dim_pmay_house_status:
+      role: dimension
+      object_type: table
+      primary_key: status_key
+      grain: one row per construction stage
+      scheme_scoped: true
+      reachable: true
+      used_by_cm_elevate: false
+      note: >
+        PMAY-ONLY. fact_cm_elevate_application has no status_key. CM Elevate's four
+        status-shaped columns - data_verified, current_file_status, current_level and
+        application_mode - are uncontrolled varchars on the fact with no dimension and no
+        roll-up flags. Nothing here corresponds to is_completed.
+
+    curated.dim_geography_alias:
+      role: dimension
+      object_type: table
+      primary_key: alias_key
+      row_count: 31035
+      grain: one row per source spelling of a village
+      reachable: true
+      used_by_cm_elevate: false
+      note: >
+        REACHABLE BUT NOT PART OF THE CM ELEVATE GRAPH. fact_cm_elevate_application has
+        NO alias_key - geography was resolved at ingest through the tiered strategy
+        shared with Focus Plus. Only the two MGNREGA facts reference this table. Do not
+        join it from CM Elevate; it fans out ~31,035 aliases over ~7,377 villages.
+
+    curated.v_cross_scheme_money_district_year:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per scheme x district x financial year
+      aggregate_before_reporting: false
+      unit: crore_rupees
+      includes_cm_elevate: false
+      note:
+        critical: true
+        text: >
+          CM ELEVATE IS NOT IN THIS VIEW AND CANNOT BE. The view definition is a
+          two-branch UNION ALL over MGNREGA and PMAY only - verified from the live
+          definition on 2026-09-04, not inferred - and CM Elevate has neither a money
+          column to contribute nor a year to key on. A money comparison involving
+          CM Elevate is impossible, not merely awkward.
+
+    curated.v_cross_scheme_village_coverage:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per village
+      aggregate_before_reporting: false
+      includes_cm_elevate: false
+      note: >
+        Carries pmay_houses and mgnrega_person_days only - there is no CM Elevate column.
+        Village coverage is nonetheless the ONLY cross-scheme axis available to this
+        scheme, reached by the aggregate-then-join pattern in sanctioned_patterns.
+        Its measures are COALESCEd to 0, never NULL, so absence tests as = 0.
+
+    curated.fact_pmay_house:
+      role: fact
+      object_type: table
+      primary_key: pmay_fact_id
+      grain: one row per sanctioned PMAY-G house
+      unit: rupees
+      note: PMAY partition. Declared here only as the far end of a prohibited edge.
+
+    curated.fact_focus_plus_disbursement:
+      role: fact
+      object_type: table
+      primary_key: focus_plus_fact_id
+      grain: one row per disbursement to one member in one tranche
+      unit: unverified
+      note: >
+        Focus Plus partition, and the finest grain in megh_db. Declared here only as the
+        far end of a prohibited edge. It has no PMAY-era counterpart in the older
+        annotation files - there are five facts now, not four.
+
+    curated.fact_mgnrega_employment:
+      role: fact
+      object_type: table
+      primary_key: employment_fact_id
+      grain: one row per source row of the employment workbook
+      aggregate_before_reporting: true
+      note: MGNREGA partition. Declared here only as the far end of a prohibited edge.
+
+    curated.fact_mgnrega_expenditure:
+      role: fact
+      object_type: table
+      primary_key: expenditure_fact_id
+      grain: one row per source row of the expenditure workbook
+      aggregate_before_reporting: true
+      unit: lakh_rupees
+      note: >
+        MGNREGA partition, in LAKH rupees. Declared here only as the far end of a
+        prohibited edge.
+
+    meta.v_reconciliation_cm_elevate:
+      role: operational_view
+      object_type: view
+      grain: one row per CM Elevate sub-scheme endpoint
+      readable_by_read_role: false
+      note: >
+        Load-completeness check. raw_rows must equal curated_rows + quarantined for EACH
+        of the 15 endpoints independently, not merely in aggregate. It carries a fifth
+        column, scheme_name, that the other three reconciliation views do not - so it
+        does not UNION ALL with them without an explicit column list. Read alone, never
+        joined. Outside the megh_readonly boundary.
+
+    raw.source_rows:
+      role: lineage
+      object_type: table
+      primary_key: raw_id
+      readable_by_read_role: false
+      note: >
+        fact_cm_elevate_application.raw_id is a real declared FK to this table, but `raw`
+        is outside the megh_readonly boundary. The edge exists and the application cannot
+        traverse it. Note also that payload holds the verbatim source INCLUDING the PII
+        the loader stripped on the way into curated - another reason the boundary matters.
+        Lineage queries are a DBA task.
+
+    staging.quarantine:
+      role: operational
+      object_type: table
+      primary_key: quarantine_id
+      readable_by_read_role: false
+      note: >
+        Rows held back from curated with a reason code, keyed on source_dataset - which
+        for CM Elevate is the endpoint. Outside the read boundary; a data-team query.
+
+  # =======================================================================
+  edges:
+
+    # ---- REAL DECLARED FOREIGN KEYS -------------------------------------
+    # All four are constraints in information_schema as of 2026-09-04.
+    # The first three are already resolved inside curated.v_cm_elevate, so the
+    # generator should emit them ONLY when querying the fact directly.
+
+    - from_table: curated.fact_cm_elevate_application
+      from_column: cm_scheme_key
+      to_table: curated.dim_cm_elevate_scheme
+      to_column: cm_scheme_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      join_type: INNER
+      on_clause: "curated.fact_cm_elevate_application.cm_scheme_key = curated.dim_cm_elevate_scheme.cm_scheme_key"
+      prefer_instead: curated.v_cm_elevate
+      reason:
+        critical: true
+        text: >
+          THE EDGE WITH NO PMAY COUNTERPART, and the one that separates the 15 schemes.
+          NOT NULL on the fact side, so an inner join loses nothing. v_cm_elevate already
+          carries scheme_name and endpoint, so emit this join only against the raw fact.
+          The reverse direction - dimension to fact - is the one sanctioned LEFT JOIN in
+          this partition: use it when the answer must include schemes with zero
+          applications, which a fact-side query cannot show.
+
+    - from_table: curated.fact_cm_elevate_application
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      join_type: INNER
+      on_clause: "curated.fact_cm_elevate_application.geography_key = curated.dim_geography.geography_key"
+      prefer_instead: curated.v_cm_elevate
+      reason: >
+        The conformed geography join. NOT NULL on the fact side, so an inner join loses
+        nothing - every application has a geography_key, though it may point at an
+        Unresolved placeholder rather than a real village. v_cm_elevate already carries
+        village_code, lgd_village_name, lgd_block, lgd_district, on_roster,
+        has_geo_conflict and entity_type, so emit this join only against the raw fact.
+
+    - from_table: curated.fact_cm_elevate_application
+      from_column: scheme_key
+      to_table: curated.dim_scheme
+      to_column: scheme_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      join_type: INNER
+      on_clause: "curated.fact_cm_elevate_application.scheme_key = curated.dim_scheme.scheme_key"
+      prefer_instead: read dim_scheme on its own
+      reason: >
+        Constant within the CM Elevate partition - always the CM_ELEVATE row - so joining
+        it per row buys nothing. Read dim_scheme separately if an answer needs the
+        programme-level metadata, and remember its money_unit describes nothing here.
+        The sub-scheme split lives on the cm_scheme_key edge, not this one.
+
+    - from_table: curated.fact_cm_elevate_application
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      traversable_by_read_role: false
+      on_clause: "curated.fact_cm_elevate_application.raw_id = raw.source_rows.raw_id"
+      reason: >
+        Real constraint, unreachable in practice. `raw` is outside the megh_readonly
+        boundary, so the generator must never emit this join. Lineage is a DBA task -
+        and raw.source_rows.payload still holds the PII the loader stripped, so the
+        boundary is a privacy control, not just an access convention.
+
+    # ---- THE JOINS THAT MUST NEVER BE MADE -------------------------------
+    # There are FIVE facts in megh_db and all ten pairs are prohibited.
+    # CM Elevate contributes four of them.
+
+    - from_table: curated.v_cm_elevate
+      from_column: village_code
+      to_table: curated.fact_pmay_house
+      to_column: village_code
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_village_coverage
+      on_clause: null
+      reason: >
+        CROSS-SCHEME ROW-LEVEL JOIN. One row per APPLICATION against one row per HOUSE -
+        different grains, so the join multiplies both sides. No foreign key exists between
+        them and none ever will. Aggregate each side to village_code independently and
+        join the aggregates. Note the extra trap: PMAY carries a money column and
+        CM Elevate does not, so any combined figure is not merely inflated but
+        meaningless.
+
+    - from_table: curated.v_cm_elevate
+      from_column: village_code
+      to_table: curated.fact_focus_plus_disbursement
+      to_column: village_code
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: aggregate each side to village_code, then join the aggregates
+      on_clause: null
+      reason: >
+        One row per APPLICATION against one row per DISBURSEMENT TRANCHE. Focus Plus is
+        the finest grain in megh_db, so this join fans out hardest of the four. Neither
+        view appears in v_cross_scheme_village_coverage, so there is no pre-built path -
+        aggregate both sides yourself.
+
+    - from_table: curated.v_cm_elevate
+      from_column: village_code
+      to_table: curated.fact_mgnrega_employment
+      to_column: geography_key
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_village_coverage
+      on_clause: null
+      reason: >
+        One row per APPLICATION against one row per SOURCE ROW of a village-year workbook,
+        which itself repeats per village-year. The columns do not even mean the same
+        thing: CM Elevate's village_code is an LGD code, MGNREGA's geography_key is an
+        unstable surrogate. Use the coverage view, which aggregates each side first.
+
+    - from_table: curated.v_cm_elevate
+      from_column: village_code
+      to_table: curated.fact_mgnrega_expenditure
+      to_column: geography_key
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cross_scheme_village_coverage
+      on_clause: null
+      reason: >
+        Same grain and key mismatch as the employment edge. MGNREGA expenditure is in
+        LAKH rupees and CM Elevate has no money at all, so there is nothing to combine
+        even if the grains matched.
+
+    # ---- CM ELEVATE SPECIFIC PROHIBITIONS --------------------------------
+
+    - from_table: curated.v_cm_elevate
+      from_column: request_id
+      to_table: curated.v_cm_elevate
+      to_column: request_id
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cm_elevate
+      on_clause: null
+      reason: >
+        Self-join on the application number. request_id is NOT unique and carries no
+        unique constraint - about 36 numbers repeat across 64 rows, all inside Piggery -
+        so the join squares those groups. To find repeats use
+        GROUP BY request_id HAVING COUNT(*) > 1.
+
+    - from_table: curated.v_cm_elevate
+      from_column: village_code
+      to_table: curated.dim_geography_alias
+      to_column: geography_key
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cm_elevate
+      on_clause: null
+      reason: >
+        CM ELEVATE HAS NO alias_key. The alias table holds source spellings for other
+        schemes and it fans out - about 31,035 aliases over 7,377 villages, so joining it
+        multiplies CM Elevate rows by the alias count. Geography was resolved at ingest;
+        the names on v_cm_elevate are already canonical.
+
+    - from_table: curated.v_cm_elevate
+      from_column: none
+      to_table: curated.dim_pmay_house_status
+      to_column: status_key
+      cardinality: none
+      declared: false
+      is_prohibited: true
+      use_instead: data_verified on curated.v_cm_elevate
+      on_clause: null
+      reason: >
+        THERE IS NO JOIN COLUMN. dim_pmay_house_status is PMAY-only and
+        fact_cm_elevate_application has no status_key. A generator reaching for a status
+        dimension should use the data_verified column instead - and must not read it as a
+        funding decision, since it records whether the application's own data was found
+        valid.
+
+    - from_table: curated.v_cm_elevate
+      from_column: none
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: none
+      declared: false
+      is_prohibited: true
+      use_instead: none - the question is unanswerable
+      on_clause: null
+      reason:
+        critical: true
+        text: >
+          THERE IS NO JOIN COLUMN, AND THIS IS THE MOST IMPORTANT PROHIBITION IN THE FILE.
+          fact_cm_elevate_application has no year_key and no date of any kind. This is not
+          a nullable-key problem to be solved with a LEFT join, as it is for PMAY and
+          Focus Plus - there is simply nothing to join on.
+          Do NOT substitute ingested_at, which describes when the row was LOADED and would
+          present ETL activity as applicant behaviour. Do NOT parse a date out of
+          request_id: its 4th segment is unpadded and ambiguous, and a naive parse over the
+          source export resolved only 3,038 of 8,436 rows and produced dates after the
+          export date.
+          A time question about CM Elevate is refused, not degraded.
+
+    - from_table: curated.v_cm_elevate
+      from_column: [lgd_district]
+      to_table: curated.v_cross_scheme_money_district_year
+      to_column: [lgd_district]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: none - CM Elevate has no money and is absent from that view
+      on_clause: null
+      reason: >
+        The view holds MGNREGA and PMAY rows only and is keyed on district AND financial
+        year, which CM Elevate has no value for. Joining on district alone would fan every
+        CM Elevate application across every year of the other two schemes. There is no
+        correct version of this join.
+
+    - from_table: curated.v_cm_elevate
+      from_column: village_code
+      to_table: curated.v_cross_scheme_village_coverage
+      to_column: village_code
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: aggregate v_cm_elevate to village_code FIRST, then join the aggregate
+      on_clause: null
+      reason:
+        critical: true
+        text: >
+          PROHIBITED AT ROW LEVEL, PERMITTED AS AN AGGREGATE - the distinction matters.
+          The coverage view is one row per VILLAGE; v_cm_elevate is one row per
+          APPLICATION. Joining them directly repeats each village's pmay_houses and
+          mgnrega_person_days once per CM Elevate application in that village, inflating
+          both by the application count. Aggregate first. See
+          sanctioned_patterns.cross_scheme_coverage for the exact shape.
+
+    - from_table: curated.v_cm_elevate
+      from_column: any
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        The view does not expose raw_id, and `raw` is outside the read boundary in any
+        case. A lineage request is answered by telling the user it is a DBA task.
+
+    - from_table: curated.v_cm_elevate
+      from_column: any
+      to_table: meta.v_reconciliation_cm_elevate
+      to_column: any
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: read meta.v_reconciliation_cm_elevate alone
+      on_clause: null
+      reason: >
+        A reconciliation view is an aggregate OF the fact, not a second source. Joining
+        the detail to its own rollup repeats every per-endpoint figure once per
+        application. It is also outside the megh_readonly boundary. Read it alone.
+
+  # =======================================================================
+  # EDGES A GENERATOR WILL REACH FOR THAT DO NOT EXIST
+  # No PMAY counterpart. PMAY has `retired_edges` for joins that USED to exist;
+  # these never existed, and a generator trained on the other partitions will
+  # try them anyway.
+  # =======================================================================
+  absent_edges:
+
+  - expected_edge: fact_cm_elevate_application.year_key -> dim_year.year_key
+    status: column_does_not_exist
+    exists_for: [fact_pmay_house, fact_focus_plus_disbursement, fact_mgnrega_employment, fact_mgnrega_expenditure]
+    replacement: none
+    note:
+      critical: true
+      text: >
+        EVERY OTHER FACT IN megh_db HAS A year_key. CM Elevate does not - it is the only
+        fact with no time dimension at all. A generator that has seen the other four will
+        assume this edge. It does not exist, there is no LEFT-join fallback, and there is
+        no derivable substitute. Refuse the question.
+
+  - expected_edge: fact_cm_elevate_application.status_key -> dim_pmay_house_status.status_key
+    status: column_does_not_exist
+    exists_for: [fact_pmay_house]
+    replacement: data_verified (an uncontrolled varchar on the fact, not a dimension)
+    note: >
+      The replacement is not equivalent. data_verified has no roll-up flags, nothing
+      corresponding to is_completed, and it records data validity rather than progress.
+
+  - expected_edge: fact_cm_elevate_application.alias_key -> dim_geography_alias.alias_key
+    status: column_does_not_exist
+    exists_for: [fact_mgnrega_employment, fact_mgnrega_expenditure]
+    replacement: none needed - geography was resolved at ingest
+    note: >
+      Same as PMAY and Focus Plus. The three newer facts carry a denormalised
+      village_code instead and never need the alias table.
+
+  - expected_edge: curated.v_cm_elevate -> a monthly or financial-year pre-aggregate
+    status: object_does_not_exist
+    exists_for: [curated.v_pmay_monthly_sanctions]
+    replacement: none
+    note: >
+      PMAY has a monthly pre-aggregate because it has a date. CM Elevate has neither the
+      date nor the pre-aggregate. There is no CM Elevate analogue of
+      v_pmay_monthly_sanctions and there cannot be one until an application date is
+      ingested.
+
+  - expected_edge: curated.v_cm_elevate -> curated.v_cross_scheme_money_district_year
+    status: cm_elevate_absent_from_view
+    exists_for: [curated.v_pmay, curated.v_expenditure]
+    replacement: none
+    note: >
+      The view is a two-branch UNION ALL over MGNREGA and PMAY. Focus Plus is absent too.
+      A cross-scheme money answer covers two of the four schemes in megh_db - say so.
+
+  - expected_edge: a money or measure column on fact_cm_elevate_application
+    status: column_does_not_exist
+    exists_for: [fact_pmay_house, fact_focus_plus_disbursement, fact_mgnrega_expenditure]
+    replacement: none
+    note:
+      critical: true
+      text: >
+        Not a join edge, recorded here because it governs which joins are worth making.
+        CM Elevate has no amount, quantity or score. Aggregating it across any join
+        produces a count and nothing else, so a join undertaken to "get the money" is
+        always futile as well as prohibited.
+
+  # =======================================================================
+  # THE PATTERNS THAT ARE ALLOWED
+  # Two joins in this partition are sanctioned. Both are stated in full so the
+  # generator has a shape to copy rather than inventing one.
+  # =======================================================================
+  sanctioned_patterns:
+
+    schemes_including_zero:
+      purpose: >
+        Show all 15 schemes when some have no applications in the selected scope. The
+        ONLY LEFT JOIN this partition sanctions, and the only case where the dimension
+        is the driving table.
+      why_needed: >
+        A scheme with zero matching applications is invisible in a fact-side GROUP BY.
+        Eight of the 15 schemes are not statewide, so a district-scoped question routinely
+        produces empty schemes. A missing row and a zero row read very differently.
+      sql: |
+        SELECT d.scheme_name, COUNT(f.cm_elevate_fact_id) AS applications
+        FROM curated.dim_cm_elevate_scheme d
+        LEFT JOIN curated.fact_cm_elevate_application f USING (cm_scheme_key)
+        GROUP BY d.scheme_name
+        ORDER BY applications DESC;
+      note: >
+        COUNT(f.cm_elevate_fact_id), not COUNT(*) - COUNT(*) would return 1 for a scheme
+        with no applications because the LEFT JOIN produces one all-NULL row.
+
+    cross_scheme_coverage:
+      purpose: >
+        Compare which villages CM Elevate reaches against PMAY and MGNREGA. The only
+        cross-scheme axis available to this scheme.
+      why_needed: >
+        CM Elevate has no column in v_cross_scheme_village_coverage and no money to
+        compare, so the money view is closed to it entirely.
+      sql: |
+        WITH cm AS (
+          SELECT village_code, COUNT(*) AS cm_applications
+          FROM curated.v_cm_elevate
+          WHERE entity_type <> 'Unresolved'
+          GROUP BY village_code
+        )
+        SELECT c.village_code, c.lgd_district, c.pmay_houses, c.mgnrega_person_days,
+               COALESCE(cm.cm_applications, 0) AS cm_applications
+        FROM curated.v_cross_scheme_village_coverage c
+        LEFT JOIN cm USING (village_code);
+      rules:
+      - AGGREGATE CM ELEVATE FIRST. The CTE collapses applications to one row per village before the join.
+      - "Exclude entity_type = 'Unresolved' inside the CTE - the placeholder is not a village and would create a phantom village_code."
+      - "The coverage view COALESCEs its own measures to 0, never NULL. Test = 0, never IS NULL."
+      - Never join in the other direction at row level - see the prohibited edge.
+
+    jsonb_containment:
+      purpose: Query scheme_specific with the GIN index.
+      why_needed: The index lives on the fact; the same predicate against the view cannot use it.
+      sql: |
+        SELECT COUNT(*) AS applications
+        FROM curated.fact_cm_elevate_application
+        WHERE cm_scheme_key = {scheme_key}
+          AND scheme_specific @> '{"some_key": "some_value"}';
+      rules:
+      - Run against the FACT, not the view - this is the one routine reason to bypass v_cm_elevate.
+      - "Keep the cm_scheme_key filter. Keys differ per scheme, and ->> returns NULL for a missing key rather than erroring, so an absent field looks identical to an empty one."
+
+  # =======================================================================
+  join_graph:
+
+    # v_cm_elevate pre-joins both dimensions it needs, and both joins are INNER
+    # on NOT NULL keys, so the view is lossless and its list is empty.
+    # Ordinary questions emit WHERE and GROUP BY only.
+    curated.v_cm_elevate: []
+
+    # the raw fact is the only CM Elevate node with real outbound edges - four,
+    # against PMAY's five. No year_key, no status_key, no alias_key.
+    curated.fact_cm_elevate_application:
+    - {to: curated.dim_cm_elevate_scheme, on: cm_scheme_key, join_type: INNER}
+    - {to: curated.dim_geography,         on: geography_key, join_type: INNER}
+    - {to: curated.dim_scheme,            on: scheme_key,    join_type: INNER}
+    - {to: raw.source_rows,               on: raw_id,        join_type: INNER, traversable: false}
+
+    # the scheme dimension is the only node with a sanctioned inbound traversal
+    curated.dim_cm_elevate_scheme:
+    - {to: curated.fact_cm_elevate_application, on: cm_scheme_key, join_type: LEFT,
+       note: "reverse direction - used only to show schemes with zero applications"}
+
+    # dimensions are terminal
+    curated.dim_geography: []
+    curated.dim_scheme: []
+
+    # cross-scheme views are read alone; CM Elevate is in neither
+    curated.v_cross_scheme_money_district_year: []
+    curated.v_cross_scheme_village_coverage: []
+
+    # reachable in megh_db but closed to this scheme - see prohibited and absent edges
+    curated.dim_year: []
+    curated.dim_pmay_house_status: []
+    curated.dim_geography_alias: []
+    curated.fact_pmay_house: []
+    curated.fact_focus_plus_disbursement: []
+    curated.fact_mgnrega_employment: []
+    curated.fact_mgnrega_expenditure: []
+
+    # operational objects, outside the read boundary, read alone
+    meta.v_reconciliation_cm_elevate: []
+    raw.source_rows: []
+    staging.quarantine: []
+
+  # =======================================================================
+  # THE TEN PROHIBITED FACT PAIRS IN megh_db
+  # There are five facts now. CM Elevate contributes four pairs; the other six
+  # are listed for completeness so this file agrees with the other partitions.
+  # =======================================================================
+  prohibited_fact_pairs:
+    total: 10
+    cm_elevate_pairs:
+    - [fact_cm_elevate_application, fact_pmay_house]
+    - [fact_cm_elevate_application, fact_focus_plus_disbursement]
+    - [fact_cm_elevate_application, fact_mgnrega_employment]
+    - [fact_cm_elevate_application, fact_mgnrega_expenditure]
+    other_pairs:
+    - [fact_mgnrega_employment, fact_mgnrega_expenditure]
+    - [fact_pmay_house, fact_mgnrega_employment]
+    - [fact_pmay_house, fact_mgnrega_expenditure]
+    - [fact_focus_plus_disbursement, fact_mgnrega_employment]
+    - [fact_focus_plus_disbursement, fact_mgnrega_expenditure]
+    - [fact_focus_plus_disbursement, fact_pmay_house]
+    rule: >
+      No foreign key exists between any pair and no row-level join between any two is
+      meaningful - they sit at five different grains. Aggregate each side independently
+      to a shared grain first. These belong in semantic.join_graph with
+      is_prohibited = TRUE; confirm they are all present rather than assuming the harvest
+      inferred them.
+    verification: |
+      SELECT from_object, to_object, is_prohibited, sme_reviewed
+      FROM semantic.join_graph
+      WHERE is_prohibited
+      ORDER BY 1, 2;
+
+  # =======================================================================
+  maintenance:
+    schema_authority: SCHEMA_FOR_DEVELOPERS.md   # live database extract, 2026-09-04
+    last_generated: '2026-09-04'
+    declared_fk_count: 4
+    prohibited_edge_count: 12
+    absent_edge_count: 6
+
+    open_verification_tasks:
+      critical: true
+      note: >
+        The edges below were read from the live extract's constraint list and are trusted.
+        These items are about the graph's CONTENTS, not its shape.
+      tasks:
+      - "Confirm all four declared FKs are present: SELECT conname, conrelid::regclass, confrelid::regclass FROM pg_constraint WHERE conrelid = 'curated.fact_cm_elevate_application'::regclass AND contype = 'f';"
+      - "Confirm v_cm_elevate is lossless: SELECT (SELECT COUNT(*) FROM curated.v_cm_elevate) = (SELECT COUNT(*) FROM curated.fact_cm_elevate_application);"
+      - "Confirm the ten prohibited fact pairs are encoded in semantic.join_graph with is_prohibited = TRUE."
+      - "Confirm CM Elevate is genuinely absent from both cross-scheme views: SELECT DISTINCT scheme_code FROM curated.v_cross_scheme_money_district_year;"
+      - "Confirm meta.v_reconciliation_cm_elevate balances per endpoint, not merely in aggregate."
+      - "Confirm megh_readonly can SELECT the three new curated objects - a new table does not inherit a grant unless ALTER DEFAULT PRIVILEGES was in place. Run SELECT * FROM meta.v_access_matrix;"
+
+    regeneration_rules:
+    - Re-read the constraint list after every migration. A new FK changes this file, not just the schema doc.
+    - "If a year_key or a date column is ever added to fact_cm_elevate_application, absent_edges.dim_year must be REMOVED and a real edge added - and most of the refusals in the companion files stop being correct."
+    - "If a disbursement dataset is loaded as a second fact, add it as a node, add its prohibited pairs, and revisit v_cross_scheme_money_district_year."
+    - APPEND prohibited edges; never delete one. A join that was wrong stays wrong.
+    - Bump version.
+
+    companion_files:
+    - Annotations/CMElevate/cmelevate_schema_partitions.yaml
+    - Annotations/CMElevate/cmelevate_entity_resolver.yaml
+    - Annotations/CMElevate/cmelevate_classification_rules.yaml
+    - Annotations/CMElevate/cmelevate_default_rules.yaml
+    - Annotations/CMElevate/cmelevate_few_shot.yaml
+    - Annotations/CMElevate/README.md
+    - SCHEMA_FOR_DEVELOPERS.md

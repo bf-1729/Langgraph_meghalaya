@@ -1,0 +1,728 @@
+schema_version: '5.0'
+schema_name: mgnrega_combined_production_semantic_schema
+display_name: MGNREGA Combined Expenditure + Employment Production Semantic Schema
+architecture_alignment:
+  schema_linking: Enriched table and column documents are embedded for scheme-partitioned Qdrant retrieval.
+  entity_resolution: Dimension catalogue plus approved aliases, RapidFuzz, and BGE-small fallback.
+  join_discovery: information_schema FKs plus SME-reviewed implicit FK YAML; LLM never invents joins.
+  sql_generation: Retrieved schema, resolved entities, graph-generated joins, and curated question-to-SQL examples.
+  safety: SQLGlot read-only validation, enforced LIMIT, SELECT-only database role.
+  observability: Inputs, outputs, rule firings, SQL, results, chart spec, and response are traceable.
+datasets:
+  mgnrega_expenditure:
+    table_name: mgnrega_expenditure
+    source_file: Updated MNGREGA Expenditure WIth Year.xlsx
+    row_count: 18818
+    grain: village-year expenditure record
+    columns:
+    - name: exp_unskilled_wage
+      source_column: Exp_Unskilled_Wage
+      meaning: Expenditure on unskilled wages.
+      type: decimal
+      category: expenditure_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - unskilled wage expenditure
+      - unskilled wages
+      - wage expenditure
+      sample_values:
+      - '10.26'
+      - '4.1'
+      - '7.29'
+      - '9.71'
+      - '12.38'
+      - '8.66'
+      business_rules:
+      - Use SUM for total questions.
+    - name: exp_semi_skilled_wage
+      source_column: Exp_Semi_Skilled_Wage
+      meaning: Expenditure on semi-skilled wages.
+      type: decimal
+      category: expenditure_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - semi-skilled wage expenditure
+      - semi skilled wages
+      sample_values:
+      - '0.19'
+      - '0.0'
+      - '0.43'
+      - '0.3'
+      - '1.63'
+      - '0.33'
+      business_rules:
+      - Use SUM for total questions.
+    - name: exp_material
+      source_column: Exp_Material
+      meaning: Expenditure on materials.
+      type: decimal
+      category: expenditure_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - material expenditure
+      - material spending
+      - materials
+      sample_values:
+      - '7.02'
+      - '2.37'
+      - '5.27'
+      - '10.9'
+      - '3.64'
+      - '2.66'
+      business_rules:
+      - Use SUM for total questions.
+    - name: exp_tax
+      source_column: Exp_Tax
+      meaning: Tax-related expenditure recorded in the MGNREGA finance record.
+      type: decimal
+      category: expenditure_measure
+      nlp_sql_priority: high
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - tax expenditure
+      - tax expense
+      - tax spending
+      sample_values:
+      - '0.0'
+      - '0.07'
+      - '0.11'
+      - '0.05'
+      - '0.08'
+      - '0.02'
+      business_rules:
+      - Use SUM for total questions.
+    - name: total_exp
+      source_column: Total_Exp
+      meaning: Total expenditure recorded in the MGNREGA expenditure record.
+      type: decimal
+      category: expenditure_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - total expenditure
+      - total spending
+      - total expense
+      sample_values:
+      - '17.47'
+      - '6.47'
+      - '12.99'
+      - '20.61'
+      - '16.32'
+      - '11.62'
+      business_rules:
+      - Primary measure for total expenditure; prefer stored value.
+    - name: year
+      source_column: Year
+      meaning: Financial year of the MGNREGA expenditure record.
+      type: string
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - IN
+      synonyms:
+      - year
+      - financial year
+      - FY
+      sample_values:
+      - 2022-2023
+      - 2023-2024
+      - 2024-2025
+      - 2025-2026
+      business_rules:
+      - Use exact stored labels for this dataset.
+    - name: adm_exp_rec
+      source_column: Adm_Exp_Rec
+      meaning: Administrative recurring expenditure.
+      type: decimal
+      category: excluded_administrative_measure
+      nlp_sql_priority: excluded
+      sql_operations: []
+      synonyms: []
+      sample_values:
+      - '0.0'
+      - '0.9'
+      business_rules:
+      - Excluded unless explicitly enabled by policy.
+    - name: adm_exp_non_rec
+      source_column: Adm_Exp_Non_Rec
+      meaning: Administrative non-recurring expenditure.
+      type: decimal
+      category: excluded_administrative_measure
+      nlp_sql_priority: excluded
+      sql_operations: []
+      synonyms: []
+      sample_values:
+      - '0'
+      business_rules:
+      - Excluded unless explicitly enabled by policy.
+    - name: adm_exp_total
+      source_column: Adm_Exp_Total
+      meaning: Total administrative expenditure.
+      type: decimal
+      category: excluded_administrative_measure
+      nlp_sql_priority: excluded
+      sql_operations: []
+      synonyms: []
+      sample_values:
+      - '0.0'
+      - '0.9'
+      business_rules:
+      - Excluded unless explicitly enabled by policy.
+    - name: village_clean
+      source_column: Village_Clean
+      meaning: Cleaned/matched village text used in source mapping.
+      type: string
+      category: mapping_field
+      nlp_sql_priority: high
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      synonyms:
+      - clean village
+      sample_values:
+      - ASOKGRE
+      - ADAPGRE
+      - AGIMPAL NOKMA COLONY
+      - AGRENGGITTIM
+      - AGRONGGRE
+      - ALOKPANG BOBRAGITTIM
+    - name: village_code
+      source_column: Village_Code
+      meaning: LGD village code associated with the mapped village.
+      type: integer
+      category: geographic_identifier
+      nlp_sql_priority: high
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT DISTINCT
+      synonyms:
+      - village code
+      - LGD village code
+      - village id
+      sample_values:
+      - '276155'
+      - '276130'
+      - '276150'
+      - '276029'
+      - '276145'
+      - '276118'
+      business_rules:
+      - Identifier only; never SUM or AVG.
+    - name: lgd_village_name
+      source_column: LGD_Village_Name
+      meaning: LGD-standardized village name.
+      type: string
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - village
+      - LGD village
+      - official village name
+      sample_values:
+      - Asokgre
+      - Adapgre
+      - Agimpal Nokma Colony
+      - Agrenggitim
+      - Agronggre
+      - Alokpang Bobragittim
+      business_rules:
+      - Preferred canonical village field.
+    - name: lgd_district
+      source_column: LGD_District
+      meaning: LGD-standardized district name.
+      type: string
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - district
+      - LGD district
+      - standard district
+      sample_values:
+      - South Garo Hills
+      - West Garo Hills
+      - South West Garo Hills
+      - East Khasi Hills
+      - Ri Bhoi
+      - West Jaintia Hills
+      business_rules:
+      - Preferred canonical district field.
+    - name: lgd_block
+      source_column: LGD_Block
+      meaning: LGD-standardized block name.
+      type: string
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - block
+      - LGD block
+      - standard block
+      sample_values:
+      - BAGHMARA
+      - SIJU
+      - CHOKPOT
+      - GASUAPARA
+      - RONGARA
+      - DADENGGIRI
+      business_rules:
+      - Preferred canonical block field.
+  mgnrega_employment:
+    table_name: mgnrega_employment
+    source_file: MGNREGA_Employment(1).xlsx
+    row_count: 26375
+    grain: village-year employment record
+    columns:
+    - name: year
+      source_column: Year
+      meaning: MGNREGA financial year associated with the employment record.
+      type: string
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - IN
+      synonyms:
+      - year
+      - financial year
+      - FY
+      sample_values:
+      - 2022-23
+      - 2023-24
+      - 2024-25
+      - 2025-26
+      business_rules:
+      - Use exact stored labels for this dataset.
+    - name: benefit_to_households
+      source_column: Benefit to Households
+      meaning: Household benefit amount recorded in thousands of currency units.
+      type: decimal
+      category: benefit_measure
+      nlp_sql_priority: high
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - benefit to households
+      - household benefit
+      - benefit
+      sample_values:
+      - '9660.0'
+      - '8773.694267516'
+      - '2439.295774648'
+      - '15367.631578947'
+      - '22995.964912281'
+      - '21789.473684211'
+      business_rules:
+      - Stored in thousands of currency units.
+      - Use direct aggregate when requested in thousands.
+      - Multiply aggregate by 1000 only when base currency is explicitly requested.
+      - NULL is missing, not zero.
+      unit: thousands_of_currency_units
+      value_scale: 1000
+    - name: employment_provided_households
+      source_column: Employment Provided Households
+      meaning: Number of households provided employment under MGNREGA.
+      type: integer
+      category: employment_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - households employed
+      - households provided employment
+      - households given work
+      sample_values:
+      - '2'
+      - '157'
+      - '0'
+      - '213'
+      - '38'
+      - '57'
+      business_rules:
+      - Use SUM for total households.
+    - name: employment_provided_persons
+      source_column: Employment Provided Persons
+      meaning: Number of persons provided employment under MGNREGA.
+      type: integer
+      category: employment_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - persons employed
+      - people employed
+      - persons provided employment
+      sample_values:
+      - '2'
+      - '227'
+      - '0'
+      - '213'
+      - '38'
+      - '123'
+      business_rules:
+      - Use SUM for total persons.
+    - name: employment_provided_total_person_days
+      source_column: Employment Provided Total Person Days
+      meaning: Total person-days of employment provided under MGNREGA.
+      type: integer
+      category: employment_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - person days
+      - person-days
+      - total person days
+      - employment days
+      sample_values:
+      - '84'
+      - '5989'
+      - '0'
+      - '2259'
+      - '2539'
+      - '5699'
+      business_rules:
+      - Use SUM for total person-days.
+    - name: households_completed_100_days_work
+      source_column: Households Completed 100 Days Work
+      meaning: Number of households that completed 100 days of MGNREGA work.
+      type: integer
+      category: employment_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - 100 days completed
+      - households completed 100 days
+      - 100 days work
+      sample_values:
+      - '0'
+      - '56'
+      - '10'
+      - '57'
+      - '49'
+      - '62'
+      business_rules:
+      - Use SUM for totals.
+    - name: job_cards_issued_total
+      source_column: Job Cards Issued Total
+      meaning: Total number of MGNREGA job cards issued.
+      type: integer
+      category: employment_measure
+      nlp_sql_priority: high
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - job cards
+      - job cards issued
+      - total job cards
+      sample_values:
+      - '422'
+      - '194'
+      - '290'
+      - '264'
+      - '266'
+      - '45'
+      business_rules:
+      - Use SUM for totals.
+    - name: women_employment_provided
+      source_column: Women Employment Provided
+      meaning: Number of women provided employment under MGNREGA.
+      type: integer
+      category: employment_measure
+      nlp_sql_priority: critical
+      sql_operations:
+      - SUM
+      - AVG
+      - MIN
+      - MAX
+      synonyms:
+      - women employed
+      - women provided employment
+      - female employment
+      sample_values:
+      - '1'
+      - '138'
+      - '187'
+      - '0'
+      - '13'
+      - '62'
+      business_rules:
+      - Use SUM for totals.
+    - name: village
+      source_column: Village
+      meaning: Source village name associated with the employment record.
+      type: string
+      category: mapping_field
+      nlp_sql_priority: medium
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      synonyms:
+      - village name
+      - source village
+      sample_values:
+      - 12TH MER
+      - 15TH MILE NONGTHYMMAI
+      - 5TH MILE
+      - 6TH MILE FARM
+      - ABAGRE
+      - ABANDA
+    - name: village_code
+      source_column: Village.1
+      meaning: Village/LGD code associated with the source village.
+      type: integer
+      category: geographic_identifier
+      nlp_sql_priority: high
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT DISTINCT
+      synonyms:
+      - village code
+      - LGD village code
+      - village id
+      sample_values:
+      - '278507'
+      - '277485'
+      - '278299'
+      - '278304'
+      - '273035'
+      - '274688'
+      business_rules:
+      - Identifier only; do not aggregate numerically.
+    - name: lgd_village_name
+      source_column: LGD_Village_Name
+      meaning: LGD-standardized village name.
+      type: string
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - village
+      - LGD village
+      - official village name
+      sample_values:
+      - 12TH MER
+      - 15TH MILE NONGTHYMMAI
+      - 5TH MILE
+      - 6TH MILE FARM
+      - ABAGRE
+      - ABANDA
+      business_rules:
+      - Preferred canonical village field.
+    - name: lgd_district
+      source_column: LGD_District
+      meaning: LGD-standardized district name.
+      type: string
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - district
+      - LGD district
+      - standard district
+      sample_values:
+      - EAST KHASI HILLS
+      - RI BHOI
+      - WEST GARO HILLS
+      - NORTH GARO HILLS
+      - WEST KHASI HILLS
+      - EAST GARO HILLS
+      business_rules:
+      - Preferred canonical district field.
+    - name: lgd_block
+      source_column: LGD_Block
+      meaning: LGD-standardized block name.
+      type: string
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - block
+      - LGD block
+      - standard block
+      sample_values:
+      - KHATARSHNONG LAITKROH
+      - UMLING
+      - MYLLIEM
+      - SELSELLA
+      - RESUBELPARA
+      - GAMBEGRE
+      business_rules:
+      - Preferred canonical block field.
+    - name: assembly_constituency_name
+      source_column: Assembly Constituency Name
+      meaning: Assembly constituency associated with the mapped village.
+      type: string
+      category: political_geography_dimension
+      nlp_sql_priority: high
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - constituency
+      - assembly constituency
+      - AC
+      sample_values:
+      - SOHRA
+      - JIRANG
+      - MYLLIEM
+      - SELSELLA
+      - MENDIPATHAR
+      - GAMBEGRE
+      business_rules:
+      - Use for constituency-level analysis.
+    - name: assembly_constituency_name_and_number
+      source_column: Assembly Constituency Name and Number
+      meaning: Combined assembly constituency number and name.
+      type: string
+      category: political_geography_dimension
+      nlp_sql_priority: high
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - constituency number
+      - AC number
+      - assembly constituency number
+      sample_values:
+      - 28 SOHRA
+      - 10 JIRANG
+      - 20 MYLLIEM
+      - 48 SELSELLA
+      - 38 MENDIPATHAR
+      - 56 GAMBEGRE
+      business_rules:
+      - Use when number and name are requested.
+    - name: match_method
+      source_column: Match_Method
+      meaning: Method used to map source village to LGD village.
+      type: string
+      category: etl_metadata
+      nlp_sql_priority: low
+      sql_operations:
+      - WHERE
+      - GROUP BY
+      - COUNT
+      synonyms:
+      - match method
+      - mapping method
+      sample_values:
+      - Direct - current LGD
+      - Via shifted-village list
+      business_rules:
+      - ETL metadata; exclude from normal business answers unless asked.
+semantic_rules:
+  geography_hierarchy:
+  - lgd_district
+  - lgd_block
+  - lgd_village_name
+  time_dimension: year
+  year_formats:
+    mgnrega_expenditure: YYYY-YYYY
+    mgnrega_employment: YYYY-YY
+  year_runtime_rule: Preserve exact stored label for the selected dataset.
+  beneficiary_term:
+    status: SME_CONFIRMATION_REQUIRED
+    reason: Source has household and person measures but no single beneficiary field.
+    candidate_measures:
+    - employment_provided_households
+    - employment_provided_persons
+    runtime_behavior: Ask whether households or persons are intended.
+  benefit_to_households:
+    unit: thousands_of_currency_units
+    base_currency_conversion: SUM(benefit_to_households) * 1000 only when explicitly requested.
+  excluded_expenditure_columns:
+  - adm_exp_rec
+  - adm_exp_non_rec
+  - adm_exp_total
+  null_behavior: NULL is missing; never silently coerce to zero.
+nlp_sql_rules:
+  read_only: true
+  allowed_operations:
+  - SELECT
+  aggregation_defaults:
+    total_expenditure: SUM(total_exp)
+    unskilled_wage: SUM(exp_unskilled_wage)
+    semi_skilled_wage: SUM(exp_semi_skilled_wage)
+    material: SUM(exp_material)
+    tax: SUM(exp_tax)
+    employment_households: SUM(employment_provided_households)
+    employment_persons: SUM(employment_provided_persons)
+    person_days: SUM(employment_provided_total_person_days)
+    completed_100_days: SUM(households_completed_100_days_work)
+    job_cards: SUM(job_cards_issued_total)
+    women_employment: SUM(women_employment_provided)
+    benefit_to_households: SUM(benefit_to_households)
+  comparison: Filter requested years and GROUP BY year; do not invent year semantics.
+  ranking: ORDER BY requested aggregate and default top 5 when N is omitted, recording the assumption.
+  entity_behavior: Resolve exact values and approved aliases before SQL generation.
+  unknown_entity: Do not guess; return not-found/did-you-mean.
+  cross_dataset_join: Only if a verified graph path exists.

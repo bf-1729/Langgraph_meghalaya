@@ -1,0 +1,430 @@
+# pmay_default_rules.yaml
+#
+# Default rules for PMAY-G - node 5.5. Runs after the clarification gate.
+# Each rule fills a missing detail silently and hands the response composer an
+# assumption line, so the user can correct it without being interrupted first.
+# Editable by analysts - no code change needed.
+#
+# A condition must live in EITHER the clarification file OR this one. The gate runs
+# first, so any condition present in both will always ask and never default.
+# {placeholders} are filled from the resolved query at runtime.
+#
+# ===========================================================================
+# v2.0 - 2026-08-24 - RETARGETED TO THE CURATED STAR SCHEMA
+#
+# These rules were written against the flat table pmay_beneficiaries, which does
+# not exist in megh_db. What changed here:
+#
+#   * a NEW default fires on every count and sum: exclude is_placeholder rows
+#   * completion defaults to the is_completed flag, not a status string
+#   * pending amount is a STORED column, no longer sanctioned minus released
+#   * the financial year is a STORED column, no longer derived from sanction_date
+#   * "which table" defaults now point at curated.v_pmay and the monthly view
+#   * geography filters are UPPERCASE and there is no district or block code
+#   * a name-lookup default was REMOVED - the name columns are gone
+#
+# EVERY NUMBER IN AN assumption_text BELOW IS A SOURCE-WORKBOOK FIGURE
+# (2026-08-21) AND HAS NOT BEEN RE-MEASURED AGAINST megh_db. They are kept
+# because a stated assumption with a stale number is still better than a silent
+# one, but re-verify before these reach a user.
+# ===========================================================================
+#
+# Reserved for pmay_classification_rules.yaml, not defaulted here: a bare four-digit
+# year (calendar 2023 is 110,890 records against FY 2023-24 106,527), a request for a
+# completion date (only sanction_date exists), and anything the source cannot answer
+# at all - administrative expenditure, per-capita, budget-vs-actual, income or caste.
+
+default_rules:
+
+  # ---- data quality - NEW IN v2.0, fires before everything else ----------
+  - condition: "placeholder_rows_in_any_count_or_sum"
+    default_value: "exclude_placeholders"
+    assumption_text: "Placeholder records are excluded; they are not real sanctioned houses."
+    sql_effect: "WHERE NOT is_placeholder"
+    v2_note: >
+      NEW. The flat table had no such flag, so v1.0 counted everything. This default
+      applies to every count and every sum unless the question is explicitly about data
+      completeness.
+
+  - condition: "houses_with_no_financial_year"
+    default_value: "report_separately"
+    assumption_text: "Houses whose sanction date falls outside the years held in the database are reported separately rather than dropped."
+    v2_note: >
+      NEW. year_key is nullable, so a GROUP BY on financial year silently drops those
+      houses. How many there are is UNVERIFIED - see the coverage_conflict note in
+      pmay_entity_resolver.yaml. Count the NULL bucket before publishing a time series.
+
+  - condition: "completed_underfunded_rows_present"
+    default_value: "include_and_flag"
+    assumption_text: "Houses recorded complete with less released than sanctioned are included, and the count is stated."
+    v2_note: NEW. completed_underfunded is a stored flag. It is a finding, not noise.
+
+  # ---- time -------------------------------------------------------------
+  - condition: "missing_time_period"
+    default_value: "all_available_years"
+    assumption_text: "Covering all sanctions to date, FY 2017-18 to FY 2023-24."
+
+  - condition: "relative_year_latest"
+    default_value: "2023-24"
+    assumption_text: "Taking the latest year as FY 2023-24, which runs only to 4 July 2023."
+
+  - condition: "relative_year_previous"
+    default_value: "2022-23"
+    assumption_text: "Taking last year as FY 2022-23."
+
+  - condition: "relative_year_earliest"
+    default_value: "2017-18"
+    assumption_text: "Taking the earliest year as FY 2017-18, which opens on 9 August 2017."
+
+  - condition: "multi_year_request_without_years"
+    default_value: "all_available_years"
+    assumption_text: "Covering all seven years, FY 2017-18 to FY 2023-24."
+
+  - condition: "trend_without_period"
+    default_value: "all_available_years"
+    assumption_text: "Trend shown across all seven years, FY 2017-18 to FY 2023-24."
+
+  - condition: "comparison_without_second_period"
+    default_value: "preceding_financial_year"
+    assumption_text: "Compared against the preceding year, FY {previous_year}."
+
+  - condition: "year_range_partly_outside_data"
+    default_value: "clamp_to_available_range"
+    assumption_text: "Sanctions run from 9 August 2017 to 4 July 2023, so the period has been trimmed to {applied_range}."
+
+  - condition: "no_records_in_requested_period"
+    default_value: "state_data_span"
+    assumption_text: "No sanctions are recorded for {value}; the data runs from 9 August 2017 to 4 July 2023."
+
+  - condition: "financial_year_requested"
+    default_value: "derive_from_sanction_date"
+    assumption_text: "Financial years run April to March and are derived from the sanction date."
+
+  - condition: "trend_includes_partial_final_year"
+    default_value: "include_with_note"
+    assumption_text: "FY 2023-24 is included but covers only April to June 2023, so the last point is a part-year, not a decline."
+
+  - condition: "completion_rate_for_latest_year"
+    default_value: "include_with_note"
+    assumption_text: "FY 2023-24 shows 67.57% completion because those houses are the newest, not because progress slowed."
+
+  - condition: "dateless_records_in_time_query"
+    default_value: "exclude"
+    assumption_text: "126 records have no sanction date and are left out of year-based figures."
+
+  - condition: "month_or_quarter_without_type"
+    default_value: "calendar"
+    assumption_text: "Quarters and months are calendar-based, so Q1 is January to March."
+
+  - condition: "time_dimension_unspecified"
+    default_value: "sanction_date"
+    assumption_text: "Dated by sanction date, the only date recorded - there is no completion or release date."
+
+  # ---- geography --------------------------------------------------------
+  - condition: "missing_geography"
+    default_value: "all_districts"
+    assumption_text: "Covering all 12 districts of Meghalaya."
+
+  - condition: "whole_state_reference"
+    default_value: "no_district_filter"
+    assumption_text: "Figures are statewide."
+
+  - condition: "missing_breakdown_level"
+    default_value: "district"
+    assumption_text: "Broken down by district."
+
+  - condition: "region_group_named"
+    default_value: "expand_to_member_districts"
+    assumption_text: "{region} covers {districts}."
+
+  - condition: "ri_bhoi_as_region"
+    default_value: "single_district"
+    assumption_text: "Ri Bhoi is its own group and is not counted under Khasi Hills."
+
+  - condition: "colliding_name_without_level"
+    default_value: "block"
+    assumption_text: "Reading {value} as a block, which is the level users mean; 26 block names are also village names."
+
+  - condition: "geography_filter_form_unspecified"
+    default_value: "lgd_name_uppercase"
+    assumption_text: "Filtered on the LGD district name."
+    v2_note: >
+      CHANGED. v1.0 said "code and name are interchangeable". They are not any more -
+      the curated layer has NO district or block code column at all, only names, and
+      dim_geography stores district and block UPPERCASE. Emit the uppercase literal."
+
+  - condition: "fuzzy_mapped_rows_in_geography_totals"
+    default_value: "include"
+    assumption_text: "Records fuzzy-mapped to their village are included."
+    v2_note: >
+      CHANGED. The 34,966 / 20.4% figures were computed from the 44 raw labels in the
+      workbook. The curated layer buckets them into mapping_category and stores
+      mapping_confidence_pct separately, and the bucket values are unknown. Re-measure
+      before quoting a share."
+
+  - condition: "mapping_quality_not_requested"
+    default_value: "no_mapping_filter"
+    assumption_text: "All records are counted regardless of LGD mapping confidence."
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "missing_scheme"
+    default_value: "pmay"
+    assumption_text: "Answering for PMAY-G rural housing."
+
+  - condition: "iay_named"
+    default_value: "pmay"
+    assumption_text: "IAY is the predecessor scheme; the data held is PMAY-G only."
+
+  - condition: "bare_house_or_beneficiary_term"
+    default_value: "count_houses"
+    assumption_text: "Counted as houses - one row is one sanctioned house."
+    v2_note: >
+      CHANGED. The curated grain is one row per HOUSE and the beneficiary name columns
+      were dropped at ingest, so "record" is no longer the right word and "beneficiary"
+      can no longer mean a named person."
+
+  - condition: "beneficiary_uniqueness_unspecified"
+    default_value: "count_all_houses"
+    assumption_text: "Counting houses rather than distinct registrations; some registration numbers appear more than once."
+    v2_note: >
+      CHANGED. reg_no is NULLABLE in the curated layer, so COUNT(DISTINCT reg_no) also
+      silently drops the rows with no registration number. Say so if that path is taken."
+
+  - condition: "bare_amount_term"
+    default_value: "amount_released"
+    assumption_text: "Using amount released - sanctioned amount is a flat 1,30,000 per house, so it only restates the house count."
+
+  - condition: "sanctioned_amount_ranking"
+    default_value: "report_as_house_count"
+    assumption_text: "Sanctioned amount is a flat 1,30,000 per house, so this ranking is the same as ranking by number of houses."
+
+  - condition: "average_sanctioned_amount_requested"
+    default_value: "report_with_constant_note"
+    assumption_text: "The average is the flat per-house entitlement of 1,30,000, not a spread."
+
+  - condition: "sanctioned_word_with_year"
+    default_value: "sanction_date_filter"
+    assumption_text: "Reading 'sanctioned in {value}' as a date filter across all houses, not the 'House Sanctioned' stage."
+
+  - condition: "completion_measure_unspecified"
+    default_value: "is_completed_flag"
+    assumption_text: "Completion is taken from the recorded construction status, not from installments paid or amount released."
+    sql_effect: "WHERE is_completed"
+    v2_note: >
+      CHANGED. Use the stored boolean is_completed rather than a status_name string
+      comparison. It is the database's own roll-up."
+
+  - condition: "incomplete_or_pending_houses"
+    default_value: "is_completed_is_distinct_from_true"
+    assumption_text: "Pending means any house not recorded as completed, including houses with no stage recorded."
+    sql_effect: "WHERE is_completed IS DISTINCT FROM TRUE"
+    v2_note:
+      critical: true
+      text: >
+        CHANGED, AND THIS ONE IS A CORRECTNESS FIX. is_completed is NULLABLE, so
+        NOT is_completed would drop the houses whose roll-up is undecided as well as the
+        completed ones. IS DISTINCT FROM TRUE keeps them. The v1.0 count of 41,154 was
+        a member-list sum from the workbook and is not re-verified."
+
+  - condition: "in_progress_houses"
+    default_value: "is_in_progress_flag"
+    assumption_text: "Under construction is taken from the recorded construction status."
+    sql_effect: "WHERE is_in_progress"
+    v2_note: >
+      CHANGED. is_in_progress is a stored roll-up on dim_pmay_house_status. Prefer it
+      over the v1.0 member list - if the two disagree, the database is right."
+
+  - condition: "women_reference"
+    default_value: "all_woman_categories"
+    assumption_text: "Women covers Woman-Married, Woman-Widow, Woman-Unmarried and Woman - 46,520 houses. The 110,365 joint husband-and-wife allotments are counted separately."
+
+  - condition: "installment_stage_term"
+    default_value: "count_records"
+    assumption_text: "Counting houses at that installment stage rather than adding installments up."
+
+  - condition: "total_installments_term"
+    default_value: "sum_installments_paid"
+    assumption_text: "Adding installments across houses, as asked."
+    v2_note: "RENAMED. The column is installments_paid (plural) in the curated layer."
+
+  - condition: "utilisation_term"
+    default_value: "released_over_sanctioned"
+    assumption_text: "Utilisation is amount released over amount sanctioned - 98.31% statewide."
+
+  - condition: "pending_amount_term"
+    default_value: "amount_pending_column"
+    assumption_text: "Pending amount is read from the recorded pending amount."
+    sql_effect: "SUM(amount_pending)"
+    v2_note:
+      critical: true
+      text: >
+        CHANGED. amount_pending is a STORED column now. The v1.0 derivation
+        SUM(sanctioned_amount - amount_released) with a NULL guard must NOT be emitted.
+        Watch the collision - "pending houses" is a construction question (is_completed),
+        "pending amount" is this."
+
+  - condition: "money_per_house_requested"
+    default_value: "avg_amount_released"
+    assumption_text: "Measured as average amount released per house."
+
+  - condition: "singleton_categories_in_breakdown"
+    default_value: "include_with_note"
+    assumption_text: "Self and Woman hold one record each (n=1) and are almost certainly data-entry artefacts."
+
+  # ---- which table ------------------------------------------------------
+  - condition: "financial_year_level_question"
+    default_value: "curated.v_pmay"
+    assumption_text: "Answered from the house records, grouped on the recorded financial year."
+    v2_note:
+      critical: true
+      text: >
+        CHANGED. pmay_fy_summary DOES NOT EXIST in megh_db. Its replacement,
+        curated.v_pmay_monthly_sanctions, is MONTHLY and statewide, and carries only four
+        columns - completed, pending, completion_pct and utilisation_pct are all gone
+        from it. Financial-year questions are therefore answered from curated.v_pmay
+        using the stored financial_year_short, not from a summary object.
+
+  - condition: "monthly_question"
+    default_value: "curated.v_pmay_monthly_sanctions"
+    assumption_text: "Answered from the monthly sanction summary, which is statewide and already in crore."
+    v2_note: >
+      NEW. Monthly analysis is possible for PMAY and impossible for MGNREGA. If the
+      question needs a geography breakdown the summary cannot serve it - fall back to
+      grouping curated.v_pmay on sanction_month.
+
+  - condition: "all_time_total_table_choice"
+    default_value: "curated.v_pmay"
+    assumption_text: "Using all house records held in the database, excluding placeholders."
+    v2_note: >
+      CHANGED. The v1.0 171,107 / 170,981 reconciliation was between two workbooks and
+      no longer applies. The curated row count is UNVERIFIED.
+
+  - condition: "cross_table_request"
+    default_value: "curated.v_pmay"
+    assumption_text: "Answered from the house records; the monthly view is a pre-aggregate of the same data, not a separate source."
+
+  - condition: "cross_scheme_money_question"
+    default_value: "curated.v_cross_scheme_money_district_year"
+    assumption_text: "Compared through the cross-scheme district-year view, with both schemes converted to crore."
+    v2_note:
+      critical: true
+      text: >
+        NEW - v1.0 said cross-scheme questions had no path. They have one now. The view
+        carries measure_semantics because the two amounts mean different things: PMAY's
+        is money RELEASED, MGNREGA's is expenditure INCURRED. That string must be carried
+        into the answer.
+
+  - condition: "cross_scheme_coverage_question"
+    default_value: "curated.v_cross_scheme_village_coverage"
+    assumption_text: "Answered from the cross-scheme village coverage view; each scheme is counted independently."
+    v2_note: NEW. NULL on either measure means no activity, and that is the finding."
+
+  # ---- units ------------------------------------------------------------
+  - condition: "money_unit_unspecified"
+    default_value: "crore"
+    assumption_text: "Amounts are in crore rupees."
+    v2_note:
+      critical: true
+      text: >
+        UNCHANGED AS A DEFAULT, BUT THE CONVERSION IS NOW LOAD-BEARING. curated.v_pmay
+        stores RUPEES, while v_pmay_monthly_sanctions and the cross-scheme money view are
+        already CRORE, and MGNREGA expenditure is LAKH. Three units are live at once.
+        Divide the v_pmay columns by 1e7; never add a rupee figure to a crore one. The
+        authority is curated.dim_scheme.money_unit."
+
+  - condition: "single_record_money_value"
+    default_value: "rupees"
+    assumption_text: "Amounts are in rupees."
+
+  - condition: "money_below_one_crore"
+    default_value: "lakh"
+    assumption_text: "Amounts are in lakh rupees, as the figures are below one crore."
+
+  - condition: "percentage_precision_unspecified"
+    default_value: 2
+    assumption_text: "Percentages are rounded to two decimal places."
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_function"
+    default_value: "count_records"
+    assumption_text: "Figures are counts of house records."
+
+  - condition: "money_aggregation_unspecified"
+    default_value: "SUM"
+    assumption_text: "Amounts are summed across the selected records."
+
+  - condition: "village_count_requested"
+    default_value: "count_distinct_village_lgd_code"
+    assumption_text: "Villages are counted by LGD code, since 198 village names are shared by more than one village."
+
+  - condition: "sanction_count_requested"
+    default_value: "count_distinct_sanction_no"
+    assumption_text: "Sanctions are counted by sanction number; one sanction order can cover up to 322 houses."
+
+  - condition: "missing_top_n"
+    default_value: 5
+    assumption_text: "Showing the top 5."
+
+  - condition: "singular_superlative_without_n"
+    default_value: 1
+    assumption_text: "Showing the single highest."
+
+  - condition: "ranking_direction_unspecified"
+    default_value: "descending"
+    assumption_text: "Ranked highest first."
+
+  - condition: "missing_sort_column"
+    default_value: "requested_metric"
+    assumption_text: "Sorted by {metric}."
+
+  - condition: "missing_result_limit"
+    default_value: 10
+    assumption_text: "Showing the first 10 rows."
+
+  - condition: "beneficiary_row_listing_limit"
+    default_value: 100
+    assumption_text: "Showing the first 100 matching records."
+
+  - condition: "status_ordering_unspecified"
+    default_value: "stage_order"
+    assumption_text: "Statuses are listed in construction order, Proposed Site through Completed."
+
+  - condition: "beneficiary_name_lookup"
+    default_value: "not_held_in_data"
+    assumption_text: "Beneficiary names are not held in the database, so a name lookup cannot be answered."
+    v2_note:
+      critical: true
+      text: >
+        RETIRED AS A DEFAULT. beneficiary_name and father_mother_name were dropped at
+        ingest and there is no join that recovers them. This must not silently default to
+        anything - it returns not-held. The v1.0 behaviour of listing matching rows is
+        impossible."
+
+  - condition: "chart_type_unspecified"
+    default_value: "auto_by_result_shape"
+    assumption_text: "Chart type chosen to suit the shape of the result."
+
+  # ---- nulls and zeros --------------------------------------------------
+  - condition: "null_measure_values"
+    default_value: "exclude_from_average"
+    assumption_text: "462 records with no release recorded are left out of the average rather than counted as zero."
+
+  - condition: "null_house_status"
+    default_value: "exclude_from_breakdown_only"
+    assumption_text: "Houses with no construction status recorded are excluded from status breakdowns, and the count is stated."
+    v2_note: >
+      CHANGED. Excluded from BREAKDOWNS only - they must still be counted in totals and
+      in "not completed". The v1.0 count of 12 is a workbook figure, unverified."
+
+  - condition: "null_parent_name_grouping"
+    default_value: "not_held_in_data"
+    assumption_text: "Parent names are not held in the database."
+    v2_note: RETIRED. father_mother_name was dropped at ingest. There is no column to group on."
+
+  - condition: "zero_measure_values"
+    default_value: "include_with_note"
+    assumption_text: "Zero sanctioned amounts are included in all-time totals."
+    v2_note: >
+      The v1.0 link between zero amounts and the 126 dateless records is a workbook
+      finding. Whether those rows loaded as is_placeholder, as year_key NULL, or as
+      ordinary rows is UNVERIFIED - check before repeating the explanation."

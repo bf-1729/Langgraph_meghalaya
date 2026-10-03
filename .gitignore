@@ -1,0 +1,36 @@
+# Secrets — these were pulled from the live server and contain real
+# DB credentials and API keys. Never commit them.
+.env
+.env.bak-*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+
+# Runtime artefacts — ignore the CONTENTS, keep the directories themselves
+# (via their .gitkeep) so a fresh clone has somewhere to write.
+logs/*
+!logs/.gitkeep
+fastembed_cache/
+
+# certs/ holds the internal CA bundle. The bundle is environment-specific and
+# is placed on the box by the operator, not committed.
+certs/*
+!certs/.gitkeep
+
+# Reference-only artifact — the predecessor project, kept on disk for its
+# routing / RAG / prompt patterns but not part of this application.
+NeuralAiGovernanceProject*/
+NeuralAiGovernanceProject*.zip
+
+# Reference material and rotated-secret backups — never part of a deploy.
+archive/
+
+# Raw scheme data and QA artefacts with data — never in this repo.
+*.csv
+*.xlsx
+*.xls
+docs/*_Evidence_*/
+.claude/

@@ -1,0 +1,33 @@
+[Unit]
+Description=Meghalaya NLP Service (MGNREGA + PMAY-G — megh_db + Qdrant + Qwen gateway)
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/meghalaya
+# .env is read by the application itself (pydantic-settings, env_file=".env",
+# resolved against WorkingDirectory). systemd's EnvironmentFile= is deliberately
+# NOT used: it keeps inline '#' comments as part of the value, which turns
+# `MODEL_MAX_CONCURRENCY=24  # max in-flight` into a string pydantic cannot
+# parse, and the unit dies on boot.
+#
+# .env must define: DATABASE_URL (megh_readonly role), the model roles
+# (CLASSIFIER/SQL_GENERATION/RESPONSE/EMBEDDING/RERANKER/ASR *_API_KEY +
+# *_BASE_URL), and QDRANT_URL / QDRANT_COLLECTION. See .env.example.
+# 2 workers, not 1 like the archived services — DB access is natively async
+# (asyncpg), so one worker's event loop already handles the 20-40 concurrent
+# target; the second is headroom if a loop ever stalls, negligible cost on a
+# 24-vCore box. Run this unit on both application VMs behind the vFirewall.
+# logs/ is gitignored, so a fresh checkout does not contain it. Create it (and
+# fix ownership) before the service starts rather than failing on first write.
+ExecStartPre=/bin/mkdir -p /opt/meghalaya/logs
+ExecStartPre=/bin/chown ubuntu:ubuntu /opt/meghalaya/logs
+ExecStart=/opt/meghalaya/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8300 --workers 2
+Restart=always
+RestartSec=3
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

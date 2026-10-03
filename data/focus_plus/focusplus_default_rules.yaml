@@ -1,0 +1,315 @@
+# focusplus_default_rules.yaml
+#
+# Default rules for Focus Plus - node 5.5. Runs after the clarification gate.
+# Each rule fills a missing detail silently and hands the response composer an
+# assumption line, so the user can correct it without being interrupted first.
+# Editable by analysts - no code change needed.
+#
+# A condition must live in EITHER focusplus_classification_rules.yaml OR this one.
+# The gate runs first, so any condition present in both will always ask and never
+# default. {placeholders} are filled from the resolved query at runtime.
+#
+# ===========================================================================
+# v1.0 - 2026-09-03 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Plus was loaded straight into curated on 2026-09-02, so there is no
+# flat-table ancestor and no migration to record. Two things shape this file and
+# have no PMAY counterpart. First, batch_label splits the fact into two cohorts,
+# so several defaults exist only to state which cohort was used. Second, there is
+# NO always-on filter: PMAY carries WHERE NOT is_placeholder on every count and
+# sum, and that column does not exist here - do not carry the habit over.
+#
+# EVERY NUMBER IN AN assumption_text BELOW IS A SOURCE-CSV FIGURE (2026-09-03)
+# AND HAS NOT BEEN MEASURED AGAINST megh_db. They are kept because a stated
+# assumption with an unverified number is still better than a silent one, but
+# re-verify before these reach a user.
+#
+# Reserved for focusplus_classification_rules.yaml, not defaulted here: which
+# batch to use when the two would differ, what "beneficiaries" means when asked
+# bare, which rate is meant, any breakdown by gender, occupation or status, the
+# money unit when dim_scheme cannot supply it, and anything the source cannot
+# answer at all.
+# ===========================================================================
+
+default_rules:
+
+  # ---- data quality - no always-on filter exists, unlike PMAY ------------
+  - condition: "geo_conflict_rows_in_non_geographic_answer"
+    default_value: "include"
+    assumption_text: "All payments are included; 16 villages have conflicting district or block records between sources and are counted under the roster's value."
+
+  - condition: "unmapped_geography_rows_in_totals"
+    default_value: "include"
+    assumption_text: "All payments are counted, including those whose village could not be mapped."
+
+  - condition: "total_reported_without_verification"
+    default_value: "attach_caveat"
+    assumption_text: "Focus Plus totals have not yet been verified against the database, so this figure is provisional."
+
+  - condition: "placeholder_filter_attempted"
+    default_value: "no_filter"
+    assumption_text: "No placeholder filter is applied - Focus Plus has no placeholder flag, unlike PMAY."
+
+  # ---- batch ------------------------------------------------------------
+  - condition: "batch_unspecified_for_scheme_total"
+    default_value: "both_batches"
+    assumption_text: "Covering both batches - the legacy paid batch and the newer registration batch."
+
+  - condition: "tranche_unspecified"
+    default_value: "all_tranches"
+    assumption_text: "Covering all four tranches."
+
+  - condition: "batch_ordering_unspecified"
+    default_value: "legacy_first"
+    assumption_text: "Batches are listed with the legacy paid batch first."
+
+  - condition: "legacy_rows_in_person_attribute_breakdown"
+    default_value: "exclude_from_breakdown_only"
+    assumption_text: "The 373,144 legacy payments carry no gender, occupation or status and are left out of this breakdown, though they remain in the totals."
+
+  - condition: "member_identity_requested_across_batches"
+    default_value: "source_sl_no_per_batch"
+    assumption_text: "Members are counted by their source serial number within each batch, since the legacy batch carries no member ID."
+
+  # ---- time -------------------------------------------------------------
+  - condition: "missing_time_period"
+    default_value: "all_available_years"
+    assumption_text: "Covering both financial years held, 2022-23 and 2025-26."
+
+  - condition: "relative_year_latest"
+    default_value: "2025-26"
+    assumption_text: "Taking the latest year as FY 2025-26."
+
+  - condition: "relative_year_earliest"
+    default_value: "2022-23"
+    assumption_text: "Taking the earliest year as FY 2022-23."
+
+  - condition: "multi_year_request_without_years"
+    default_value: "all_available_years"
+    assumption_text: "Covering both years held, FY 2022-23 and FY 2025-26."
+
+  - condition: "comparison_without_second_period"
+    default_value: "the_other_financial_year"
+    assumption_text: "Compared against FY {other_year}, the only other year held."
+
+  - condition: "year_range_partly_outside_data"
+    default_value: "clamp_to_available_range"
+    assumption_text: "Focus Plus holds FY 2022-23 and FY 2025-26 only, so the period has been trimmed to {applied_range}."
+
+  - condition: "no_records_in_requested_period"
+    default_value: "state_data_span"
+    assumption_text: "No Focus Plus payments are recorded for {value}; the data covers FY 2022-23 and FY 2025-26, with nothing in between."
+
+  - condition: "time_dimension_unspecified"
+    default_value: "financial_year_short"
+    assumption_text: "Dated by financial year, the finest time detail recorded - Focus Plus has no payment date."
+
+  - condition: "year_ordering_unspecified"
+    default_value: "chronological_by_year_key"
+    assumption_text: "Years are listed oldest first."
+
+  - condition: "unresolved_year_rows_in_time_breakdown"
+    default_value: "report_separately"
+    assumption_text: "Payments that could not be matched to a financial year are reported as a separate group rather than dropped."
+
+  # ---- geography --------------------------------------------------------
+  - condition: "missing_geography"
+    default_value: "all_districts"
+    assumption_text: "Covering all 12 districts of Meghalaya."
+
+  - condition: "whole_state_reference"
+    default_value: "no_district_filter"
+    assumption_text: "Figures are statewide."
+
+  - condition: "region_group_named"
+    default_value: "expand_to_member_districts"
+    assumption_text: "{region} covers {districts}."
+
+  - condition: "ri_bhoi_as_region"
+    default_value: "single_district"
+    assumption_text: "Ri Bhoi is its own group and is not counted under Khasi Hills."
+
+  - condition: "colliding_name_without_level"
+    default_value: "block"
+    assumption_text: "Reading {value} as a block, which is the level users mean."
+
+  - condition: "geography_filter_form_unspecified"
+    default_value: "lgd_name_uppercase"
+    assumption_text: "Filtered on the LGD district name."
+    sql_effect: "WHERE lgd_district = UPPER('{value}')"
+
+  - condition: "village_name_filter_form"
+    default_value: "lgd_village_name_as_stored"
+    assumption_text: "Filtered on the LGD village name; village names are not uppercased in the geography dimension, unlike district and block."
+
+  - condition: "village_identity_method"
+    default_value: "village_code"
+    assumption_text: "Villages are identified by LGD code, since 345 village names are shared by more than one village."
+
+  - condition: "geographic_answer_geo_conflict_handling"
+    default_value: "exclude"
+    assumption_text: "The 16 villages with conflicting district or block records are excluded, because this answer depends on where the payment landed."
+    sql_effect: "WHERE NOT has_geo_conflict"
+
+  - condition: "geography_hierarchy_unspecified"
+    default_value: "district_block_village"
+    assumption_text: "Geography runs district, then block, then village."
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "missing_scheme"
+    default_value: "focus_plus"
+    assumption_text: "Answering for Focus Plus."
+
+  - condition: "bare_beneficiary_term_in_scoped_question"
+    default_value: "count_payments"
+    assumption_text: "Counted as payments - one row is one disbursement, so a member paid in four tranches counts four times."
+
+  - condition: "bare_count_in_geography_question"
+    default_value: "count_payments"
+    assumption_text: "Counting payments in {value}."
+
+  - condition: "member_count_method"
+    default_value: "count_distinct_member_id"
+    assumption_text: "Members are counted by member ID, which is recorded for the newer registration batch only - 12,527 of 385,671 records."
+
+  - condition: "bare_amount_term"
+    default_value: "sum_amount_disbursed"
+    assumption_text: "Using the amount disbursed, the only money field Focus Plus holds."
+    sql_effect: "SUM(amount_disbursed)"
+
+  - condition: "money_per_member_requested"
+    default_value: "total_over_member_count"
+    assumption_text: "Measured as total disbursed divided by the number of members, not as an average of the payment rows."
+
+  - condition: "payment_count_alongside_money"
+    default_value: "report_both"
+    assumption_text: "The payment count is shown alongside the amount, since Focus Plus pays a fixed rate per tranche."
+
+  - condition: "tranche_rate_reference"
+    default_value: "state_both_rates"
+    assumption_text: "Tranch 1 paid 5,000 and the later tranches 2,500."
+
+  - condition: "disbursement_term"
+    default_value: "amount_disbursed"
+    assumption_text: "Disbursement means money actually paid out; Focus Plus holds no sanctioned, released or pending amount."
+
+  # ---- which table ------------------------------------------------------
+  - condition: "default_query_surface"
+    default_value: "curated.v_focus_plus"
+    assumption_text: "Answered from the Focus Plus payment records."
+
+  - condition: "fact_table_requested"
+    default_value: "curated.v_focus_plus"
+    assumption_text: "Answered from the approved view rather than the underlying table, which holds fields that cannot be shown."
+
+  - condition: "money_unit_lookup"
+    default_value: "curated.dim_scheme"
+    assumption_text: "The money unit is read from the scheme dimension rather than assumed."
+
+  - condition: "financial_year_level_question"
+    default_value: "curated.v_focus_plus"
+    assumption_text: "Answered from the payment records, grouped on the stored financial year."
+
+  - condition: "cross_scheme_money_question"
+    default_value: "curated.v_cross_scheme_money_district_year"
+    assumption_text: "Compared through the cross-scheme district-year view, with each scheme converted to crore and its measure stated."
+
+  - condition: "cross_scheme_coverage_question"
+    default_value: "aggregate_then_join"
+    assumption_text: "Focus Plus is aggregated to village level first and joined onto the coverage view, which does not carry it as a column."
+
+  - condition: "reconciliation_check_needed"
+    default_value: "meta.v_reconciliation_focus_plus"
+    assumption_text: "Row counts are confirmed against the Focus Plus reconciliation view before a total is quoted."
+
+  # ---- units ------------------------------------------------------------
+  - condition: "money_unit_unspecified"
+    default_value: "as_stored_per_dim_scheme"
+    assumption_text: "Amounts are shown as stored, in the unit recorded for Focus Plus in the scheme dimension."
+
+  - condition: "single_payment_money_value"
+    default_value: "as_stored"
+    assumption_text: "A single payment is shown at its stored value, not converted."
+
+  - condition: "percentage_precision_unspecified"
+    default_value: 2
+    assumption_text: "Percentages are rounded to two decimal places."
+
+  - condition: "large_number_formatting"
+    default_value: "indian"
+    assumption_text: "Large numbers use Indian digit grouping."
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_function"
+    default_value: "count_payments"
+    assumption_text: "Figures are counts of payment records."
+
+  - condition: "money_aggregation_unspecified"
+    default_value: "SUM"
+    assumption_text: "Amounts are summed across the selected records."
+
+  - condition: "village_count_requested"
+    default_value: "count_distinct_village_code"
+    assumption_text: "Villages are counted by LGD code, since 345 village names are shared by more than one village."
+    sql_effect: "COUNT(DISTINCT village_code)"
+
+  - condition: "missing_top_n"
+    default_value: 5
+    assumption_text: "Showing the top 5."
+
+  - condition: "singular_superlative_without_n"
+    default_value: 1
+    assumption_text: "Showing the single highest."
+
+  - condition: "ranking_direction_unspecified"
+    default_value: "descending"
+    assumption_text: "Ranked highest first."
+
+  - condition: "missing_sort_column"
+    default_value: "requested_metric"
+    assumption_text: "Sorted by {metric}."
+
+  - condition: "missing_result_limit"
+    default_value: 10
+    assumption_text: "Showing the first 10 rows."
+
+  - condition: "tranche_ordering_unspecified"
+    default_value: "stored_label_order"
+    assumption_text: "Tranches are listed in label order, which is not a chronological sequence."
+
+  - condition: "output_format_unspecified"
+    default_value: "text"
+    assumption_text: "Answered as text; a table or chart can follow if you want one."
+
+  - condition: "chart_type_unspecified"
+    default_value: "auto_by_result_shape"
+    assumption_text: "Chart type chosen to suit the shape of the result."
+
+  - condition: "aggregate_level_for_person_level_data"
+    default_value: "geography_or_category"
+    assumption_text: "Answered as an aggregate, since Focus Plus records identify individual people."
+
+  # ---- nulls and zeros --------------------------------------------------
+  - condition: "null_person_attributes_in_breakdown"
+    default_value: "exclude_from_breakdown_only"
+    assumption_text: "Records with no gender, occupation or status recorded are left out of this breakdown, and the count is stated."
+
+  - condition: "null_member_id_in_distinct_count"
+    default_value: "exclude_and_state"
+    assumption_text: "Payments with no member ID are excluded from the member count, which therefore covers the newer registration batch only."
+
+  - condition: "null_district_rows"
+    default_value: "exclude_and_state"
+    assumption_text: "A small number of records carry no district and are left out of district breakdowns."
+
+  - condition: "null_measure_values"
+    default_value: "not_applicable"
+    assumption_text: "Every Focus Plus payment carries an amount, so no records are dropped from money figures."
+
+  - condition: "zero_measure_values"
+    default_value: "not_present"
+    assumption_text: "No Focus Plus payment is recorded as zero - the only values are 5,000 and 2,500."
+
+  - condition: "null_display_form"
+    default_value: "not_recorded"
+    assumption_text: "Missing values are shown as 'not recorded' rather than as zero."

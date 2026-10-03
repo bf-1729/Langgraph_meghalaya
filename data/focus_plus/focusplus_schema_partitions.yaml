@@ -1,0 +1,1414 @@
+schema_version: '1.0'
+schema_name: focusplus_curated_semantic_schema
+display_name: Focus Plus Curated Star-Schema Semantic Schema (megh_db)
+
+# ===========================================================================
+# v1.0 - 2026-09-03 - WRITTEN AGAINST THE LIVE DATABASE
+#
+# Focus Plus is the THIRD scheme in megh_db and the newest. Unlike PMAY, this
+# file has no flat-table ancestor: the scheme was loaded straight into the
+# curated star schema on 2026-09-02, so there is no v1.0-to-v2.0 migration to
+# describe and no obsolete SQL pattern to retire.
+#
+# Authority for structure: SCHEMA_FOR_DEVELOPERS.md, rewritten 2026-09-02 from
+# the live five-schema information_schema extract.
+# Authority for values:    datasets/Focus+/Focus Plus Master.csv, profiled
+#                          2026-09-03 (385,671 rows, 21 columns).
+#
+# ---------------------------------------------------------------------------
+# WHAT MAKES THIS SCHEME DIFFERENT FROM PMAY AND MGNREGA - read before editing
+# ---------------------------------------------------------------------------
+#
+#   1. IT IS THE ONLY PERSON-LEVEL FACT IN THE DATABASE. member_id and pincode
+#      describe identifiable individuals. Rule 7 of SCHEMA_FOR_DEVELOPERS.md
+#      applies to every query written from this file. bank_name_raw is also on
+#      the row but identifies a bank, not a person - aggregate bank-wise
+#      questions (which bank, bank share, bank concentration) are answerable.
+#
+#   2. ONE ROW IS ONE PAYMENT. Not one person, not one household. COUNT(*)
+#      answers "how many disbursements", which is almost never the question the
+#      user asked. PMAY could say COUNT(*) is a house count and stop; here the
+#      payment/person distinction has to be made every single time.
+#
+#   3. THERE IS NO DATE COLUMN AT ALL. PMAY has sanction_date - the only true
+#      date in megh_db. Focus Plus has the financial year and nothing finer.
+#      batch_label and tranche_label are LABELS, not time. Monthly analysis is
+#      a PMAY-only capability; do not offer it here.
+#
+#   4. THERE IS NO STATUS DIMENSION AND THERE ARE NO QUALITY FLAGS. PMAY got
+#      dim_pmay_house_status with is_completed precomputed, plus is_placeholder,
+#      completed_underfunded and mapping_category. Focus Plus got NONE of them.
+#      focus_status and verification_status are uncontrolled varchars on the
+#      fact. Every judgement PMAY delegates to a column is, for this scheme,
+#      still the application's problem.
+#
+#   5. THE MONEY UNIT IS UNVERIFIED. amount_disbursed is a bare numeric with no
+#      documented unit and no known precision. READ curated.dim_scheme.money_unit
+#      FOR THE FOCUS PLUS ROW BEFORE FORMATTING ANY FIGURE. Three units are
+#      already live in this database; guessing a fourth wrong is the most likely
+#      way to publish a wrong number from this scheme.
+#
+#   6. THE DATA IS TWO DATASETS STACKED IN ONE FACT, split by batch_label.
+#      This is the single most important semantic fact about Focus Plus and it
+#      is not visible anywhere in the DDL. See semantic_rules.batch_duality.
+#
+# ---------------------------------------------------------------------------
+# COLUMNS THE SOURCE CARRIED THAT THE CURATED LAYER DOES NOT
+# ---------------------------------------------------------------------------
+#   beneficiary_name  -> DROPPED AT INGEST. No name lookup is possible.
+#   mobile_number     -> DROPPED AT INGEST. Blank on 184,868 source rows anyway.
+#   epic_id           -> DROPPED AT INGEST.  *** SEE THE WARNING BELOW ***
+#   status            -> DROPPED AT INGEST. It was the constant '106'. No loss.
+#   district_name /
+#   block_name /
+#   village_name      -> resolved to geography_key + village_code at ingest.
+#   financial_year    -> resolved to year_key against dim_year.
+#   id                -> source_row_id.
+#   batch             -> batch_label.
+#   bank_name         -> bank_name_raw. On both the fact and curated.v_focus_plus.
+#
+#   *** epic_id IS THE CONSEQUENTIAL LOSS. ***
+#   In the source it is the only column that identifies a legacy beneficiary:
+#   93,286 distinct EPIC ids across the 93K batch. member_id is BLANK on every
+#   one of those 373,144 rows. So in megh_db there is currently NO column that
+#   reproduces the 93,286 beneficiary figure that the Focus+ use-case workbook
+#   is built on. COUNT(DISTINCT member_id) returns the 12.5K batch only.
+#   Do not present COUNT(DISTINCT member_id) as "total Focus+ beneficiaries".
+#   See semantic_rules.beneficiary_term.
+#
+# ---------------------------------------------------------------------------
+# PROVENANCE OF NUMBERS IN THIS FILE
+# ---------------------------------------------------------------------------
+#   Column names, types, nullability, defaults  -> live DB extract, 2026-09-02. Trust.
+#   PK / FK markings                            -> INFERRED FROM COLUMN NAMING for this
+#                                                  scheme. The 2026-09-02 extract carries
+#                                                  no constraint data. Marked inferred.
+#   numeric precision and scale                 -> UNKNOWN. Not carried by the extract,
+#                                                  and never verified for this fact.
+#   Row counts, distinct counts, distributions  -> source CSV, 2026-09-03.
+#                                                  NOT re-verified against megh_db.
+#                                                  Marked `unverified_in_db: true`.
+#
+#   NO FOCUS PLUS FIGURE MAY BE PUBLISHED UNTIL IT IS MEASURED AGAINST THE
+#   DATABASE. Run meta.v_reconciliation_focus_plus first.
+# ===========================================================================
+
+architecture_alignment:
+  schema_linking: Enriched table and column documents are embedded for scheme-partitioned Qdrant retrieval.
+  entity_resolution: Dimension catalogue plus approved aliases, RapidFuzz, and BGE-small fallback.
+  join_discovery: information_schema FKs plus SME-reviewed implicit FK YAML; LLM never invents joins.
+  sql_generation: Retrieved schema, resolved entities, graph-generated joins, and curated question-to-SQL examples.
+  safety: SQLGlot read-only validation, enforced LIMIT, SELECT-only database role.
+  observability: Inputs, outputs, rule firings, SQL, results, chart spec, and response are traceable.
+  pii_boundary: >
+    ADDITIONAL FOR THIS SCHEME. member_id and pincode must never enter the embedding
+    set, a vector-store payload, an export, or a rendered answer. Set
+    semantic.table_catalog.is_chatbot_visible = false on the fact and expose only the
+    view. Aggregate before anything reaches a user. bank_name_raw is not an identifier
+    and may appear in a rendered answer (e.g. a bank-wise breakdown), but expect dirty
+    values - see the column note under v_focus_plus.bank_name_raw.
+
+database:
+  name: megh_db
+  schema: curated
+  read_role: megh_readonly
+  primary_query_surface: curated.v_focus_plus
+  structure_verified: '2026-09-02'
+  volumes_verified: false
+  reconciliation_view: meta.v_reconciliation_focus_plus
+  grant_warning: >
+    fact_focus_plus_disbursement and v_focus_plus were created after the last access
+    review. A new object does not inherit a grant unless ALTER DEFAULT PRIVILEGES was in
+    place, so they may be invisible - or over-granted - to megh_readonly. Confirm with
+    meta.v_access_matrix before assuming this partition is queryable at all.
+
+datasets:
+
+  # =========================================================================
+  # PRIMARY QUERY SURFACE - query this, not the fact table. It pre-joins
+  # dim_year and dim_geography and carries bank_name_raw, so there is no
+  # reason to touch fact_focus_plus_disbursement directly.
+  # =========================================================================
+  v_focus_plus:
+    table_name: curated.v_focus_plus
+    object_type: view
+    over: curated.fact_focus_plus_disbursement
+    column_count: 24
+    grain: one row per disbursement - one payment, to one member, in one tranche
+    row_count: unverified_in_db
+    row_count_note: >
+      The source CSV held 385,671 rows. The curated row count has not been measured and
+      no figure here asserts one. 102,923 source rows carry no village code while
+      fact.geography_key is NOT NULL, so an unknown number may have been quarantined or
+      mapped to a placeholder geography. Run meta.v_reconciliation_focus_plus and
+      staging.quarantine before quoting any total.
+    aggregate_before_reporting: false
+    grain_note: >
+      One row IS one payment, so COUNT(*) needs no prior aggregation - but it is a
+      PAYMENT count, not a person count and not a household count. This is the finest
+      grain in megh_db. A legacy member appears on four rows, one per tranche.
+    money_unit: unverified
+    money_unit_authority: curated.dim_scheme.money_unit
+    person_level: true
+    columns:
+
+    # ---- keys -------------------------------------------------------------
+    - name: focus_plus_fact_id
+      source_column: fact_focus_plus_disbursement.focus_plus_fact_id
+      meaning: Surrogate primary key of the Focus Plus disbursement fact.
+      type: bigint
+      nullable: false
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [record id, row id, fact id, disbursement id]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - Not stable across a reload. Never export it or store it outside the database.
+      - PK marking is INFERRED from column naming - the 2026-09-02 extract carries no constraint data.
+
+    - name: source_row_id
+      source_column: fact_focus_plus_disbursement.source_row_id
+      meaning: The source table's own id, carried through for lineage.
+      type: integer
+      nullable: false
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [source id, original id]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - This is the source CSV `id` column.
+
+    - name: source_sl_no
+      source_column: fact_focus_plus_disbursement.source_sl_no
+      meaning: Serial number of the beneficiary within the source file.
+      type: integer
+      nullable: false
+      category: beneficiary_identifier
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT, COUNT DISTINCT]
+      synonyms: [serial number, sl no, source serial]
+      business_rules:
+      - Identifier only; never SUM or AVG - it is a serial number, not a measure.
+      - "CANDIDATE BENEFICIARY KEY. In the source it is unique per beneficiary WITHIN a batch (93,286 in 93K, 12,527 in 12.5K) and repeats once per tranche. The two batches do not overlap on it. (unverified_in_db)"
+      - "This is the closest available proxy for a legacy beneficiary now that epic_id is gone, but it is a FILE serial, not a stable person id. Confirm it survived the load unchanged before counting people with it, and say what it is when you use it."
+      - "SCHEMA_FOR_DEVELOPERS.md suggests (source_row_id, source_sl_no, tranche_label) as the natural key, but no unique constraint is declared. Verify before deduplicating on it."
+
+    # ---- time -------------------------------------------------------------
+    - name: year_key
+      source_column: fact_focus_plus_disbursement.year_key
+      meaning: Financial-year key of the disbursement, resolved against dim_year.
+      type: smallint
+      nullable: true
+      category: time_key
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [year key, financial year key]
+      business_rules:
+      - "NULLABLE. A disbursement outside FY 2022-23..2025-26 has no key, and a bare GROUP BY year_key drops those rows silently."
+      - "IN PRACTICE THIS SHOULD BE EMPTY FOR THIS SCHEME: the source holds only 2022-23 and 2025-26, both inside the dim_year window. That makes an unresolved row a LOAD DEFECT here, not a normal case - unlike PMAY, where it is expected. Count it, and treat a non-zero result as something to investigate rather than footnote. (unverified_in_db)"
+      - Value is the FY start year - 2025 means FY 2025-26.
+
+    - name: financial_year
+      source_column: dim_year.financial_year
+      meaning: Canonical financial year of the disbursement.
+      type: char(9)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [financial year, FY, fiscal year, year]
+      sample_values: ['2022-2023', '2025-2026']
+      business_rules:
+      - "ONLY TWO FINANCIAL YEARS EXIST IN THIS SCHEME - 2022-23 and 2025-26. dim_year holds four; the two middle years are EMPTY for Focus Plus. A year-over-year trend has two points and a three-year gap. Say so rather than drawing a line through it. (unverified_in_db)"
+      - This is the FINEST TIME GRAIN available. There is no date column to fall back to.
+      - NULL wherever year_key is NULL.
+
+    - name: financial_year_short
+      source_column: dim_year.financial_year_short
+      meaning: Short form of the financial year.
+      type: char(7)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [FY short, financial year short]
+      sample_values: ['2022-23', '2025-26']
+      business_rules:
+      - Prefer this for display; prefer financial_year for canonical matching.
+      - "dim_year.data_quality_note is SCHEME-BLIND. The note on 2025-26 concerns the MGNREGA women's column and has nothing to do with Focus Plus - but 2025-26 is where roughly three quarters of Focus Plus rows sit. Do NOT surface that note on a Focus Plus answer."
+
+    # ---- geography --------------------------------------------------------
+    - name: geography_key
+      source_column: fact_focus_plus_disbursement.geography_key
+      meaning: Surrogate key into the conformed geography dimension.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [geography key]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - NOT stable across a reload. Use village_code for anything leaving the database.
+      - "NOT NULL on the fact, yet 102,923 source rows (26.7%) carry no village code. How those rows resolved is UNKNOWN - quarantined, or mapped to a placeholder. Resolve this before publishing any village- or block-level Focus Plus figure."
+
+    - name: village_code
+      source_column: fact_focus_plus_disbursement.village_code
+      meaning: LGD village code - the national village identifier, denormalised onto the row.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [village code, LGD village code, mapped village code]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "VILLAGE IDENTITY. Count villages with COUNT(DISTINCT village_code), never by name - 345 village names are shared across dim_geography (rule 5)."
+      - Denormalised on the row - filter on it directly, no join to dim_geography needed.
+      - This is the source `mapped_village_lgd_code`.
+      - "3,221 distinct codes appear in the source, of which 826 are touched by both batches. (unverified_in_db)"
+
+    - name: lgd_village_name
+      source_column: dim_geography.lgd_village_name
+      meaning: LGD-standardised village name.
+      type: varchar(200)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [village, LGD village, mapped village, village name]
+      sample_values: [Nayagaon, Reservegittim, Haripur, Killapara, Hallidayganj, Askikandi]
+      business_rules:
+      - Display and filter name. NOT an identity - see village_code.
+      - "The source village_name is a raw label that often carries a ward prefix, e.g. '1-Williamnagar (Mb) - Ward No.1'. The view exposes the LGD-standardised name instead. Resolve the user's phrasing against dim_geography, not against the raw source string."
+
+    - name: lgd_block
+      source_column: dim_geography.lgd_block
+      meaning: LGD-standardised block name, uppercased in the dimension.
+      type: varchar(150)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [block, LGD block, mapped block, block name, C&RD block]
+      sample_values: [TIKRIKILLA, SELSELLA, ZIKZAK, NONGSTOIN, RONGRAM, DALU]
+      business_rules:
+      - "dim_geography stores block UPPERCASED. Compare case-folded and emit the stored form. The source stored Title Case - do not pass a source-cased literal into a filter."
+      - "NO BLOCK CODE EXISTS in the curated layer. The block is a name only."
+      - "77 distinct block labels appear in the source, including municipal boards such as 'Williamnagar-Municipal Board' which are wards, not C&RD blocks. Check entity_type before describing a result as block-level. (unverified_in_db)"
+
+    - name: lgd_district
+      source_column: dim_geography.lgd_district
+      meaning: LGD-standardised district name, uppercased in the dimension.
+      type: varchar(100)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [district, LGD district, mapped district, district name]
+      sample_values: ['WEST GARO HILLS', 'EAST KHASI HILLS', 'SOUTH WEST GARO HILLS', 'NORTH GARO HILLS', 'EAST GARO HILLS', 'RI BHOI']
+      business_rules:
+      - "dim_geography stores district UPPERCASED. Compare case-folded and emit the stored form."
+      - "NO DISTRICT CODE EXISTS in the curated layer."
+      - "All 12 Meghalaya districts appear in the legacy batch. The 12.5K batch reaches only SIX (West Garo Hills, South West Garo Hills, North Garo Hills, East Garo Hills, East Khasi Hills, South Garo Hills), so a batch-filtered district breakdown legitimately returns 6 rows, not 12. (unverified_in_db)"
+      - "4 source rows carry no district at all. (unverified_in_db)"
+
+    - name: on_roster
+      source_column: dim_geography.on_roster
+      meaning: Whether the village is in the official LGD roster or was only seen in a data file.
+      type: boolean
+      nullable: false
+      default: false
+      category: geographic_quality
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [on roster, official village, in roster]
+      business_rules:
+      - Shared with MGNREGA and PMAY through dim_geography.
+      - Off-roster villages are real; do not filter them out unless the question is about roster coverage.
+
+    - name: has_geo_conflict
+      source_column: dim_geography.has_geo_conflict
+      meaning: Sources disagree on which block or district this village belongs to.
+      type: boolean
+      nullable: false
+      default: false
+      category: geographic_quality
+      nlp_sql_priority: high
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [geo conflict, geography conflict, conflicting district, conflicting block]
+      business_rules:
+      - "v_focus_plus IS THE ONLY VIEW IN megh_db THAT EXPOSES THIS FLAG. Use it - it is the only geographic quality signal this scheme gets, since there is no mapping_category and no mapping_confidence_pct."
+      - "Add WHERE NOT has_geo_conflict whenever the answer turns on which block or district a payment landed in."
+      - 16 villages carry the flag database-wide, resolved to the roster's value with the disagreement recorded rather than hidden.
+      - NOT NULL, so a plain boolean test is safe.
+
+    # ---- batch and tranche - the only sub-year sequencing --------------------
+    - name: batch_label
+      source_column: fact_focus_plus_disbursement.batch_label
+      meaning: The disbursement batch as recorded in the source.
+      type: varchar(10)
+      nullable: false
+      category: batch_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [batch, batch label, cohort, tranche batch]
+      sample_values: ['93K', '12.5K']
+      business_rules:
+      - "THE MOST IMPORTANT COLUMN IN THIS SCHEME AND THE LEAST OBVIOUS. Only two values exist and they separate two structurally different datasets - see semantic_rules.batch_duality. Almost every Focus Plus question needs to know which one it means."
+      - "'93K' is the legacy paid cohort: 93,286 beneficiaries x 4 tranches = 373,144 rows. Every person-level attribute (gender, occupation, focus_status, verification_status, member_id, pincode) is BLANK on all of them."
+      - "'12.5K' is the newer registration cohort: 12,527 rows, one per person, Tranch 4 only, with the person-level attributes populated."
+      - "It is a LABEL, not a size and not a date. Do not parse '93K' as a number and do not order the two values as time."
+      - "TREATING batch_label AS THE PAID/UNPAID DISCRIMINATOR IS AN INFERENCE, NOT A DECLARED FACT. It is the best available reading and the SME workbook leans on it, but no column states it. Say it is an inference whenever an answer rests on it."
+      - (unverified_in_db)
+
+    - name: tranche_label
+      source_column: fact_focus_plus_disbursement.tranche_label
+      meaning: Which tranche of payments this row belongs to.
+      type: varchar(40)
+      nullable: false
+      category: tranche_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [tranche, tranch, instalment, installment, payment round, payment cycle]
+      sample_values: ['Tranch 1', 'Tranch 2 - August', 'Tranch 3 - December', 'Tranch 4 - Feb-March']
+      business_rules:
+      - "NOT TIME. The labels embed month words - August, December, Feb-March - and that is exactly the trap. They are labels; the extract cannot guarantee they sort chronologically, and there is no date column to check them against. NEVER ORDER BY tranche_label AS A TIME SERIES and never build a monthly series from it."
+      - "The stored spelling is 'Tranch', not 'Tranche'. Match on the stored form; accept both in user input."
+      - "Four values exist. The legacy batch spans all four; the 12.5K batch appears ONLY in 'Tranch 4 - Feb-March'. So a tranche breakdown is not a clean 4-way split - Tranch 4 is the two cohorts combined. (unverified_in_db)"
+      - "Tranch 1 is the only tranche in FY 2022-23 and the only one paying 5,000. Tranches 2, 3 and 4 are FY 2025-26 at 2,500. (unverified_in_db)"
+
+    # ---- money ------------------------------------------------------------
+    - name: amount_disbursed
+      source_column: fact_focus_plus_disbursement.amount_disbursed
+      meaning: Amount paid out to the member in this tranche.
+      type: numeric
+      precision: unknown
+      nullable: false
+      unit: unverified
+      unit_authority: curated.dim_scheme.money_unit
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX, WHERE, GROUP BY]
+      synonyms: [amount, amount disbursed, disbursement, disbursed amount, payment, paid, money paid, DBT amount]
+      business_rules:
+      - "*** UNIT IS UNVERIFIED. READ curated.dim_scheme.money_unit FOR THE FOCUS PLUS ROW BEFORE FORMATTING OR CONVERTING. *** If that row does not answer it, say the unit is unconfirmed rather than assuming rupees. Three units are already live in megh_db - lakh, rupees, crore."
+      - "Source evidence points to RUPEES: the stored values are a flat 5,000 and 2,500 per payment, figures that make sense in no other unit, and the SME glossary describes Focus+ as paying Rs 5,000 per beneficiary via DBT. This is CORROBORATION, NOT AUTHORITY. dim_scheme decides."
+      - "NOT NULL - the only money column in megh_db that is. SUM needs no COALESCE here."
+      - "PRECISION AND SCALE ARE UNKNOWN. The extract shows a bare numeric and this fact's numerics were never verified. Do not assume 2 decimal places."
+      - "ONLY TWO DISTINCT VALUES EXIST: 5,000 (Tranch 1 only) and 2,500 (all later tranches). AVG(amount_disbursed) is therefore a mix ratio between two tranche types, NOT a per-beneficiary entitlement. A 'per beneficiary' question must divide the total by a beneficiary count, not average this column. (unverified_in_db)"
+      - "A total-disbursement question is close to a payment-count question in disguise, the way PMAY's sanctioned_amount is a house-count question. Report the count alongside the money."
+      - The only measure on this fact. There is no sanctioned, released, pending or target amount.
+
+    # ---- person-level attributes ------------------------------------------
+    # PRESENT ON THE 12.5K BATCH ONLY. See semantic_rules.batch_duality.
+    - name: gender
+      source_column: fact_focus_plus_disbursement.gender
+      meaning: Gender of the member, as recorded at registration.
+      type: varchar(10)
+      nullable: true
+      category: person_attribute
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [gender, sex, male, female, women, men]
+      sample_values: [Female, Male]
+      business_rules:
+      - "*** COVERAGE IS 3.2%. *** NULL on all 373,144 legacy rows; populated only on the 12,527 rows of the 12.5K batch. A gender breakdown describes the newer registration cohort ONLY and must say so explicitly. (unverified_in_db)"
+      - "NEVER present a gender split as a Focus Plus scheme-wide figure. It is not one."
+      - "Two values plus NULL. NULL here means 'not collected for this cohort', not 'unknown individual' - do not render it as an 'Other' or 'Unspecified' gender category."
+      - "Focus Plus is the ONLY scheme in megh_db with a real gender column. PMAY has house_alloted_to, which is an allotment category, not gender. Never map one onto the other."
+
+    - name: occupation
+      source_column: fact_focus_plus_disbursement.occupation
+      meaning: Occupation of the member, as recorded at registration.
+      type: varchar(30)
+      nullable: true
+      category: person_attribute
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [occupation, profession, livelihood, job, farmer, employment type]
+      sample_values: [Farmer, Unemployed, Others, Business, 'Private Employee', Student, 'Government Employee']
+      business_rules:
+      - "*** COVERAGE IS 3.2%. *** Same batch restriction as gender. NULL on every legacy row."
+      - "Seven values, closed set as observed. 'Farmer' is the plurality but NOT the whole - roughly two thirds of the covered rows. A question like 'how many farmers' must not be silently answered as 'how many beneficiaries'. (unverified_in_db)"
+      - "'Others' is a real stored category, not a null placeholder."
+
+    # ---- status - free varchars, NOT a dimension ---------------------------
+    - name: focus_status
+      source_column: fact_focus_plus_disbursement.focus_status
+      meaning: Focus Plus application status as recorded at registration.
+      type: varchar(20)
+      nullable: true
+      category: status_attribute
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [focus status, application status, approval status]
+      sample_values: [Pending, Approved, Rejected]
+      business_rules:
+      - "NOT A DIMENSION. There is no dim_focus_plus_status and no precomputed roll-up flag. Nothing here corresponds to PMAY's is_completed. Enumerate with SELECT DISTINCT before writing any filter."
+      - "*** COVERAGE IS 3.2%. *** NULL on all 373,144 legacy rows."
+      - "THIS IS NOT A PAYMENT FLAG. 'Approved' describes an application, not a disbursement. Do not read it as paid/unpaid - see semantic_rules.paid_unpaid_term."
+      - "Heavily skewed and one value is a singleton: Pending 11,812, Approved 714, Rejected 1. A percentage over 714 rows is thin and a finding about ONE rejected record is not a trend. State the denominator. (unverified_in_db)"
+
+    - name: verification_status
+      source_column: fact_focus_plus_disbursement.verification_status
+      meaning: Verification outcome for the member's registration.
+      type: varchar(20)
+      nullable: true
+      category: status_attribute
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [verification status, verified, verification]
+      sample_values: [Approved]
+      business_rules:
+      - "NOT A DIMENSION. Same caveat as focus_status."
+      - "*** COVERAGE IS 3.2% AND THE COLUMN IS CONSTANT WHERE PRESENT. *** Every one of the 12,527 covered rows reads 'Approved'; the rest are NULL. It has ZERO discriminating power as a filter or a grouping key. (unverified_in_db)"
+      - "Do not offer it as a way to split results. If a user asks to filter on verification, tell them it has one value."
+      - Enumerate with SELECT DISTINCT before trusting this - it is a source-file observation.
+
+    # ---- identifiers that must never be displayed --------------------------
+    - name: member_id
+      source_column: fact_focus_plus_disbursement.member_id
+      meaning: Focus Plus internal member identifier.
+      type: varchar(20)
+      nullable: true
+      category: person_identifier
+      nlp_sql_priority: high
+      sql_operations: [COUNT DISTINCT]
+      pii: true
+      sample_values: WITHHELD_PII
+      sample_values_note: >
+        DELIBERATELY OMITTED. semantic.column_catalog must not sample this column and it
+        must not enter the embedding set. Rule 7.
+      business_rules:
+      - "*** PERSONAL IDENTIFIER. NEVER SELECT IT INTO AN ANSWER, AN EXPORT OR A VECTOR PAYLOAD. *** Its only legitimate use is inside COUNT(DISTINCT member_id). Do not build a member-lookup feature."
+      - "*** NULL ON ALL 373,144 LEGACY ROWS. *** COUNT(DISTINCT member_id) therefore counts the 12.5K batch and nothing else - roughly 12,527, not the 93,286 the use-case workbook calls the Focus+ beneficiary total. THIS IS THE MOST DANGEROUS SINGLE MISREADING AVAILABLE IN THIS SCHEME."
+      - "Identifier only; never SUM or AVG."
+      - "SCHEMA_FOR_DEVELOPERS.md's example query offers COUNT(DISTINCT member_id) as 'people'. That is correct only for the covered cohort. Qualify it every time."
+      - "The workbook's premise that one member appears in several tranches does NOT hold in the source: within the 12.5K batch member_id is unique per row, and the legacy rows that DO repeat per tranche have no member_id at all. (unverified_in_db)"
+
+    - name: pincode
+      source_column: fact_focus_plus_disbursement.pincode
+      meaning: Postal code of the member's locality.
+      type: integer
+      nullable: true
+      category: person_locality
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      pii: true
+      sample_values: WITHHELD_PII
+      sample_values_note: DELIBERATELY OMITTED. Do not sample or embed. Rule 7.
+      business_rules:
+      - "*** PERSONAL LOCALITY. Do not emit it into an answer or an export. *** Aggregate geography with lgd_district / lgd_block / village_code instead."
+      - "Identifier only; never SUM or AVG - a pincode is not a number in any arithmetic sense."
+      - "*** COVERAGE IS 3.2%. *** Populated on 12,520 rows only. It is not a usable geography column for this scheme."
+      - Use village_code for geography. It is the conformed key and it is NOT NULL.
+
+    # ---- geography attribute carried by the view ---------------------------
+    - name: entity_type
+      source_column: dim_geography.entity_type
+      meaning: Whether the geography row is a village or an urban ward.
+      type: varchar(10)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [entity type, village or ward, area type]
+      sample_values: [Village, Ward]
+      business_rules:
+      - "dim_geography holds 7,200 villages and 164 wards. Focus Plus reaches both - the source carries municipal-board wards such as Williamnagar."
+      - "A question about VILLAGES should say whether wards are included. Do not silently mix them in a 'top villages' ranking."
+
+    # ---- banking, carried last by the view ---------------------------------
+    - name: bank_name_raw
+      source_column: fact_focus_plus_disbursement.bank_name_raw
+      meaning: Disbursing bank name exactly as recorded in the source.
+      type: varchar(100)
+      nullable: false
+      category: categorical_attribute
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [bank, bank name, disbursing bank, paying bank]
+      business_rules:
+      - "NOT an identifier - identifies a bank, not a person. Safe to GROUP BY, ORDER BY and return in an answer, unlike member_id/pincode."
+      - "DIRTY. 42 distinct source values that are really 27 bank names plus 15 numeric codes: the legacy batch stores names, the 12.5K batch stores codes. Casing is inconsistent ('State Bank of India' vs 'BANK OF BARODA'), one value has a leading space (' UJJIVAN SMALL FINANCE BANK') and one is misspelled ('Cananra Bank'). A normalisation table does not exist. (unverified_in_db)"
+      - "If a ranking or breakdown surfaces one of the numeric-code rows (e.g. '1', '6', '33'), flag it as an unresolved raw code rather than presenting it as a bank name. By total amount_disbursed these codes are far below the top real banks, so a top-1 'which bank' answer is unaffected."
+      - "Only the name is held - no account number or IFSC exists anywhere in megh_db for this or any other scheme."
+
+  # =========================================================================
+  # UNDERLYING FACT - documented for lineage; query v_focus_plus instead. It
+  # pre-joins dim_year and dim_geography and carries bank_name_raw, so there
+  # is no remaining reason to query the fact directly.
+  # =========================================================================
+  fact_focus_plus_disbursement:
+    table_name: curated.fact_focus_plus_disbursement
+    object_type: table
+    column_count: 22
+    grain: one disbursement - one payment, to one member, in one tranche
+    primary_key: focus_plus_fact_id
+    primary_key_declared: false
+    row_count: unverified_in_db
+    person_level: true
+    query_preference: >
+      Use curated.v_focus_plus. It pre-joins dim_year and dim_geography, so the generator
+      never has to emit those joins, and it carries bank_name_raw too.
+    keys_note: >
+      EVERY KEY BELOW IS INFERRED FROM COLUMN NAMING. The 2026-09-02 extract carries
+      structure only - no PK, FK, index or check-constraint data. Nothing here is a
+      verified constraint. Confirm against information_schema before relying on one.
+    foreign_keys:
+    - {column: scheme_key,    references: curated.dim_scheme.scheme_key,       declared: inferred, nullable: false}
+    - {column: year_key,      references: curated.dim_year.year_key,           declared: inferred, nullable: true}
+    - {column: geography_key, references: curated.dim_geography.geography_key, declared: inferred, nullable: false}
+    - {column: raw_id,        references: raw.source_rows.raw_id,              declared: inferred, nullable: true}
+    keys_absent:
+    - {column: status_key,   reason: "No Focus Plus status dimension exists. focus_status and verification_status are free varchars on the fact."}
+    - {column: alias_key,    reason: "Focus Plus resolves geography at ingest and carries village_code. It does not use dim_geography_alias - only the two MGNREGA facts do."}
+    columns_not_in_v_focus_plus:
+    - name: scheme_key
+      type: smallint
+      meaning: FK to dim_scheme. Constant for this partition.
+      business_rules: [Never a grouping key within Focus Plus - it has one value.]
+    - name: bank_name_raw
+      type: varchar(100)
+      meaning: Disbursing bank name exactly as recorded in the source.
+      business_rules:
+      - "Also carried by curated.v_focus_plus (added 2026-09-09) - query the view, not this fact, for the same reasons as every other Focus Plus column. See v_focus_plus.bank_name_raw above for the dirty-value note."
+    - name: raw_id
+      type: bigint
+      meaning: FK to raw.source_rows for full lineage back to the source cell.
+      business_rules: [Not readable by megh_readonly - raw is outside the read boundary.]
+    - name: source_row_num
+      type: integer
+      meaning: Audit.
+    - name: batch_id
+      type: uuid
+      meaning: Audit - the load batch. Not to be confused with batch_label, which is scheme data.
+      business_rules:
+      - "NAME COLLISION HAZARD. batch_id is a load-audit uuid; batch_label is the 93K/12.5K cohort. A question about 'batches' means batch_label."
+    - name: source_system
+      type: varchar(50)
+      default: "'focus_plus'"
+      meaning: Audit - constant 'focus_plus' for this partition.
+    - name: ingested_at
+      type: timestamptz
+      meaning: Audit.
+      business_rules:
+      - "NOT A DISBURSEMENT DATE. It is when the row was loaded. Never use it as scheme time."
+    dropped_at_ingest:
+    - column: epic_id
+      reason: >
+        Voter-ID number. Not carried into the curated layer. THIS IS THE CONSEQUENTIAL
+        LOSS: it was the only identifier for a legacy beneficiary (93,286 distinct), and
+        member_id is blank on every legacy row. No column in megh_db reproduces the
+        93,286 beneficiary count. Questions keyed on an EPIC id - lookups, Member-360,
+        AC-code derivation from the 3-letter prefix, cross-dataset overlap with other
+        schemes - cannot be answered. Say the column is not held; never improvise a join.
+    - column: beneficiary_name
+      reason: >
+        Personal name. Not carried into the curated layer, exactly as PMAY dropped its
+        name columns. No name lookup and no name-matching audit is possible.
+    - column: mobile_number
+      reason: >
+        Personal contact detail. Not carried into the curated layer. Data-quality
+        questions about missing mobile numbers cannot be answered against megh_db.
+    - column: status
+      reason: >
+        The source column was the constant '106' on every populated row and blank
+        elsewhere. It carried no information and dropping it lost nothing. If a user
+        cites a 'status' field they mean focus_status or verification_status.
+
+  # =========================================================================
+  # DIMENSIONS - all shared, none Focus-Plus-specific
+  # =========================================================================
+  dim_scheme:
+    table_name: curated.dim_scheme
+    object_type: table
+    column_count: 8
+    grain: one row per scheme
+    primary_key: scheme_key
+    shared_across_schemes: true
+    columns:
+    - {name: scheme_key,     type: smallint,     nullable: false, meaning: PK.}
+    - {name: scheme_code,    type: varchar(20),  nullable: false, meaning: Short scheme code.}
+    - {name: scheme_name,    type: text,         nullable: false, meaning: Full scheme name.}
+    - {name: ministry,       type: varchar(100), nullable: true,  meaning: Owning ministry.}
+    - {name: grain_note,     type: text,         nullable: false, meaning: What one fact row means for this scheme.}
+    - {name: money_unit,     type: varchar(20),  nullable: false, meaning: The scheme's money unit.}
+    - {name: time_semantics, type: text,         nullable: false, meaning: What the year on a row means.}
+    - {name: created_at,     type: timestamptz,  nullable: false, meaning: Audit.}
+    business_rules:
+    - "*** THE AUTHORITY ON THE FOCUS PLUS MONEY UNIT, AND THE HIGHEST-PRIORITY UNKNOWN IN THIS PARTITION. *** Read money_unit for the Focus Plus row before any money figure leaves the system."
+    - "time_semantics for Focus Plus is the DISBURSEMENT year, distinct from PMAY's sanction FY and MGNREGA's reporting year. Carry it into any comparative answer."
+    - Pre-joined out of v_focus_plus - scheme_key is not exposed. Read dim_scheme directly for the unit.
+    - Only fact_pmay_house and fact_focus_plus_disbursement carry a scheme_key. MGNREGA still identifies its scheme through a source_system default.
+
+  dim_year:
+    table_name: curated.dim_year
+    object_type: table
+    column_count: 9
+    row_count: 4
+    grain: one row per financial year
+    primary_key: year_key
+    shared_across_schemes: true
+    coverage: FY 2022-23 through FY 2025-26
+    business_rules:
+    - Pre-joined into v_focus_plus as financial_year and financial_year_short.
+    - "Focus Plus occupies only TWO of the four rows - 2022-23 and 2025-26. FY 2023-24 and 2024-25 hold no Focus Plus data at all. A four-year series is two points and a gap."
+    - "A disbursement outside the window loads with year_key NULL - not dropped, unresolved. For this scheme that should not happen, so a non-zero count is a defect to investigate."
+    - "data_quality_note IS SCHEME-BLIND. Both existing notes (2024-25 partial employment extract, 2025-26 zero women's column) are MGNREGA facts. Do NOT surface them on a Focus Plus answer."
+
+  dim_geography:
+    table_name: curated.dim_geography
+    object_type: table
+    column_count: 13
+    row_count: 7364
+    grain: one row per LGD village or ward
+    primary_key: geography_key
+    natural_key: village_code
+    shared_across_schemes: true
+    business_rules:
+    - "CONFORMED ACROSS ALL THREE SCHEMES. It is the only dimension every fact reaches and the only reason cross-scheme comparison is possible."
+    - Pre-joined into v_focus_plus. Do not join it yourself.
+    - District and block exist as NAMES only - there is no district or block LGD code column.
+    - Block and district are stored UPPERCASE. Village names are not.
+    - "345 village names are shared by more than one village. Count villages by village_code (rule 5)."
+    - "Focus Plus does NOT use dim_geography_alias - it has no alias_key. Name lookup for this scheme goes through dim_geography directly, not the alias table."
+    - "v_focus_plus is the only view exposing has_geo_conflict, which comes from here."
+
+  # =========================================================================
+  # CROSS-SCHEME VIEWS - read, never join.
+  # BOTH ARE INCOMPLETE FOR FOCUS PLUS. Read the rules before using either.
+  # =========================================================================
+  v_cross_scheme_money_district_year:
+    table_name: curated.v_cross_scheme_money_district_year
+    object_type: view
+    column_count: 6
+    grain: one row per scheme x district x financial year
+    money_unit: crore_rupees
+    cross_scheme: true
+    focus_plus_presence: UNCONFIRMED
+    columns:
+    - {name: scheme_code,          type: text,         meaning: Which scheme the row is for.}
+    - {name: year_key,             type: smallint,     meaning: Financial year key.}
+    - {name: financial_year_short, type: char(7),      meaning: Financial year, display form.}
+    - {name: lgd_district,         type: varchar(100), meaning: District.}
+    - {name: amount_crore,         type: numeric,      unit: crore_rupees, meaning: The scheme's amount for that district-year.}
+    - {name: measure_semantics,    type: text,         meaning: What the amount actually means for that scheme.}
+    business_rules:
+    - "*** WHETHER FOCUS PLUS IS IN THIS VIEW IS NOT KNOWABLE FROM STRUCTURE. *** scheme_code is a text column and the extract cannot say which codes it holds. RUN `SELECT DISTINCT scheme_code FROM curated.v_cross_scheme_money_district_year;` BEFORE claiming a comparison covers all three schemes. If Focus Plus is absent, say so - never silently answer for two."
+    - "The only sanctioned way to compare scheme spending. Never join the facts."
+    - "CRITICAL: the amounts are not the same kind of number. MGNREGA is expenditure incurred, PMAY is money released against sanctions, and Focus Plus - if present - is money disbursed to individuals. Three different meanings. ALWAYS carry measure_semantics into the answer."
+    - "If Focus Plus is present, confirm measure_semantics distinguishes 'disbursed to individuals' from the other two. SCHEMA_FOR_DEVELOPERS.md flags that string as still open."
+
+  v_cross_scheme_village_coverage:
+    table_name: curated.v_cross_scheme_village_coverage
+    object_type: view
+    column_count: 4
+    grain: one row per village
+    cross_scheme: true
+    focus_plus_presence: ABSENT
+    columns:
+    - {name: village_code,        type: integer,      meaning: LGD village code.}
+    - {name: lgd_district,        type: varchar(100), meaning: District.}
+    - {name: pmay_houses,         type: bigint,       meaning: PMAY houses in that village.}
+    - {name: mgnrega_person_days, type: bigint,       meaning: MGNREGA person-days in that village.}
+    business_rules:
+    - "*** THIS VIEW HAS NO FOCUS PLUS COLUMN. *** Its four columns cover PMAY and MGNREGA only. A coverage question involving Focus Plus CANNOT be answered by reading it."
+    - "To include Focus Plus, aggregate v_focus_plus to village_code yourself and FULL JOIN that aggregate on - never the fact. See the few-shot example."
+    - Expect NULL on either existing measure - that is the finding, not a defect.
+
+# ===========================================================================
+semantic_rules:
+
+  # ---- the fact that governs everything else ------------------------------
+  batch_duality:
+    critical: true
+    status: TWO_DATASETS_IN_ONE_FACT
+    discriminator: batch_label
+    text: >
+      Focus Plus is not one dataset. batch_label splits the fact into two cohorts that
+      differ in grain, in column coverage and in what a row means. Nothing in the DDL
+      says so, and no other scheme in megh_db has this shape. Almost every Focus Plus
+      question needs to know which cohort it is about.
+    legacy_cohort:
+      batch_label: '93K'
+      source_rows: 373144
+      beneficiaries: 93286
+      grain: four rows per beneficiary, one per tranche
+      tranches: [Tranch 1, Tranch 2 - August, Tranch 3 - December, Tranch 4 - Feb-March]
+      financial_years: ['2022-23 (Tranch 1)', '2025-26 (Tranches 2-4)']
+      amounts: ['5000 in Tranch 1', '2500 in Tranches 2-4']
+      populated_person_columns: none
+      null_person_columns: [gender, occupation, focus_status, verification_status, member_id, pincode]
+      identifier_in_source: epic_id
+      identifier_in_db: "NONE - epic_id was dropped. source_sl_no is the only proxy."
+    registration_cohort:
+      batch_label: '12.5K'
+      source_rows: 12527
+      beneficiaries: 12527
+      grain: one row per person
+      tranches: ['Tranch 4 - Feb-March only']
+      financial_years: ['2025-26']
+      amounts: ['2500']
+      populated_person_columns: [gender, occupation, focus_status, verification_status, member_id, pincode]
+      districts_reached: 6
+    runtime_behavior: >
+      A question about gender, occupation, focus_status, verification_status, member_id
+      or pincode can only be answered for the 12.5K cohort - 3.2% of rows. State the
+      cohort and the coverage in the answer. A question about payments, money, tranches
+      or geography spans both cohorts and should say so when the split matters.
+    unverified_in_db: true
+
+  # ---- the term the whole use-case workbook turns on -----------------------
+  beneficiary_term:
+    status: AMBIGUOUS_BY_CONSTRUCTION
+    critical: true
+    reason: >
+      The curated grain is one row per PAYMENT. "Beneficiary" in the SME workbook means a
+      legacy paid person - 93,286 of them - and that number is NOT currently derivable
+      from megh_db, because epic_id was dropped at ingest and member_id is NULL on every
+      legacy row.
+    three_different_numbers:
+      payments: "COUNT(*) - every disbursement row. The source total is 385,671."
+      members_with_an_id: "COUNT(DISTINCT member_id) - the 12.5K cohort ONLY, about 12,527. NOT the scheme total."
+      legacy_beneficiaries: "93,286 in the source, via epic_id. NO COLUMN IN megh_db REPRODUCES THIS."
+    runtime_behavior: >
+      Never answer a bare "how many beneficiaries" with a single number. COUNT(*) is a
+      payment count and must be labelled as one. If the user means people, explain that
+      person identity is only available for the 12.5K registration cohort, offer
+      COUNT(DISTINCT source_sl_no) per batch as the best available proxy, and say it is a
+      file serial rather than a person key.
+    forbidden: >
+      Do NOT present COUNT(DISTINCT member_id) as the Focus Plus beneficiary total. It
+      silently answers for 3.2% of the scheme and looks authoritative doing it.
+    name_lookup: >
+      NOT POSSIBLE. beneficiary_name, epic_id and mobile_number are not in the curated
+      layer. A person lookup must return "not held in this data" - and rule 7 forbids
+      building one even if the columns returned.
+
+  # ---- the SME's own recurring open question, answered ---------------------
+  paid_unpaid_term:
+    status: NOT_ENCODED_IN_ANY_COLUMN
+    critical: true
+    reason: >
+      The use-case workbook asks repeatedly which field signifies paid vs unpaid. The
+      answer from the data is: none of them. `status` was the constant '106' and was
+      dropped. verification_status is 'Approved' on every populated row. focus_status
+      describes an APPLICATION (Pending / Approved / Rejected) and exists only on the
+      12.5K cohort, which is the cohort that has NOT been paid.
+    best_available_reading: >
+      batch_label is the discriminator: the 93K cohort was paid, the 12.5K cohort is
+      registered and awaiting payment. This is an INFERENCE from the data shape, not a
+      declared fact.
+    runtime_behavior: >
+      Answer paid/unpaid questions using batch_label, and state in the answer that the
+      paid/unpaid split is inferred from the batch rather than read from a status column.
+      If the user needs a certified status, say the column does not exist.
+    caveat: >
+      111 epic_ids appear in BOTH cohorts in the source - people already paid who also
+      registered again. So the two cohorts are not a clean partition of people, and an
+      "unpaid backlog" figure computed as 12,527 is an overstatement by an unknown amount.
+      epic_id is gone, so this overlap CANNOT be detected in megh_db at all. Flag it.
+    unverified_in_db: true
+
+  # ---- time ----------------------------------------------------------------
+  time_dimension: financial_year
+  time_dimensions_available: [financial_year, financial_year_short, year_key]
+  time_dimensions_absent: [date, month, quarter, week]
+  time_runtime_rule: >
+    THE FINANCIAL YEAR IS THE FINEST TIME GRAIN AND THERE IS NO DATE COLUMN AT ALL.
+    Focus Plus cannot answer a monthly, quarterly, weekly or exact-date question, and it
+    cannot answer a calendar-year question either - there is no date to bucket. Monthly
+    analysis is a PMAY-only capability. Do not offer it, do not approximate it, and do
+    not substitute ingested_at.
+  tranche_is_not_time: >
+    batch_label and tranche_label are the only sub-year sequencing on the fact and they
+    are LABELS. The month words inside them - August, December, Feb-March - are part of
+    the label text, not a parsed date, and nothing guarantees they sort chronologically.
+    Never ORDER BY tranche_label as a time series. A tranche comparison is a categorical
+    comparison; present it as one.
+  time_sparsity_rule: >
+    Only two financial years hold Focus Plus data, 2022-23 and 2025-26, with a three-year
+    gap between them. A "trend over time" is two points. Say that rather than drawing a
+    line through the gap.
+  time_null_rule: >
+    year_key is nullable and a GROUP BY drops unresolved rows silently. For this scheme
+    both source years fall inside the dim_year window, so an unresolved row is a load
+    defect rather than an expected case. Count them; a non-zero result is a finding.
+  year_note_rule: >
+    dim_year.data_quality_note is scheme-blind and both current notes are MGNREGA facts.
+    Do NOT attach them to a Focus Plus answer even though 2025-26 carries most Focus Plus
+    rows.
+
+  # ---- geography -----------------------------------------------------------
+  geography_hierarchy:
+  - lgd_district
+  - lgd_block
+  - lgd_village_name
+
+  geography_codes:
+  - village_code
+  geography_codes_note: >
+    Only the village code exists in the curated layer. District and block are names on
+    dim_geography with no code column, so a question asking for a district or block LGD
+    code cannot be answered.
+
+  geography_quality_rule: >
+    has_geo_conflict is the ONLY geographic quality signal this scheme has - there is no
+    mapping_category and no mapping_confidence_pct as PMAY has. Add WHERE NOT
+    has_geo_conflict whenever the answer turns on which block or district a payment
+    landed in, and say the filter was applied.
+
+  geography_coverage_caveat: >
+    102,923 source rows (26.7%) carry no village code, while fact.geography_key is NOT
+    NULL. How those rows resolved is UNKNOWN. Establish this before publishing any
+    village- or block-level Focus Plus figure, and check staging.quarantine.
+
+  ward_rule: >
+    dim_geography holds wards as well as villages and Focus Plus reaches both. Check
+    entity_type before describing a result as village-level or block-level, and do not
+    silently mix wards into a "top villages" ranking.
+
+  # ---- money ---------------------------------------------------------------
+  financial_measures:
+    amount_disbursed: SUM(amount_disbursed) - UNIT UNVERIFIED, read dim_scheme.money_unit.
+    measures_absent: >
+      There is no sanctioned, released, pending, target, budget, allocation or
+      administrative amount in this scheme. amount_disbursed is the only measure on the
+      fact. Do not borrow a money column from PMAY or MGNREGA to fill a gap.
+    unit_rule: >
+      THE FOCUS PLUS UNIT IS UNVERIFIED AND THIS IS THE HIGHEST-PRIORITY UNKNOWN IN THE
+      PARTITION. Read curated.dim_scheme.money_unit for the Focus Plus row before any
+      money figure leaves the system; if it does not answer, say the unit is unconfirmed.
+      Source values of 5,000 and 2,500 per payment corroborate rupees but do not settle
+      it. Four units would then be live across megh_db - lakh for MGNREGA, rupees for
+      PMAY, crore for the pre-aggregate and cross-scheme views, and this. Never add
+      across them and state the unit on every figure.
+    average_rule: >
+      AVG(amount_disbursed) IS MEANINGLESS AS AN ENTITLEMENT. Only two values exist -
+      5,000 and 2,500 - so the average is a mix ratio between tranche types. A
+      "per beneficiary" question must divide the total by a beneficiary count, and must
+      first settle which beneficiary count is meant (see beneficiary_term).
+    not_null_rule: >
+      amount_disbursed is NOT NULL - the only money column in megh_db that is. SUM needs
+      no COALESCE.
+
+  # ---- status --------------------------------------------------------------
+  status_dimension: NONE
+  status_columns: [focus_status, verification_status]
+  status_rule: >
+    There is no dim_focus_plus_status and no precomputed roll-up flag - nothing here
+    corresponds to PMAY's is_completed or is_in_progress. Both status columns are
+    uncontrolled varchars, both are NULL outside the 12.5K cohort, and
+    verification_status is constant where present. ENUMERATE WITH SELECT DISTINCT BEFORE
+    WRITING ANY FILTER, and never assume a 'Paid', 'Active' or 'Verified' string exists.
+
+  quality_flags: NONE
+  quality_flags_rule: >
+    Focus Plus has no is_placeholder, no completed_underfunded, no mapping_category and
+    no mapping_confidence_pct. There is NO MANDATORY PREDICATE on this partition - the
+    PMAY habit of writing WHERE NOT is_placeholder on every query must NOT be carried
+    over, because the column does not exist and the query will error. Every judgement
+    PMAY delegates to a flag is, here, still the application's problem.
+
+  # ---- person-level data ---------------------------------------------------
+  pii_rule:
+    critical: true
+    text: >
+      This is the only person-level fact in megh_db. member_id and pincode identify
+      individuals. Query v_focus_plus, never the fact. Never select an identifier into
+      an answer, an export or a vector-store payload; member_id's only legitimate use
+      is inside COUNT(DISTINCT). Do not build a member-lookup or Member-360 feature. Set
+      semantic.table_catalog.is_chatbot_visible = false on the fact and keep both
+      columns out of semantic.column_catalog.sample_values. Aggregate before display.
+      bank_name_raw is not an identifier and is exempt from this rule - it is a bank
+      name, safe to group by and to show, per v_focus_plus.bank_name_raw above.
+    contrast_with_pmay: >
+      PMAY was de-identified at ingest - names were dropped. Focus Plus was NOT
+      de-identified the same way, so the discipline has to come from the application
+      rather than the schema.
+
+  attribute_coverage_rule:
+    critical: true
+    text: >
+      gender, occupation, focus_status, verification_status, member_id and pincode are
+      populated on 3.2% of rows - the 12.5K cohort only. ANY breakdown by one of these
+      columns describes that cohort and NOT the scheme. State the cohort and the
+      denominator in the answer. A gender split presented as a Focus Plus figure is
+      wrong by construction.
+
+  null_behavior: >
+    NULL is missing; never silently coerce NULL to zero. For the person-level columns,
+    NULL specifically means "not collected for this cohort" - do not render it as an
+    'Unknown' or 'Other' category, which would imply it was asked and not answered.
+
+  identifier_behavior:
+  - focus_plus_fact_id and source_row_id are technical identifiers.
+  - source_sl_no is a source file serial and the only proxy for a legacy beneficiary.
+  - member_id is a person identifier and is PII - COUNT(DISTINCT) only, never displayed.
+  - pincode is person locality and is PII - never displayed.
+  - village_code and geography_key are geographic identifiers.
+  - year_key and scheme_key are dimension keys.
+  - Identifiers and keys must never be SUMed or AVGed.
+  - geography_key and focus_plus_fact_id are unstable across a reload - never export them.
+
+  # ---- what this scheme simply does not hold -------------------------------
+  not_available:
+    critical: true
+    text: >
+      The following appear in the Focus+ use-case workbook and have NO column in megh_db.
+      Return "not held in this data" and offer the nearest answerable question. Never
+      improvise, and never borrow a column from PMAY or MGNREGA.
+    items:
+    - {topic: producer_group, detail: "No producer group, PG id, PG type, FOCUS/LAMP split or PG membership exists in the source CSV or in megh_db. The use-case index annotates these as unavailable, yet the workbook still quotes '25,037 producer groups'. Do not repeat that figure."}
+    - {topic: epic_id, detail: "Dropped at ingest. EPIC lookups, Member-360, AC-code derivation from the 3-letter prefix and cross-scheme EPIC overlap are all unanswerable."}
+    - {topic: beneficiary_name, detail: "Dropped at ingest. No name lookup, no name-vs-bank-account reconciliation."}
+    - {topic: mobile_number, detail: "Dropped at ingest. Missing-mobile data-quality questions are unanswerable."}
+    - {topic: payment_date, detail: "No date column exists. No monthly, quarterly, weekly, exact-date or calendar-year analysis, and no Excel-serial date conversion."}
+    - {topic: account_number_ifsc, detail: "Neither is in the source or megh_db. Shared-account and IFSC-mismatch audits are unanswerable."}
+    - {topic: farmer_id_nic, detail: "Not in the source or megh_db."}
+    - {topic: eligible_population, detail: "No denominator is held, so coverage as a percentage of eligible farmers, beneficiary density and per-capita figures cannot be calculated. Offer counts per village or per block instead."}
+    - {topic: constituency, detail: "dim_geography carries ac_number and ac_name, but v_focus_plus does NOT expose them and Focus Plus has no alias_key. MLA and constituency questions are not answerable from this partition as it stands."}
+    - {topic: budget_target_forecast, detail: "No target, allocation or budget column. A projection is a calculation over assumptions the data does not hold - refuse it or state every assumption."}
+    - {topic: other_schemes, detail: "Ginger Mission and any other dataset are not in megh_db. Cross-dataset overlap questions are out of scope."}
+
+# ===========================================================================
+nlp_sql_rules:
+  read_only: true
+  allowed_operations: [SELECT]
+  default_from: curated.v_focus_plus
+
+  never_query: curated.fact_focus_plus_disbursement
+  never_query_reason: >
+    curated.v_focus_plus pre-joins dim_year and dim_geography and carries every column
+    the fact does, including bank_name_raw, so querying the fact directly is never
+    necessary and only reintroduces joins the view already did.
+
+  mandatory_predicate: NONE
+  mandatory_predicate_note: >
+    UNLIKE PMAY. There is no is_placeholder column on this partition, so there is no
+    always-on filter. Do NOT copy `WHERE NOT is_placeholder` from the PMAY examples -
+    the column does not exist here and the query will fail.
+
+  aggregation_defaults:
+    payments: COUNT(*)
+    disbursements: COUNT(*)
+    records: COUNT(*)
+    amount_disbursed: SUM(amount_disbursed)
+    members_with_an_id: COUNT(DISTINCT member_id)
+    distinct_villages: COUNT(DISTINCT village_code)
+    beneficiaries: ASK_FIRST
+
+  beneficiary_count_behavior: >
+    "Beneficiaries" has three possible readings and they differ by an order of magnitude -
+    see semantic_rules.beneficiary_term. COUNT(*) is a PAYMENT count and must be labelled
+    as one. COUNT(DISTINCT member_id) covers 3.2% of the scheme. The workbook's 93,286 is
+    not derivable at all. Clarify before answering; never pick silently.
+
+  batch_behavior: >
+    Check whether the question is about the paid legacy cohort, the newer registration
+    cohort, or both. Any question touching gender, occupation, status or member identity
+    is answerable for the 12.5K cohort only - filter batch_label and say so.
+
+  date_behavior: >
+    There is no date column. A financial-year request filters or groups financial_year /
+    financial_year_short. A monthly, quarterly, weekly, exact-date or calendar-year
+    request CANNOT be answered - say so rather than substituting a tranche label or
+    ingested_at.
+
+  tranche_behavior: >
+    A tranche breakdown is categorical, not chronological. GROUP BY batch_label,
+    tranche_label and present the result as categories. Never ORDER BY tranche_label as
+    time.
+
+  comparison: >
+    Filter the requested scope and GROUP BY the requested dimension. Preserve the cohort
+    distinction - comparing a 12.5K-only attribute against a scheme-wide count compares
+    two different populations.
+
+  ranking: >
+    ORDER BY the requested aggregate and default to top 5 when N is omitted for plural
+    "top" requests; singular "highest/lowest" uses LIMIT 1. If fewer rows exist than N
+    were asked for, return what there is and say how many.
+
+  entity_behavior: >
+    Resolve district, block, village, gender, occupation and status values against the
+    canonical stored values and approved aliases before SQL generation. District and
+    block are stored UPPERCASE in dim_geography; village names are not. The tranche
+    spelling stored is "Tranch", not "Tranche".
+
+  unknown_entity: Do not guess; return not-found/did-you-mean.
+
+  join_behavior: >
+    v_focus_plus pre-joins dim_year and dim_geography, so the generator should emit no
+    joins for ordinary questions. Read dim_scheme separately for the money unit. NEVER
+    join this fact to fact_pmay_house or to either MGNREGA fact - all six fact pairs are
+    prohibited (rule 6). Focus Plus has no alias_key and no status_key, so
+    dim_geography_alias and dim_pmay_house_status are not reachable from this partition.
+    See focusplus_foreign_key_augmentation.yaml.
+
+  cross_scheme_behavior: >
+    For money, use v_cross_scheme_money_district_year - but RUN
+    `SELECT DISTINCT scheme_code` FIRST, because whether Focus Plus is in that view is
+    unconfirmed, and say so if it is absent. For village coverage, that view has NO Focus
+    Plus column: aggregate v_focus_plus to village_code and FULL JOIN the aggregate on.
+    Always carry measure_semantics into a money comparison - three schemes, three
+    different meanings of "amount".
+
+  money_behavior: >
+    READ curated.dim_scheme.money_unit FOR FOCUS PLUS BEFORE FORMATTING. Do not assume
+    rupees, do not convert to crore on an assumption, and state the unit on every figure.
+    If the unit is unconfirmed, say so instead of publishing a converted number.
+
+  pii_behavior: >
+    Never SELECT member_id or pincode into a result set. member_id is permitted only
+    inside COUNT(DISTINCT). Refuse person-lookup and Member-360 requests on privacy
+    grounds, not on availability grounds - and note that beneficiary name, mobile
+    number and EPIC id were dropped at ingest anyway. bank_name_raw is not covered by
+    this rule - it identifies a bank, not a person, and may be SELECTed / GROUPed on.
+
+  unverified_totals_behavior: >
+    No Focus Plus volume or total has been double-derived. Every figure in this file is
+    a source-CSV observation. Run meta.v_reconciliation_focus_plus before quoting a
+    total, and prefer stating the measurement gap to publishing an unverified number.
+
+# ===========================================================================
+few_shot_examples:
+
+- question: How many Focus Plus disbursements are there?
+  explanation: One row is one payment, so COUNT(*) is a payment count. There is no placeholder flag on this partition, so no mandatory predicate.
+  sql: |
+    SELECT COUNT(*) AS disbursements
+    FROM curated.v_focus_plus;
+
+- question: How many Focus Plus beneficiaries are there?
+  explanation: >
+    Payments and people are different numbers, and person identity exists only for the
+    12.5K cohort. Return the three figures side by side rather than one misleading total,
+    and label each.
+  sql: |
+    SELECT COUNT(*)                                  AS payments,
+           COUNT(DISTINCT member_id)                 AS members_with_an_id,
+           COUNT(DISTINCT source_sl_no)              AS source_serials,
+           COUNT(*) FILTER (WHERE member_id IS NULL) AS payments_with_no_member_id
+    FROM curated.v_focus_plus;
+
+- question: How many Focus Plus beneficiaries are there in West Garo Hills?
+  explanation: >
+    Scoped to one named district with no grouping and nothing to compare against, so
+    this is a request for a single figure, not the ambiguity-driven three-reading
+    breakdown above. COUNT(DISTINCT source_sl_no) is the answer - the same proxy
+    already used for "beneficiaries" in the per-beneficiary average examples - and,
+    exactly as there, it carries batch_label = '93K' rather than being left bare:
+    source_sl_no numbering restarts within each batch, so an unscoped distinct count
+    would silently mix the two cohorts' serials as if they were one identifier space.
+  sql: |
+    SELECT COUNT(DISTINCT source_sl_no) AS beneficiaries
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'WEST GARO HILLS'
+      AND batch_label = '93K'
+      AND NOT has_geo_conflict;
+
+- question: How many disbursements are there in each batch?
+  explanation: batch_label splits the fact into the paid legacy cohort and the newer registration cohort. Most Focus Plus questions need this split.
+  sql: |
+    SELECT batch_label,
+           COUNT(*)                     AS payments,
+           COUNT(DISTINCT source_sl_no) AS beneficiaries_in_batch
+    FROM curated.v_focus_plus
+    GROUP BY batch_label
+    ORDER BY payments DESC;
+
+- question: How many Focus Plus payments are there in West Garo Hills?
+  explanation: District is a name on dim_geography, pre-joined into the view and stored uppercase.
+  sql: |
+    SELECT COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'WEST GARO HILLS';
+
+- question: Show Focus Plus payments by district
+  explanation: >
+    Payments and people are reported together because they are different numbers, and
+    the money is left in its stored unit because dim_scheme is the authority on it.
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                  AS payments,
+           COUNT(DISTINCT member_id) AS members_with_an_id,
+           SUM(amount_disbursed)     AS amount_raw_unit_per_dim_scheme
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY payments DESC;
+
+- question: What is the total amount disbursed under Focus Plus?
+  explanation: >
+    The unit is unverified, so the amount is returned raw alongside the payment count and
+    the unit is read from dim_scheme rather than assumed. Do not divide by 1e7 here.
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus;
+
+- question: What is the Focus Plus money unit?
+  explanation: dim_scheme is the authority on the unit and v_focus_plus does not expose scheme_key, so read the dimension directly.
+  sql: |
+    SELECT scheme_code, money_unit, time_semantics, grain_note
+    FROM curated.dim_scheme;
+
+- question: What is the standard Focus Plus payment?
+  explanation: >
+    Only two amounts exist and they belong to different tranches, so show the
+    distribution rather than asserting a single flat figure.
+  sql: |
+    SELECT amount_disbursed, batch_label, tranche_label, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY amount_disbursed, batch_label, tranche_label
+    ORDER BY payments DESC;
+
+- question: Show Focus Plus disbursements by tranche
+  explanation: >
+    Tranche is categorical, not chronological. Grouping by batch as well is necessary
+    because Tranch 4 contains both cohorts.
+  sql: |
+    SELECT batch_label, tranche_label,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY batch_label, tranche_label
+    ORDER BY batch_label, tranche_label;
+
+- question: Show the Focus Plus disbursement by financial year
+  explanation: >
+    The financial year is the finest time grain available. Only two years hold data, so
+    the caller must be told this is two points, not a trend.
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+
+- question: How many Focus Plus payments could not be matched to a financial year?
+  explanation: >
+    year_key is nullable and a GROUP BY drops those rows. Both source years fall inside
+    the dim_year window, so a non-zero result here is a load defect worth investigating.
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE year_key IS NULL) AS unresolved_year,
+           COUNT(*)                                 AS total
+    FROM curated.v_focus_plus;
+
+- question: How many Focus Plus beneficiaries are women?
+  explanation: >
+    gender is populated only on the 12.5K cohort, so the query is explicitly scoped to it
+    and the share is returned within that cohort so it cannot be quoted scheme-wide.
+  sql: |
+    SELECT gender,
+           COUNT(*) AS registrations,
+           ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct_of_cohort
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND gender IS NOT NULL
+    GROUP BY gender
+    ORDER BY registrations DESC;
+
+- question: How many Focus Plus members are farmers?
+  explanation: >
+    occupation shares the gender coverage limit. Grouping without a NOT NULL filter keeps
+    the uncollected rows visible so the answer can state how much it actually describes.
+  sql: |
+    SELECT occupation, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY occupation
+    ORDER BY registrations DESC;
+
+- question: How many Focus Plus registrations are still pending?
+  explanation: >
+    focus_status is a free varchar, not a dimension, and exists only on the 12.5K cohort.
+    Enumerate the values rather than filtering on an assumed string.
+  sql: |
+    SELECT focus_status, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY focus_status
+    ORDER BY registrations DESC;
+
+- question: Compare paid and unpaid Focus Plus members by district
+  explanation: >
+    No column encodes paid vs unpaid. batch_label is the inferred discriminator and the
+    answer must say the split is inferred rather than read from a status field.
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE batch_label = '93K')   AS legacy_paid_payments,
+           COUNT(*) FILTER (WHERE batch_label = '12.5K') AS newer_registrations
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY legacy_paid_payments DESC;
+
+- question: Top 5 blocks by Focus Plus payments
+  explanation: >
+    No N was supplied, so the ranking rule defaults to 5. The geo-conflict filter is
+    applied because the answer turns on which block a payment landed in.
+  sql: |
+    SELECT lgd_block, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE NOT has_geo_conflict
+    GROUP BY lgd_block
+    ORDER BY payments DESC
+    LIMIT 5;
+
+- question: How many distinct villages have Focus Plus payments in South Garo Hills?
+  explanation: Village identity is the LGD code, never the name - 345 village names are shared across dim_geography.
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'SOUTH GARO HILLS';
+
+- question: Which villages have only one Focus Plus payment?
+  explanation: >
+    Counted on village_code rather than name, and entity_type is returned so wards are
+    not silently reported as villages.
+  sql: |
+    SELECT village_code, lgd_village_name, lgd_district, entity_type,
+           COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE NOT has_geo_conflict
+    GROUP BY village_code, lgd_village_name, lgd_district, entity_type
+    HAVING COUNT(*) = 1
+    ORDER BY lgd_district;
+
+- question: How many Focus Plus payments are on villages with conflicting geography?
+  explanation: >
+    v_focus_plus is the only view exposing has_geo_conflict and it is this scheme's only
+    geographic quality signal, since there is no mapping_category.
+  sql: |
+    SELECT has_geo_conflict, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY has_geo_conflict;
+
+- question: Add Focus Plus to the cross-scheme village coverage view
+  explanation: >
+    That view has no Focus Plus column, so aggregate v_focus_plus to village_code first
+    and join the AGGREGATE. Never join the fact - all six fact pairs are prohibited.
+  sql: |
+    WITH fp AS (
+      SELECT village_code, COUNT(*) AS focus_plus_payments
+      FROM curated.v_focus_plus
+      GROUP BY village_code
+    )
+    SELECT c.village_code, c.lgd_district, c.pmay_houses,
+           c.mgnrega_person_days, fp.focus_plus_payments
+    FROM curated.v_cross_scheme_village_coverage c
+    FULL JOIN fp USING (village_code);
+
+- question: Is Focus Plus included in the cross-scheme money comparison?
+  explanation: >
+    Structure cannot say which scheme codes that view holds, so this must be run before
+    any answer claims to cover all three schemes.
+  sql: |
+    SELECT DISTINCT scheme_code
+    FROM curated.v_cross_scheme_money_district_year;
+
+# ---- questions that must be refused -------------------------------------
+
+- question: Is EPIC FTB0593681 a Focus Plus beneficiary?
+  explanation: >
+    epic_id was dropped at ingest and is not in the curated layer. There is no join that
+    recovers it. Separately, rule 7 forbids building a person-lookup feature against this
+    fact even if the column existed. Return "not held in this data".
+  sql: null
+
+- question: Look up member Hasena Bibi and show her village, bank and payment history
+  explanation: >
+    beneficiary_name was dropped at ingest, and there is no date column to build a
+    payment history from even if a member could be located. This is also a person
+    lookup, which rule 7 prohibits outright regardless of which columns exist - do
+    not build a member-lookup answer even though bank_name_raw itself is queryable.
+    Refuse on privacy grounds and note the missing columns.
+  sql: null
+
+- question: Which bank serves the most Focus Plus beneficiaries?
+  explanation: >
+    bank_name_raw is on curated.v_focus_plus and is not an identifier, so this is
+    answerable. "Serves the most beneficiaries" is ambiguous per rule 6 (COUNT(*) is
+    payments, not people) - answer with payment count as the primary reading and total
+    amount as a cross-check, both labelled. Some raw values are numeric codes rather
+    than bank names (rule 10) - by total amount_disbursed they rank far below the real
+    banks, so the top result is a genuine bank name, but flag any code that surfaces in
+    a fuller breakdown rather than presenting it as a bank.
+  sql: |
+    SELECT bank_name_raw,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY bank_name_raw
+    ORDER BY payments DESC
+    LIMIT 1;
+
+- question: How many producer groups are in Focus Plus?
+  explanation: >
+    No producer group, PG id, PG type or PG membership column exists in the source or in
+    megh_db. The use-case workbook quotes 25,037 producer groups; that figure has no
+    basis in this data and must not be repeated.
+  sql: null
+
+- question: Show the Focus Plus disbursement trend by month
+  explanation: >
+    There is no date column at all - the finest time grain is the financial year, and the
+    month words inside tranche_label are label text, not dates. Monthly analysis is a
+    PMAY-only capability. Do not substitute ingested_at, which is a load timestamp.
+  sql: null
+
+- question: How many Focus Plus beneficiaries have no mobile number?
+  explanation: >
+    mobile_number was dropped at ingest and is not in the curated layer. The data-quality
+    question cannot be answered against megh_db.
+  sql: null
+
+- question: Which account numbers are shared by multiple Focus Plus members?
+  explanation: >
+    Neither an account number nor an IFSC is held in the source or in megh_db.
+    bank_name_raw exists and is queryable, but it identifies a bank, not an account -
+    it cannot answer an account-sharing question.
+  sql: null
+
+- question: What is the Focus Plus coverage rate in each district?
+  explanation: >
+    Coverage as a percentage requires an eligible-population denominator, and no
+    household, farmer or population count is held. Decline and offer payments per village
+    or per block instead.
+  sql: null
+
+- question: How many EPIC IDs are shared between Focus Plus and the Ginger Mission?
+  explanation: >
+    epic_id is not in the curated layer and the Ginger Mission dataset is not in megh_db
+    at all. Out of scope on both counts.
+  sql: null
+
+- question: What is the total of all Focus Plus village LGD codes?
+  explanation: >
+    LGD codes are identifiers, not measures. SUM on village_code is semantically invalid.
+    Decline and offer COUNT(DISTINCT village_code) instead.
+  sql: null
+
+- question: List the member IDs of Focus Plus beneficiaries in Selsella
+  explanation: >
+    member_id is a personal identifier on the only person-level fact in the database.
+    Rule 7 forbids emitting it into an answer, an export or a vector payload; its only
+    legitimate use is inside COUNT(DISTINCT). Offer the aggregate count instead.
+  sql: null
+
+- question: Update the disbursement amount for a Focus Plus member
+  explanation: The read role permits SELECT only. Refuse rather than translating into write SQL.
+  sql: null
+
+- question: Show MGNREGA person-days for the villages in this Focus Plus result
+  explanation: >
+    A row-level join from fact_focus_plus_disbursement to either MGNREGA fact is
+    prohibited - disbursement grain against source-row grain multiplies both sides. All
+    six fact pairs are prohibited (rule 6). Aggregate each side to village_code first, or
+    use v_cross_scheme_village_coverage.
+  sql: null

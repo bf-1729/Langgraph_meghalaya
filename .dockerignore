@@ -1,0 +1,35 @@
+# Secrets — never bake into an image layer. Pass at run time with --env-file.
+.env
+.env.bak-*
+.env.example
+
+# VCS / tooling
+.git
+.gitignore
+.github
+.claude
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.mypy_cache
+.pytest_cache
+
+# Local runtime artefacts
+logs/*
+!logs/.gitkeep
+fastembed_cache/
+
+# Docs / deploy scaffolding not needed inside the app image
+docs
+deploy
+tests
+archive
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Predecessor project kept on disk for reference only
+NeuralAiGovernanceProject*/
+NeuralAiGovernanceProject*.zip

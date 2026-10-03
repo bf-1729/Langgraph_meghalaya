@@ -1,0 +1,430 @@
+# focuslegacy_classification_rules.yaml
+#
+# ===========================================================================
+# v1.0 - 2026-09-21 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Legacy was loaded straight into curated, so this file has no flat-table
+# ancestor and no migration to record. Structure from SCHEMA_FOR_DEVELOPERS.md
+# (2026-09-21 extract), semantics from focuslegacy_schema_partitions.yaml v1.0,
+# values from "Focus Legacy to share to BLH.xlsx" profiled 2026-09-21.
+#
+# EVERY COUNT IN A QUESTION BELOW IS A SOURCE-WORKBOOK FIGURE AND HAS NOT BEEN
+# MEASURED AGAINST megh_db. Run meta.v_reconciliation_focus_legacy first. The two
+# exceptions the database independently confirms are the 14,569 / 3 / 14,566
+# reconciliation and the amount = members x 5000 identity.
+#
+# UNLIKE PMAY AND FOCUS PLUS, THERE IS NO USE-CASE WORKBOOK FOR THIS SCHEME.
+# datasets/Focus legacy/ holds the data file and nothing else, so no rule here is
+# evidenced by a stated SME requirement. Every condition is derived from a trap in
+# the data or from the conventions of the sibling folders. Treat the wording as a
+# first draft to be corrected against real user questions, not as a settled
+# vocabulary.
+#
+# Four sections have no PMAY counterpart, for four reasons: the money is fully
+# derived from the member count, so several money questions are membership
+# questions in disguise; the grain is a GROUP, so "beneficiary" has no person
+# reading at all; the pg_id is structured and invites parsing that is wrong; and
+# two product-bearing columns stop being captured after FY2022-23. The reasoning
+# behind each rule lives in focuslegacy_schema_partitions.yaml and is not
+# repeated here.
+# ===========================================================================
+# Clarification rules for Focus Legacy. First rule that fires wins; its question is
+# asked and the pipeline pauses. Editable by analysts - no code change needed.
+# {placeholders} are filled from the user's query at runtime.
+# Order matters: requests the source cannot answer are caught before missing detail
+# is asked for, so the bot never collects details for a question it cannot answer.
+# Privacy refusals sit second, because the answer is no even where a column exists.
+#
+# focuslegacy_default_rules.yaml IS NOT BUILT YET. The following conditions are
+# RESERVED for it and are deliberately absent here, so that the two files carry no
+# overlapping condition when it lands: top-N omitted, no geography filter, no time
+# period, sort direction, output format, has_geo_conflict rows, Unresolved rows in
+# a non-village answer, and a bare "amount" inside an already-scoped question.
+# ===========================================================================
+
+clarification_rules:
+
+  # ---- the source cannot answer this at all -----------------------------
+  - condition: "focus_plus_confused_with_focus_legacy"
+    question: "Two different schemes carry the Focus name - Focus Legacy pays producer groups, Focus Plus pays individual beneficiaries. This data is Focus Legacy. Shall I answer for producer groups, or did you mean Focus Plus?"
+
+  - condition: "individual_beneficiary_requested"
+    question: "Focus Legacy records payments to producer groups, not to individuals - there is no person in this data at all. Shall I answer at group level?"
+
+  - condition: "beneficiary_name_requested"
+    question: "Individual names are not held - the only name recorded is the producer group's. Shall I answer by group, village, block or district?"
+
+  - condition: "member_list_requested"
+    question: "Only the number of members in a group is held, never who they are. Shall I report member counts by group instead?"
+
+  - condition: "mobile_or_aadhaar_requested"
+    question: "Mobile numbers, Aadhaar and addresses are not held in this data. Shall I answer on payments, groups and geography?"
+
+  - condition: "epic_id_requested"
+    question: "EPIC / voter ID is not held for Focus Legacy. Shall I answer by group, village, block or district?"
+
+  - condition: "household_or_family_requested"
+    question: "Households and families are not recorded - the unit here is a producer group. Shall I answer on groups and their member counts?"
+
+  - condition: "gender_requested"
+    question: "There is no gender field in Focus Legacy - the data records groups, not people. Shall I answer on groups, members or geography instead?"
+
+  - condition: "caste_income_or_bpl_requested"
+    question: "Caste, income, SECC category and BPL status are not held. Shall I answer by group type, product, or geography?"
+
+  - condition: "age_or_disability_requested"
+    question: "Age, disability and PWD status are not held. Shall I answer on groups and their geography instead?"
+
+  - condition: "application_or_approval_requested"
+    question: "Applications, approvals and sanction orders are not held - every record here is a payment that was made. Shall I answer on the payments themselves?"
+
+  - condition: "rejection_or_cancellation_requested"
+    question: "Rejected, cancelled and withdrawn cases are not held - the data starts at the payment. Shall I report the payments that were made?"
+
+  - condition: "pending_payment_requested"
+    question: "There is no status field and no pending queue - every row is money already remitted. Shall I report groups paid, or groups paid only once?"
+
+  - condition: "repayment_or_recovery_requested"
+    question: "Repayment, recovery and utilisation are not held - the data ends at the remittance. Shall I report the amounts disbursed instead?"
+
+  - condition: "outcome_or_income_requested"
+    question: "Income, profit, yield, turnover and sales are not held - what the group did with the money is not recorded. Shall I answer on amounts disbursed and group membership?"
+
+  - condition: "market_linkage_requested"
+    question: "Buyers, market linkage and procurement are not held. The closest recorded field is the group's product, and only for FY2021-22 and FY2022-23. Shall I use that?"
+
+  - condition: "training_or_capacity_building_requested"
+    question: "Training, capacity building and hand-holding support are not held. Shall I answer on the cash disbursements that are recorded?"
+
+  - condition: "asset_or_equipment_requested"
+    question: "Assets, equipment and infrastructure are not held - the only measure is the cash remitted. Shall I report amounts disbursed?"
+
+  - condition: "loan_or_credit_requested"
+    question: "Loans, credit, interest and subsidy structure are not held - the data records a direct remittance of Rs 5,000 per member. Shall I report that?"
+
+  - condition: "centre_state_share_requested"
+    question: "The centre-state funding split is not held - the data records one remitted amount per payment. Shall I report the total disbursed instead?"
+
+  - condition: "budget_or_target_requested"
+    question: "Targets, allocations and sanctioned budgets are not held - only money actually remitted. Shall I report the amount disbursed instead?"
+
+  - condition: "saturation_or_coverage_requested"
+    question: "The total number of eligible producer groups is not held, so coverage or saturation cannot be calculated. Would groups paid per village or per block work instead?"
+
+  - condition: "per_capita_requested"
+    question: "Population figures are not held here, so per-capita cannot be calculated. Would amount per group, or groups per village, work instead?"
+
+  - condition: "group_formation_or_registration_date_requested"
+    question: "When a group was formed or registered is not held - the only date is the remittance date. Shall I use the group's first recorded payment instead?"
+
+  - condition: "grievance_requested"
+    question: "Grievances, appeals and complaints are not held. Shall I answer on payments and groups instead?"
+
+  - condition: "inspection_or_verification_requested"
+    question: "Inspections, geotagging and field verification are not held. Shall I answer on the payment records?"
+
+  - condition: "implementing_agency_requested"
+    question: "Implementing agency, facilitator and field officer details are not held. Shall I answer on the groups and their payments?"
+
+  - condition: "below_village_geography_requested"
+    question: "Geography runs down to village only - there is no habitation, hamlet or household location. Which village should I report on?"
+
+  - condition: "district_or_block_code_requested"
+    question: "The database holds district and block as names only - there is no district or block LGD code. Shall I use the name, or the village LGD code?"
+
+  - condition: "other_state_comparison_requested"
+    question: "Only Meghalaya is held here, so other states cannot be compared. Shall I compare districts within Meghalaya instead?"
+
+  - condition: "other_scheme_requested"
+    question: "This partition holds Focus Legacy only. Shall I answer for Focus Legacy alone?"
+
+  # ---- what privacy forbids ---------------------------------------------
+  - condition: "account_holder_name_requested"
+    question: "The name on the bank account is personal data and is not available through the approved query surface. Shall I answer on the group name, or on the payment record without it?"
+
+  - condition: "full_account_number_requested"
+    question: "Full account numbers are held for audit only. I can show the masked form - last four digits - for a specific group's payment history. Shall I do that?"
+
+  - condition: "account_number_bulk_export_requested"
+    question: "Account numbers, even masked, are not released in bulk. Shall I give you the payment totals by group instead, or the masked account for one named group?"
+
+  - condition: "bank_account_change_history_requested"
+    question: "When a group changed bank account is account-level history and is not released through the approved surface. Shall I report whether each payment went to the group's current account instead?"
+
+  - condition: "shared_account_audit_requested"
+    question: "Accounts shared between groups can be reported as a count, but not as a list of account numbers - 250 accounts are used by more than one group. Shall I give you the aggregate finding?"
+
+  - condition: "name_on_account_reconciliation_requested"
+    question: "Comparing the account holder's name against the group's name would require the personal name field, which is outside the approved surface. Shall I answer on the group records instead?"
+
+  # ---- the entitlement identity -----------------------------------------
+  - condition: "amount_per_member_requested"
+    question: "Every payment is exactly Rs 5,000 per member, on all 14,569 records, so the per-member figure is a fixed rate rather than something to calculate. Shall I confirm the rate, or report total amounts by group instead?"
+
+  - condition: "average_amount_per_group_requested"
+    question: "Because the amount is always 5,000 per member, an average amount is an average group size multiplied by 5,000 - it measures membership, not entitlement. Report it anyway with that stated, or report average group size directly?"
+
+  - condition: "entitlement_change_over_time_requested"
+    question: "The rate has not changed - it is 5,000 per member in every year held. A change in average amount is a change in group size. Shall I show average group size by year instead?"
+
+  - condition: "amount_and_members_as_two_findings"
+    question: "Amount disbursed and member count are the same number at a 5,000 scale factor, so they cannot corroborate each other. Shall I report one of them, with the relationship stated?"
+
+  - condition: "amount_member_correlation_requested"
+    question: "Amount and member count are perfectly correlated by construction - amount is members multiplied by 5,000 - so a correlation figure would be meaningless. Shall I answer a different comparison?"
+
+  - condition: "ranking_by_amount_and_members_both"
+    question: "A ranking by amount and a ranking by members are the same ranking here. Shall I show one list, with both columns on it?"
+
+  - condition: "money_growth_that_is_membership_growth"
+    question: "Growth in money disbursed is growth in the number of members paid, not in the rate. Shall I present it as membership growth, or as both with the relationship stated?"
+
+  # ---- terms that look answerable but mean several things ----------------
+  - condition: "beneficiaries_term_unclear"
+    question: "'Beneficiaries' could mean payments ({payment_count}), producer groups ({group_count}), or memberships paid for ({membership_count}). There is no person-level count in this data. Which did you mean?"
+
+  - condition: "ambiguous_count_subject"
+    question: "A count of what - payments, producer groups, memberships, or villages?"
+
+  - condition: "members_read_as_people"
+    question: "Member counts are per payment, so a group paid in two years is counted twice - and its recorded size can differ between the two. Shall I report memberships as they stand, or restrict it to one financial year?"
+
+  - condition: "payments_versus_groups_unclear"
+    question: "Payments and groups are not the same here - 2,647 groups were paid twice and 8 three times. Do you want the number of payments, or the number of distinct groups?"
+
+  - condition: "repeat_payment_double_count_risk"
+    question: "This would count a group once per payment. Shall I count each group once instead, or keep it per payment?"
+
+  - condition: "vague_qualifier"
+    question: "What should '{value}' be measured by - amount disbursed, number of groups, number of payments, or memberships?"
+
+  - condition: "ambiguous_progress_term"
+    question: "There is no progress or completion field in Focus Legacy. Did you mean payments over time, or groups reached?"
+
+  - condition: "performance_term_unclear"
+    question: "There is no outcome or performance measure in this data. Did you mean the amount disbursed, or the number of groups reached?"
+
+  - condition: "missing_metric_for_ranking"
+    question: "Top by what - amount disbursed, number of groups, number of payments, or memberships?"
+
+  - condition: "missing_metric_for_trend"
+    question: "Which measure should the trend show - amount disbursed, payments, or groups paid?"
+
+  # ---- money -------------------------------------------------------------
+  - condition: "money_unit_unconfirmed"
+    question: "The money unit for Focus Legacy has not been confirmed in the database yet - the figures look like rupees but that is not settled. Shall I report the number with the unit marked unconfirmed?"
+
+  - condition: "crore_or_lakh_conversion_requested"
+    question: "A conversion needs the confirmed unit, which is not yet established for Focus Legacy. Shall I give the raw figure with the unit stated as unconfirmed?"
+
+  - condition: "cross_unit_arithmetic_requested"
+    question: "MGNREGA is in lakh, PMAY in rupees, and the Focus Legacy unit is unconfirmed - these cannot be added together. Shall I report each separately with its own unit?"
+
+  - condition: "share_denominator_missing"
+    question: "As a share of what - the district total, or the scheme total across all four years?"
+
+  - condition: "ambiguous_total_vs_average"
+    question: "Total across the whole period, or an average per year?"
+
+  # ---- time --------------------------------------------------------------
+  - condition: "fy_2023_24_requested"
+    question: "There are no Focus Legacy payments in FY2023-24 - the scheme has a one-year gap between FY2022-23 and FY2024-25. Shall I report the surrounding years instead?"
+
+  - condition: "trend_across_the_year_gap"
+    question: "A year-by-year trend has a hole at FY2023-24, where no payments exist. Shall I show the four years with the gap marked, or compare two specific years?"
+
+  - condition: "calendar_year_vs_financial_year"
+    question: "'{value}' could mean the calendar year ({calendar_count} payments) or FY {value}-{next_short} ({fy_count} payments). Which one?"
+
+  - condition: "ambiguous_year_shorthand"
+    question: "'{value}' could be FY {fy_label} or the calendar years {year_a} and {year_b}. Which did you mean?"
+
+  - condition: "vague_recency"
+    question: "'{value}' is not a fixed period. Which financial year - or shall I cover all payments from FY2021-22 to FY2025-26?"
+
+  - condition: "growth_period_missing"
+    question: "Growth between which two financial years? Note that FY2023-24 holds no payments."
+
+  - condition: "monthly_trend_requested"
+    question: "Focus Legacy money moves in bulk runs - only 30 payment dates exist across five years, and three of them carry 9,193 of 14,569 payments. A monthly chart shows treasury batches, not a payment rate. Shall I show it by financial year, or list the payment dates?"
+
+  - condition: "daily_or_weekly_trend_requested"
+    question: "A daily or weekly view would show 30 spikes and nothing in between - payments are made in batches. Shall I list the payment dates with their totals instead?"
+
+  - condition: "payment_rate_or_velocity_requested"
+    question: "There is no payment rate to measure - money is released in a handful of bulk runs each year. Shall I report the batches and their sizes?"
+
+  - condition: "date_versus_financial_year_grouping"
+    question: "171 payments have no remittance date, so a date-based grouping returns a smaller total than a financial-year grouping. Shall I group by financial year to keep every payment?"
+
+  - condition: "quarter_without_year"
+    question: "Which year's {value}? Payments run from August 2021 to March 2026, with none in FY2023-24."
+
+  - condition: "reversed_date_range"
+    question: "'{value}' runs backwards. Did you mean {corrected_range}?"
+
+  - condition: "partial_year_comparison_requested"
+    question: "FY2025-26 holds 8,812 payments against 2,653 in FY2024-25, and includes a top-up round the earlier years do not have. Compare them as they stand, or exclude the Focus (Addnl) payments?"
+
+  # ---- producer groups and the pg_id -------------------------------------
+  - condition: "group_name_lookup_ambiguous"
+    question: "'{value}' matches {match_count} producer groups - group names are not unique and the same group is sometimes spelled differently. Which one - {candidates}?"
+
+  - condition: "unmatched_pg_name"
+    question: "No producer group name matches '{value}'. Names are recorded inconsistently, so shall I search for a partial match, or look it up by PG id instead?"
+
+  - condition: "group_count_by_name_requested"
+    question: "Group names cannot be counted - 11,906 groups carry only 10,678 distinct names, and 1,634 groups are spelled more than one way. Shall I count by PG id instead?"
+
+  - condition: "pg_id_format_invalid"
+    question: "'{value}' is not a Focus Legacy PG id - they run as PG-FOCUS, PG-LAMP or PG-EXISTING, then a district abbreviation, then a number, such as PG-FOCUS-WGH-7089. Shall I search by group name instead?"
+
+  - condition: "pg_number_without_prefix"
+    question: "The number in a PG id is only unique within its prefix - PG-FOCUS-WKH-5956 and PG-LAMP-WGH-5956 are different groups. Which full id did you mean?"
+
+  - condition: "district_inferred_from_pg_id"
+    question: "The district letters inside a PG id record where the group enrolled, and 1,075 payments now map to a different district after boundary changes. Shall I use the mapped LGD district, which is the correct one?"
+
+  - condition: "entity_type_values_unknown"
+    question: "Focus Legacy groups fall into three types, derived from the PG id prefix. Shall I show the breakdown across all three, or did you mean a specific one?"
+
+  - condition: "lamp_definition_requested"
+    question: "What the LAMP group type represents is recorded in the database as an unconfirmed hypothesis, not a settled definition. Shall I report the counts by type without interpreting them?"
+
+  - condition: "new_versus_repeat_groups_unclear"
+    question: "Do you mean groups paid for the first time in {value}, or every group paid in {value} including those paid in an earlier year?"
+
+  - condition: "group_membership_change_requested"
+    question: "Member counts are recorded per payment, not tracked over time - one group was paid for 1 member in September 2025 and 12 in January 2026. Shall I show each payment separately?"
+
+  # ---- product -----------------------------------------------------------
+  - condition: "product_question_outside_coverage"
+    question: "The product field was only captured for FY2021-22 and FY2022-23 - it is empty on all 2,653 FY2024-25 payments and on 8,804 of 8,812 in FY2025-26. Shall I answer for the two years that have it?"
+
+  - condition: "product_trend_over_time_requested"
+    question: "A product trend would cover two years and then stop, because the field stopped being captured - not because the groups stopped having products. Shall I show FY2021-22 against FY2022-23?"
+
+  - condition: "product_share_denominator_unclear"
+    question: "Product is recorded on 3,112 of 14,569 payments. Should the share be of those 3,112, or of all payments with the rest shown as not recorded?"
+
+  - condition: "product_as_expenditure"
+    question: "The product field describes what the group works on, not what the money was spent on. Shall I report payments by product on that basis?"
+
+  - condition: "product_spelling_variants"
+    question: "'{value}' is recorded under several spellings, such as {variants}. Shall I group them together?"
+
+  # ---- banking -----------------------------------------------------------
+  - condition: "bank_performance_reading"
+    question: "The bank on a payment records where the money was sent, not how the bank performed. Shall I report payments and amounts by bank on that basis?"
+
+  - condition: "ifsc_read_as_branch"
+    question: "One IFSC covers 8,328 of 14,569 payments because it is a sponsor-bank code, not a single branch. Shall I report by bank instead, or by IFSC with that caveat?"
+
+  - condition: "branch_breakdown_sparse"
+    question: "The branch name was only recorded on 3,192 of 14,569 payments, almost all in the first two years. Shall I use the IFSC code, which is on every payment?"
+
+  - condition: "superseded_account_reading"
+    question: "Whether an account is the group's current one is inferred from the latest payment date - no field in the source declares it. Shall I report it on that basis?"
+
+  # ---- geography ---------------------------------------------------------
+  - condition: "missing_geography_level_for_breakdown"
+    question: "Broken down by which level - district, block, or village?"
+
+  - condition: "unresolved_rows_in_village_answer"
+    question: "1,101 payments could not be matched to a real village and sit under a district placeholder. A village list excludes them, so the village totals will not add up to the scheme total. Shall I proceed and state the shortfall?"
+
+  - condition: "block_total_shortfall"
+    question: "1,013 payments have a block in the source but no village, and may not carry their block through to the database. Shall I report block figures with the shortfall checked and stated?"
+
+  - condition: "district_bifurcation_boundary"
+    question: "{district} was split - {new_district} is recorded separately with {new_district_records} payments, even though those groups' ids still say {old_abbr}. Include it, or keep the two apart?"
+
+  - condition: "ambiguous_geography_level"
+    question: "'{value}' is both a block and a village name. Which level did you mean?"
+
+  - condition: "ambiguous_village_needs_district"
+    question: "'{value}' exists in {districts}. Which district?"
+
+  - condition: "ambiguous_village_needs_block"
+    question: "There is more than one {value} in {district}. Which block - {blocks}?"
+
+  - condition: "blocked_fuzzy_pair"
+    question: "'{value}' is close to both {candidate_a} and {candidate_b}, which are different places. Which one?"
+
+  - condition: "unmatched_geography_name"
+    question: "I could not match '{value}' to any district, block or village in the Focus Legacy data. Did you mean {suggestions}?"
+
+  - condition: "mixed_geography_levels_compared"
+    question: "{value_a} is a {level_a} and {value_b} is a {level_b}, so comparing them is not like-for-like. Compare at {level_b} level instead?"
+
+  - condition: "village_level_breakdown_size"
+    question: "A village-level breakdown returns up to 3,384 rows. Shall I show the top 10, or restrict it to one district or block?"
+
+  - condition: "geo_conflict_precision_warning"
+    question: "Some villages have conflicting district or block records across sources. Continue, or exclude them so the geography is certain?"
+
+  - condition: "constituency_requested"
+    question: "The scheme's own constituency field was not carried into the database, but each village's constituency is held in the geography registry. Shall I use that, noting it comes from the registry and excludes the 1,101 unmatched payments?"
+
+  # ---- data quality ------------------------------------------------------
+  - condition: "source_total_differs_from_database"
+    question: "Three rows from the source file were held back at load - one disputed duplicate payment and two with malformed group ids - so the database total is Rs 95,000 lower than the spreadsheet's. Shall I report the database figure and explain the difference?"
+
+  - condition: "duplicate_disbursement_pair_requested"
+    question: "One group has two identical payments a month apart, and one of them was held back as a suspected duplicate. It could equally be a genuine second tranche. Shall I report the loaded figure, or flag the pair for review?"
+
+  - condition: "malformed_pg_id_rows_requested"
+    question: "Two payments were rejected because their group ids contain stray spaces, so two groups are missing from the database. Shall I report the loaded figures and note the exclusion?"
+
+  - condition: "outlier_group_in_average"
+    question: "One group has 190 members against a next-largest of 20, which will dominate any average or maximum. Include it, exclude it, or report both?"
+
+  - condition: "null_year_rows"
+    question: "Every payment should carry a financial year, so any that do not are a loading fault rather than missing data. Shall I report the count separately if there are any?"
+
+  - condition: "unverified_total_requested"
+    question: "Scheme totals have not yet been checked against the database's own reconciliation view. Shall I report the figure with that stated, or wait for the check?"
+
+  # ---- cross-scheme ------------------------------------------------------
+  - condition: "cross_scheme_money_comparison"
+    question: "Focus Legacy records money remitted, PMAY records money released against a sanction, and MGNREGA records expenditure incurred - the three are not like for like. Compare them anyway, with that stated?"
+
+  - condition: "cross_scheme_view_absent"
+    question: "Focus Legacy is not included in the ready-made cross-scheme comparison views, so the comparison has to be built by summarising each scheme separately. Shall I do that by district and financial year?"
+
+  - condition: "cross_scheme_row_level_request"
+    question: "Focus Legacy is recorded per payment to a group and the other schemes at different levels, so they cannot be listed side by side row by row. Shall I compare them by district and year instead?"
+
+  - condition: "focus_plus_linkage_requested"
+    question: "There is no key linking a Focus Legacy producer group to a Focus Plus beneficiary, and Focus Plus holds no producer-group field at all. Shall I report the two schemes separately?"
+
+  - condition: "village_coverage_across_schemes_requested"
+    question: "Focus Legacy is not in the village coverage view, so its villages have to be summarised first. Shall I compare village coverage against PMAY or MGNREGA on that basis?"
+
+  # ---- shape of the answer -----------------------------------------------
+  - condition: "missing_aggregation_level"
+    question: "At what level - statewide, by district, by block, or by village?"
+
+  - condition: "ambiguous_average_denominator"
+    question: "Average per what - per payment, per group, per member, or per year?"
+
+  - condition: "ranking_direction_unclear"
+    question: "Highest or lowest?"
+
+  - condition: "missing_comparison_target"
+    question: "Compare {value} with which other district, or against which other financial year?"
+
+  - condition: "percentage_vs_count"
+    question: "As percentages, or as counts?"
+
+  - condition: "district_by_year_grid"
+    question: "District by financial year gives 48 rows across the four years that hold data. Shall I show it as a chart, or restrict it to one district or one year?"
+
+  - condition: "multi_measure_table"
+    question: "Which measures should the table carry - payments, groups, memberships, amount disbursed?"
+
+  - condition: "columns_for_record_listing"
+    question: "Which fields do you need - PG id, group name, village, remittance date, members and amount are the usual set?"
+
+  - condition: "list_vs_aggregate"
+    question: "Do you want the individual payments listed, or a summary?"

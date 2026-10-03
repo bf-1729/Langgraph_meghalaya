@@ -1,0 +1,717 @@
+# cmelevate_classification_rules.yaml
+#
+# ===========================================================================
+# v1.0 - 2026-09-04 - FIRST VERSION, WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Companion to cmelevate_schema_partitions.yaml. There is no v1.0 flat-table
+# predecessor for CM Elevate, so nothing here is a retarget - every rule was
+# written against the live schema and the profiled source.
+#
+# WHAT MAKES THIS GATE FILE DIFFERENT FROM PMAY'S
+#
+#   1. THE REFUSAL BLOCK IS THE LARGEST SECTION, not a preamble to it. CM Elevate
+#      has NO money column and NO time column, so two whole families of question -
+#      every rupee question and every trend question - are unanswerable. PMAY's
+#      time section had 8 clarifications about which year was meant; here there is
+#      no year to mean, so that section collapses into refusals.
+#
+#   2. 40 OF THE 89 USE CASES IN THE REQUIREMENT WORKBOOK CANNOT BE ANSWERED.
+#      `Megh One AI - CM Elevate NLP Use Cases.xlsx` was authored against a
+#      different dataset (2,847 applications, 13 schemes, sanctioned/subsidy/loan/
+#      disbursed amounts, Bank-vs-LIFCOM channels, subsidy tranches, desanctioned
+#      and refused flags, Month/Year columns). Users briefed from that workbook
+#      WILL ask those questions. The conditions below catch them by name and say
+#      what is actually held, rather than letting an application count masquerade
+#      as a rupee figure.
+#
+#   3. TWO FLAGS ARE DEAD AND ONE ROUTES WRONG. `onhold` and `is_withdraw` are
+#      FALSE on every row. An "on hold" question answered from `onhold` returns
+#      zero and looks correct; the only right source is data_verified = 'On Hold'.
+#      This is the single most likely wrong-answer path in the partition and it is
+#      caught twice below.
+#
+#   4. CM ELEVATE IS 15 SCHEMES, NOT ONE. Scheme resolution gets its own section.
+#      A programme-level answer with no sub-scheme breakdown mixes 15 unrelated
+#      programmes into one number.
+#
+# Every count in a question below is a source-export figure
+# (CM_Elevate_AllSchemes_20260818_122217.xlsx, 8,436 rows, profiled 2026-09-04)
+# and has NOT been re-measured against megh_db, which reports ~8,543 rows.
+# ===========================================================================
+# Clarification rules for CM Elevate. First rule that fires wins; its question is
+# asked and the pipeline pauses. Editable by analysts - no code change needed.
+# {placeholders} are filled from the user's query at runtime.
+# Order matters: requests the source cannot answer are caught before missing detail
+# is asked for, so the bot never collects details for a question it cannot answer.
+# Conditions already filled silently by cmelevate_default_rules.yaml are absent here.
+
+clarification_rules:
+
+  # =========================================================================
+  # 1. THE SOURCE CANNOT ANSWER THIS AT ALL
+  # =========================================================================
+
+  # ---- money: there is no amount column anywhere ------------------------
+  - condition: "any_money_amount_requested"
+    question: "CM Elevate records applications only - there is no sanctioned, subsidy, loan or disbursed amount held for this scheme. I can tell you how many applications there are, by scheme or district. Shall I?"
+    note:
+      critical: true
+      text: >
+        THE MOST IMPORTANT RULE IN THIS FILE. fact_cm_elevate_application has no
+        measure column of any kind. Confirmed from the source side too - the
+        2026-08-18 export carries no amount in any of its 15 sheets.
+        NEVER answer a money question with an application count. Offer the count as
+        an explicitly DIFFERENT question, relabelled.
+        Covers use cases UC-008 to UC-018, UC-020, UC-021, UC-024, UC-025, UC-030,
+        UC-031, UC-058, UC-060, UC-063 and UC-079 to UC-089.
+
+  - condition: "disbursement_requested"
+    question: "No disbursement figures are held for CM Elevate - the data stops at the application. Did you want the number of applications instead, and for which scheme?"
+
+  - condition: "sanctioned_amount_requested"
+    question: "There is no sanctioned amount in this data. An application is a request, not an award - nothing here confirms an approval or a figure. Shall I report applications received instead?"
+
+  - condition: "subsidy_requested"
+    question: "Subsidy amounts and subsidy tranches are not held for CM Elevate. Shall I report the application count for the scheme you have in mind?"
+    note: >
+      Covers UC-039, UC-040, UC-041 and FL-007. The workbook's tranche-1 / tranche-2
+      funnel describes a different dataset.
+
+  - condition: "loan_requested"
+    question: "Loan amounts are not held for CM Elevate. Shall I report applications by scheme instead?"
+
+  - condition: "loan_entity_requested"
+    question: "There is no loan-channel field in this data - Bank and LIFCOM are not recorded for CM Elevate. Shall I answer on applications by scheme or district?"
+    note: >
+      Covers UC-033 to UC-037, UC-046, UC-047, ED-008, ED-010 and FL-006. Both the
+      channel and the disbursement it would describe are absent.
+
+  - condition: "sanctioned_vs_disbursed_gap_requested"
+    question: "Neither a sanctioned nor a disbursed amount is held, so the gap between them cannot be calculated. Shall I show applications by verification status instead - Valid, On Hold, Wrong or Invalid?"
+    note: >
+      Covers UC-016, UC-017, UC-018 and FL-009. Do NOT present a count of
+      unverified applications as a funding pipeline - they are different things.
+
+  - condition: "unit_cost_or_subsidy_share_requested"
+    question: "Unit costs and the subsidy share of a unit cost are not held for CM Elevate. Shall I answer on application counts?"
+    note: Covers UC-057 and UC-040.
+
+  - condition: "per_beneficiary_amount_requested"
+    question: "There is no amount to divide, so a per-beneficiary figure cannot be produced. Would applications per district or per scheme be useful instead?"
+
+  # ---- time: there is no date column anywhere ---------------------------
+  - condition: "any_time_period_requested"
+    question: "CM Elevate applications carry no date in this data - there is no application date, month or financial year - so they cannot be placed on a timeline. I can break them down by scheme, district, block, applicant type or status. Which would help?"
+    note:
+      critical: true
+      text: >
+        THE SECOND MOST IMPORTANT RULE. No year_key, no FK to dim_year, no date
+        column. Verified from the source: no column in any of the 15 sheets is a
+        date. This is a SOURCE limitation, not a loading gap, so it will not be
+        fixed by a reload.
+        Do NOT substitute ingested_at - it describes when the row was loaded.
+        Do NOT parse request_id - see request_id_date_parse_attempted.
+        Covers UC-052, UC-053, UC-054, ED-011, ED-018, FL-002 and AM-006.
+
+  - condition: "trend_or_growth_requested"
+    question: "A trend needs a date and CM Elevate applications do not carry one. Shall I show the distribution across schemes or districts instead?"
+
+  - condition: "year_comparison_requested"
+    question: "Applications cannot be split by year - no year is recorded against them. Would a comparison between schemes or between districts work instead?"
+
+  - condition: "monthly_breakdown_requested"
+    question: "There is no month on a CM Elevate application. Shall I break the applications down by scheme or by district?"
+
+  - condition: "recency_or_latest_requested"
+    question: "'{value}' needs a date, and CM Elevate applications carry none - so newest and oldest cannot be distinguished. Shall I answer across all applications held?"
+
+  - condition: "request_id_date_parse_attempted"
+    question: "The application number contains something that looks like a date, but it is not reliable enough to use - the digits are unpadded and ambiguous. Shall I answer without a time filter?"
+    note:
+      critical: true
+      text: >
+        Fires when a user or an upstream component proposes reading a date out of
+        request_id. The 4th segment is 6, 7 or 8 digits with leading zeros dropped,
+        so 1032026 is validly 1-Mar-2026 or 10-Mar-2026. A naive parse over the
+        source export resolved only 3,038 of 8,436 rows and produced dates after
+        the export date. NEVER emit such a parse in generated SQL.
+
+  - condition: "forecast_requested"
+    question: "Forecasting is out of scope, and CM Elevate has no dated history to project from in any case. Shall I report the current application counts?"
+    note: Covers ED-018.
+
+  # ---- outcome fields that do not exist ---------------------------------
+  - condition: "desanctioned_requested"
+    question: "There is no desanctioned field for CM Elevate. The nearest recorded verdict is the data-verification outcome - Valid, On Hold, Wrong or Invalid - which is about the application's data, not about funding. Shall I use that?"
+    note: >
+      Covers UC-048, UC-049, ED-014 and FL-008. Offer data_verified ONLY if it is
+      clearly relabelled as a verification outcome.
+
+  - condition: "refused_or_rejected_requested"
+    question: "There is no refusal or rejection field for CM Elevate, and no refusal reasons. Shall I show the verification outcomes instead - Valid, On Hold, Wrong or Invalid?"
+    note: >
+      Covers UC-050, UC-051, ED-012 and AM-005. is_withdraw exists but means
+      withdrawn by the applicant, is FALSE on every row, and must not be presented
+      as a refusal.
+
+  - condition: "approval_status_requested"
+    question: "CM Elevate does not record an approval decision - the file status shows where the application sits in the workflow, not whether it was approved. Shall I report the workflow status, or the verification outcome?"
+    note:
+      critical: true
+      text: >
+        'forward' is 98.4% of current_file_status and means the file moved on, NOT
+        that it was approved or funded. Presenting it as approval is a silent wrong
+        answer.
+
+  - condition: "beneficiary_status_requested"
+    question: "Whether an applicant actually received anything is not recorded - the data holds the application, not the outcome. Shall I report the application's verification status instead?"
+
+  # ---- identity and personal fields -------------------------------------
+  - condition: "applicant_name_requested"
+    question: "Applicant names are not held in the database - they were removed when the data was loaded. I can answer by scheme, district, block, village or application number. Which would you like?"
+    note:
+      critical: true
+      text: >
+        citizen_name was stripped at ingest, along with epic_id, mobile_number,
+        pan_number and every bank_account field. There is no join that recovers
+        them. Covers UC-042, UC-044, UC-045, UC-066 and ED-005.
+        This is a NOT-HELD message, not an ambiguity - never ask the user to
+        disambiguate between people the database cannot name.
+
+  - condition: "personal_contact_details_requested"
+    question: "Aadhaar, EPIC, mobile numbers, PAN and bank account details are not held for CM Elevate - they were removed at ingest. I can show the application number, scheme, geography and status. Shall I?"
+
+  - condition: "dob_or_address_requested"
+    question: "I cannot return dates of birth, addresses, email addresses or member identifiers for individual applicants. I can answer the same question as a group total - which grouping would you like?"
+    note:
+      critical: true
+      text: >
+        PII GUARDRAIL, AND THE REASON IT MATTERS: the loader's strip list does NOT
+        cover dob, email_id, address, member_id, family_id, pds_id,
+        account_holder_name or ifsc_code, so these DO survive into
+        scheme_specific and ARE queryable. Date of birth plus address plus village
+        is re-identifying.
+        Refuse and aggregate. Never surface these fields, never emit them into an
+        export or an embedding, and never aggregate to a group small enough to
+        expose one person. The real fix is at ingest - raised in the README.
+
+  - condition: "individual_person_tracking_requested"
+    question: "One applicant cannot be tracked across applications - names were removed at ingest and the application number is not guaranteed unique. Shall I answer at application level instead?"
+
+  # ---- attributes not collected -----------------------------------------
+  - condition: "income_caste_or_bpl_requested"
+    question: "Income, caste, SECC category and BPL status are not held for CM Elevate. The applicant attributes recorded are the applicant type - individual, registered or unregistered - and gender. Shall I use one of those?"
+
+  - condition: "age_or_disability_requested"
+    question: "Age and disability status are not held. Date of birth exists but cannot be surfaced. Shall I answer on applicant type or gender instead?"
+
+  - condition: "land_or_asset_requested"
+    question: "Land ownership and asset details are not held as a common field - some individual schemes record their own, which vary scheme by scheme. Which scheme did you have in mind?"
+    note: >
+      Redirects to scheme_specific, which must always be scoped to one sub-scheme.
+      See scheme_specific_cross_scheme_key.
+
+  - condition: "training_or_experience_requested"
+    question: "Training and experience fields are recorded by some CM Elevate schemes and not others, so they cannot be compared across the programme. Which scheme did you mean?"
+
+  - condition: "inspection_or_geotag_requested"
+    question: "Inspections, geotagged photographs and site verification are not held. The only progress field is the workflow status - shall I use it?"
+
+  - condition: "grievance_status_requested"
+    question: "Grievances, appeals and complaints are not held for CM Elevate. Shall I answer on application status instead?"
+
+  - condition: "bank_transfer_status_requested"
+    question: "Bank transfer status and DBT outcomes are not held - and no payment of any kind is recorded for CM Elevate. Shall I report application counts?"
+
+  # ---- scope of the data ------------------------------------------------
+  - condition: "target_or_allocation_requested"
+    question: "Targets, allocations and budgets are not held - only applications actually received. Shall I report applications received instead?"
+
+  - condition: "saturation_or_coverage_requested"
+    question: "Total households and eligible populations are not held, so coverage or saturation cannot be calculated. Would applications per village or per district work instead?"
+
+  - condition: "per_capita_requested"
+    question: "Population figures are not held here, so per-capita cannot be calculated. Would applications per village or per district work instead?"
+
+  - condition: "other_state_comparison_requested"
+    question: "Only Meghalaya is held here, so other states cannot be compared. Shall I compare districts within Meghalaya instead?"
+
+  - condition: "below_village_geography_requested"
+    question: "Geography runs down to village only - there is no habitation, ward or household location. Which village should I report on?"
+
+  - condition: "district_or_block_code_requested"
+    question: "The database holds district and block as names only - there is no usable district or block code. Shall I use the name, or the village LGD code?"
+    note:
+      critical: true
+      text: >
+        The source carries block_lgd_code but it is NEVER TRUSTED - a confirmed
+        incompatible numbering system. Block and district shown anywhere come from
+        the dim_geography join. Do not offer the raw code as an alternative.
+
+  - condition: "other_scheme_requested"
+    question: "This partition holds CM Elevate only. MGNREGA, PMAY-G and Focus Plus are separate sources. Shall I answer for CM Elevate alone?"
+
+  - condition: "employment_or_wages_requested"
+    question: "Person-days, workers and wages belong to MGNREGA, which is a separate source and cannot be joined to CM Elevate. Shall I answer for CM Elevate applications instead?"
+
+  # ---- cross-scheme -----------------------------------------------------
+  - condition: "cross_scheme_money_comparison"
+    question: "CM Elevate has no money figures at all, so it cannot be compared against PMAY or MGNREGA spending. I can compare which villages each scheme reaches - would that help?"
+    note:
+      critical: true
+      text: >
+        DIFFERENT FROM PMAY'S RULE OF THE SAME NAME, WHICH ASKS PERMISSION TO
+        COMPARE. Here the comparison is impossible, not merely awkward. CM Elevate
+        is absent from v_cross_scheme_money_district_year - verified from the live
+        view definition, which is a two-branch UNION ALL over MGNREGA and PMAY
+        only - and has no amount to contribute in any case.
+
+  - condition: "cross_scheme_row_level_request"
+    question: "CM Elevate is recorded per application and the other schemes per house or per village-year, so they cannot be listed side by side row by row. Shall I compare them by village coverage?"
+    note: >
+      Redirects a prohibited join. All ten fact pairs in megh_db are prohibited.
+      The only sanctioned path for CM Elevate is aggregating to village_code and
+      joining that aggregate onto v_cross_scheme_village_coverage.
+
+  - condition: "cm_elevate_in_coverage_view_assumed"
+    question: "The standard coverage view does not carry a CM Elevate column - I would need to aggregate CM Elevate applications by village first. Shall I do that?"
+
+  # =========================================================================
+  # 2. THE REQUIREMENT WORKBOOK DESCRIBES A DIFFERENT DATASET
+  # These fire when a user briefed from the NLP Use Cases workbook asks for
+  # something that workbook promises and megh_db does not hold.
+  # =========================================================================
+
+  - condition: "thirteen_schemes_asserted"
+    question: "CM Elevate has 15 schemes in this database, not 13. Shall I list all 15 with their application counts?"
+    note:
+      critical: true
+      text: >
+        The requirement workbook says 13 throughout - in UC-002, UC-055, UC-062,
+        ED-003, FL-005 and the glossary. dim_cm_elevate_scheme holds 15 and is the
+        authority. Correct the user rather than answering for 13.
+
+  - condition: "common_facility_center_requested"
+    question: "There is no Common Facility Center scheme in the CM Elevate data. The 15 schemes held are Poultry, Piggery, Goat Farming, Dairy, Warehouse, PRIME Agriculture Response Vehicle, PRIME Tourism Vehicle, Green Taxi, Motorcaravan, Sericulture and Weaving, Agro Tourism Villa, PRIME Small Enterprise Empowerment, Cinema Theatre, Sports and Wellness Centre, and Any Business Venture. Which did you mean?"
+    note:
+      critical: true
+      text: >
+        UC-083 asks for it by name. It does not exist here. Return not-found with
+        the 15 real names as did-you-mean candidates - do not fuzzy-match it onto
+        a real scheme.
+
+  - condition: "sericulture_spinning_weaving_split_assumed"
+    question: "Sericulture is held as one scheme here - Meghalaya Sericulture & Weaving Scheme, with 14 applications - not split into separate Spinning and Weaving schemes. Shall I report the single scheme?"
+    note: >
+      UC-086 and UC-089 treat them as two schemes with 197 and 200 applications.
+      The real data has one sheet with 14 rows. FL-012 also asks about
+      spinning/weaving sub-variants - the answer is that no such split exists here.
+
+  - condition: "workbook_figure_quoted_by_user"
+    question: "That figure comes from a different extract of CM Elevate - this database holds about 8,500 applications across 15 schemes, not 2,847 across 13. Shall I answer from the data held here?"
+    note:
+      critical: true
+      text: >
+        Fires when the user quotes 2,847, 1,357 Piggery, 1,153 villages, 57 blocks,
+        or any rupee total from the workbook. Say plainly that the numbers come
+        from a different extract. Do not try to reconcile them and do not present
+        the workbook figure as if this database produced it.
+
+  - condition: "prime_seed_scheme_unknown_to_user"
+    question: "PRIME Small Enterprise Empowerment and Development (SEED) is the largest CM Elevate scheme here, with about 3,600 applications - it is not in the use-case list you may have seen. Shall I include it?"
+    note: >
+      The workbook omits it entirely, yet it is 43% of the real data. A user
+      working from that list will not know to ask for it.
+
+  # =========================================================================
+  # 3. DATA QUALITY
+  # =========================================================================
+
+  - condition: "onhold_flag_used_for_on_hold_question"
+    question: "Applications marked 'On Hold' are recorded in the verification field, not in the on-hold flag - that flag is empty on every record. Shall I use the verification field, which has about 1,199 applications on hold?"
+    note:
+      critical: true
+      text: >
+        THE SINGLE MOST LIKELY WRONG-ANSWER PATH IN THIS PARTITION. The onhold
+        boolean is FALSE on all 8,436 source rows. A query against it returns zero
+        and looks perfectly correct. The only right source is
+        data_verified = 'On Hold'. Fires whenever an on-hold intent is detected and
+        the candidate SQL touches the onhold column.
+
+  - condition: "dead_flag_explicitly_requested"
+    question: "The on-hold and withdrawn flags are unpopulated in this data - every record reads false, so a count from them is always zero rather than a finding. Shall I report the verification status instead?"
+    note: >
+      Fires when the user asks about onhold or is_withdraw directly. Report the
+      emptiness as a data-quality fact so the zero is not read as behaviour.
+
+  - condition: "withdrawn_applications_requested"
+    question: "No CM Elevate applications are recorded as withdrawn - the field exists but is empty on every record, so this is a gap in the data rather than a finding about applicants. Shall I report the verification status instead?"
+
+  - condition: "unresolved_geography_in_village_answer"
+    question: "Some applications could not be matched to a real village and sit under a district-level placeholder instead. Shall I exclude them from the village count, as usual, or is this a question about data completeness?"
+    note:
+      critical: true
+      text: >
+        entity_type = 'Unresolved' is a synthetic placeholder, never a real
+        village. It is kept ON PURPOSE so district and scheme totals reconcile to
+        the source. Exclude it from village counts and village lists; keep it in
+        every other total. Covers UC-005, UC-065 and ED-015.
+
+  - condition: "duplicate_request_id_encountered"
+    question: "Application number '{value}' appears on more than one record - about 36 numbers repeat in this data. Shall I show all the matching records?"
+    note: >
+      request_id carries no unique constraint. 8,400 distinct across 8,436 source
+      rows; all 36 duplicates fall inside the Piggery scheme. A lookup returning
+      several rows is expected, not an error. Covers ED-006.
+
+  - condition: "count_vs_distinct_request_id_differs"
+    question: "There are {row_count} records but {distinct_count} distinct application numbers. Shall I report records, or distinct applications?"
+    note: >
+      Report both when they differ - the difference is itself a finding, not a
+      number to quietly pick between.
+
+  - condition: "verification_status_null_bucket"
+    question: "About 389 applications have no verification outcome recorded. Shall I show them as a separate 'not recorded' group, or leave them out of the breakdown?"
+    note: >
+      NULL in data_verified means no verdict was recorded. It is NOT 'Valid' and
+      must never be folded into it.
+
+  - condition: "geo_conflict_rows_present"
+    question: "Some villages have sources disagreeing on which block or district they belong to. Shall I continue using the official roster values, or exclude those records?"
+    note: >
+      has_geo_conflict is exposed on v_cm_elevate. The count is contested - the
+      live column comment says four codes are known, an earlier pass counted 16,
+      and neither has been re-derived. Do not quote a figure.
+
+  - condition: "missing_village_code"
+    question: "A few applications carry no village code at all. Shall I answer at block level for those, and note them separately?"
+    note: 16 rows in the source export had no village_lgd_code. Covers ED-015.
+
+  - condition: "small_scheme_percentage_requested"
+    question: "{scheme} holds only {count} applications, so a percentage from it moves several points per record. Shall I report the counts instead, or show both?"
+    note:
+      critical: true
+      text: >
+        Six of the 15 schemes have fewer than 15 applications - Motorcaravan 2,
+        Cinema Theatre 2, Agro Tourism Villa 3, Sports and Wellness 6, Green Taxi
+        10 and Sericulture 14. Never publish a percentage or a rank from these
+        without the denominator on screen.
+
+  - condition: "row_count_discrepancy_surfaced"
+    question: "The application total has not been reconciled between the export and the database yet. Shall I report the database figure and flag it as unverified?"
+    note: >
+      8,436 in the 2026-08-18 export; ~8,543 by reltuples estimate in megh_db.
+      Neither counted exactly. meta.v_reconciliation_cm_elevate must balance per
+      endpoint, not merely in aggregate.
+
+  # =========================================================================
+  # 4. FIELDS THAT EXIST BUT MUST NOT BE READ AS ASKED
+  # =========================================================================
+
+  - condition: "application_read_as_award"
+    question: "These are applications received, not approvals or payments - nothing in the data confirms that any of them were funded. Shall I report applications received?"
+    note:
+      critical: true
+      text: >
+        The grain is a REQUEST, not an award. The requirement workbook's glossary
+        defines 'Beneficiary Count' as people who 'receive' a scheme; that reading
+        is not supportable here. Say 'applications', not 'beneficiaries who
+        received', in every answer.
+
+  - condition: "beneficiary_term_used"
+    question: "'Beneficiary' here means one application - the data does not record whether anyone received anything. Shall I report application counts on that basis?"
+    note: Covers UC-001, ED-013 and the workbook glossary entry.
+
+  - condition: "forward_status_read_as_approved"
+    question: "'forward' means the file moved to the next workflow step, not that it was approved - and 98% of applications sit at that status. Shall I report the verification outcome instead, which does vary?"
+    note:
+      critical: true
+      text: >
+        current_file_status is nearly constant. Presenting it as an approval
+        pipeline is a silent wrong answer, and presenting it as a distribution
+        overstates the variation.
+
+  - condition: "current_level_read_as_progress"
+    question: "The workflow level is a stage label, not a measure of progress - the data does not say that level2 is further along than level1. Shall I report the levels as they are recorded?"
+    note: >
+      Do not invent an ordering. level0 co-occurs with 'sendback to vdv/citizen',
+      which suggests it is not simply 'earliest'.
+
+  - condition: "data_verified_read_as_funding_decision"
+    question: "The verification field records whether the application's own data was found valid - not whether it was funded or rejected. Shall I report it on that basis?"
+
+  - condition: "application_count_offered_as_money_proxy"
+    question: "An application count cannot stand in for a rupee figure. Shall I report the count as a count, clearly labelled, or would something else help?"
+    note:
+      critical: true
+      text: >
+        Backstop for any_money_amount_requested. If a money intent survives the
+        earlier gates and the candidate answer is a COUNT, stop here rather than
+        emitting it.
+
+  - condition: "type_raw_grouping_across_schemes"
+    question: "Applicant types are spelled differently by each scheme, so grouping on the raw label splits the same category several ways. Shall I use the standard categories - individual, registered and unregistered?"
+    note:
+      critical: true
+      text: >
+        type_raw is audit only. It carries source typos preserved verbatim -
+        'Any Bussiness Venture', a double space in 'Prime Seed  unregistered'.
+        applicant_category is the comparable column.
+
+  - condition: "current_level_case_variants"
+    question: "The workflow level is recorded with inconsistent capitalisation, so the same level can appear twice in a breakdown. Shall I combine them?"
+    note: >
+      'level1' (8,273 rows) and 'Level1' (45 rows) are the same level. Always
+      case-fold before grouping.
+
+  - condition: "sendback_wording_variants"
+    question: "Sent-back applications are recorded under two different wordings. Shall I combine them into one 'sent back' group?"
+    note: "'sendback' (1 row) and 'sendback to vdv/citizen' (90 rows)."
+
+  - condition: "gender_breakdown_requested"
+    question: "Gender is recorded for CM Elevate, though it sits in the scheme-specific details rather than as a standard column. Shall I break the applications down by gender?"
+    note: >
+      NOT A REFUSAL - this is answerable and worth offering. gender_id is inside
+      scheme_specific, holds Female / Male / Other as text despite the _id suffix,
+      and is populated on every row. Female is about 61% - the most interesting
+      finding in this data, and one the requirement workbook never asks for.
+
+  # =========================================================================
+  # 5. WHICH SCHEME
+  # =========================================================================
+
+  - condition: "scheme_scope_missing"
+    question: "CM Elevate covers 15 separate schemes. Shall I answer across all of them, or for one in particular?"
+    note: >
+      A programme-level total with no breakdown mixes 15 unrelated programmes.
+      Offer the breakdown whenever the answer is given at programme level.
+
+  - condition: "unmatched_scheme_name"
+    question: "I could not match '{value}' to any of the 15 CM Elevate schemes. Did you mean {suggestions}?"
+
+  - condition: "ambiguous_vehicle_scheme"
+    question: "There are two vehicle schemes - PRIME Tourism Vehicle and PRIME Agriculture Response Vehicle. Which did you mean?"
+    note: Covers AM-008.
+
+  - condition: "ambiguous_prime_family"
+    question: "Three schemes carry the PRIME name - Small Enterprise Empowerment, Tourism Vehicle and Agriculture Response Vehicle. All three, or one of them?"
+
+  - condition: "ambiguous_tourism_scheme"
+    question: "Two schemes relate to tourism - PRIME Tourism Vehicle and Agro Tourism Villa. Which did you mean, or both?"
+
+  - condition: "ambiguous_livestock_grouping"
+    question: "Piggery, Poultry, Goat Farming and Dairy are four separate schemes. Shall I report them together as livestock, or separately?"
+    note: >
+      There is no scheme grouping or sector column in the data - any such grouping
+      is the resolver's, and must be stated in the answer.
+
+  - condition: "scheme_abbreviation_used"
+    question: "Did you mean {suggestions}? Scheme names are held in full, so short forms are matched against them."
+    note: >
+      Covers ED-003. 'piggery' resolves to 'Meghalaya Piggery Development Scheme'.
+      Normalise against the 15-scheme list, never the workbook's 13.
+
+  - condition: "multiple_schemes_in_one_question"
+    question: "That covers more than one scheme. Shall I report them separately, or as a combined total?"
+    note: Covers ED-017 - do not silently merge schemes.
+
+  - condition: "scheme_vs_programme_confusion"
+    question: "Did you mean CM Elevate as a whole, or the individual scheme within it?"
+
+  # =========================================================================
+  # 6. WHICH MEASURE
+  # CM Elevate has exactly one aggregate - a count. These rules resolve WHAT
+  # is being counted, never which measure to sum.
+  # =========================================================================
+
+  - condition: "ambiguous_count_subject"
+    question: "A count of what - applications, distinct application numbers, villages, blocks, or schemes?"
+
+  - condition: "missing_metric_for_ranking"
+    question: "Ranked by application count - that is the only measure held for CM Elevate. Which grouping should I rank: scheme, district, block or village?"
+    note:
+      critical: true
+      text: >
+        PMAY offered a choice of measures here. CM Elevate has none, so this rule
+        confirms the grouping instead. If the user names a money measure, fall
+        through to any_money_amount_requested rather than answering.
+
+  - condition: "vague_qualifier"
+    question: "'{value}' can only be measured by application count here. Which grouping - by scheme, district, block or applicant type?"
+
+  - condition: "biggest_scheme_ambiguous"
+    question: "'Biggest' can only mean most applications for CM Elevate - there is no money figure to rank by. Shall I rank the 15 schemes by application count?"
+    note: >
+      Covers AM-003, which offers a choice between beneficiaries and rupees
+      disbursed. Only the first exists.
+
+  - condition: "rate_vs_count_unclear"
+    question: "The number of applications, or their share as a percentage?"
+
+  - condition: "share_denominator_missing"
+    question: "As a share of what - the scheme total, the district total, or all CM Elevate applications?"
+
+  - condition: "ambiguous_average_denominator"
+    question: "Average per what - per scheme, per district, per block, or per village?"
+    note: >
+      Every average here is a count divided by a grouping. There is no amount to
+      average.
+
+  - condition: "concentration_measure_unclear"
+    question: "Concentration measured how - the share held by the largest scheme, or by the top three?"
+    note: >
+      Covers UC-061. Answerable by count. Note the real shape differs sharply from
+      the workbook's: PRIME Small Enterprise and Piggery together are about 78% of
+      applications, not the workbook's Piggery-at-48%.
+
+  - condition: "ambiguous_status_subject"
+    question: "Which status - the verification outcome, the workflow file status, or the workflow level? They are three separate fields."
+    note: >
+      The most common ambiguity in this partition after money. data_verified is
+      usually what a user means, and is the only one with real spread.
+
+  - condition: "applicant_type_scope_unclear"
+    question: "Individual applicants, registered bodies, unregistered bodies, or all three together?"
+    note: >
+      Individual is about 8,342 of 8,436; registered 83 and unregistered 11.
+      Warn on the denominator whenever the non-individual categories are isolated.
+
+  # =========================================================================
+  # 7. GEOGRAPHY
+  # =========================================================================
+
+  - condition: "missing_geography_level_for_breakdown"
+    question: "Broken down by which level - district, block, or village?"
+
+  - condition: "ambiguous_geography_level"
+    question: "'{value}' is both a block and a village name. Which level did you mean?"
+
+  - condition: "ambiguous_village_needs_district"
+    question: "'{value}' exists in {districts}. Which district?"
+
+  - condition: "ambiguous_village_needs_block"
+    question: "There is more than one {value} in {district}. Which block - {blocks}?"
+
+  - condition: "blocked_fuzzy_pair"
+    question: "'{value}' is close to both {candidate_a} and {candidate_b}, which are different places. Which one?"
+
+  - condition: "unmatched_geography_name"
+    question: "I could not match '{value}' to any district, block or village in the CM Elevate data. Did you mean {suggestions}?"
+    note: Covers ED-001.
+
+  - condition: "block_belongs_to_other_district"
+    question: "{block} is in {actual_district}, not {stated_district}. Shall I use {actual_district}?"
+    note: Covers ED-002.
+
+  - condition: "district_name_spelling_variant"
+    question: "Did you mean {canonical}? District names are held in the LGD form."
+    note: >
+      The source export writes 'Ri-Bhoi' with a hyphen; dim_geography stores
+      'RI BHOI' without one. District and block are stored UPPERCASE. Resolve both
+      to the stored form and emit the stored form.
+
+  - condition: "village_level_breakdown_size"
+    question: "A village-level breakdown returns about 2,000 rows. Shall I show the top 10, or restrict it to one district or block?"
+    note: >
+      2,038 distinct village codes in the source export. The workbook's 1,153
+      describes a different dataset.
+
+  - condition: "region_grouping_requested"
+    question: "Which grouping - Garo Hills, Khasi Hills or Jaintia Hills? There is no region column in the data, so I would group the districts myself and say so in the answer."
+    note:
+      critical: true
+      text: >
+        Covers UC-032 and AM-007. NO REGION COLUMN EXISTS in dim_geography. Any
+        Garo/Khasi/Jaintia grouping is the resolver's construction and must be
+        declared as such in the answer, never presented as a stored attribute.
+
+  - condition: "mixed_geography_levels_compared"
+    question: "{value_a} is a {level_a} and {value_b} is a {level_b}, so comparing them is not like-for-like. Compare at {level_b} level instead?"
+
+  - condition: "district_by_scheme_grid"
+    question: "District by scheme gives up to 180 rows, and most cells will be empty or very small. Shall I show it as a chart, or restrict it to the larger schemes or one district?"
+    note: >
+      Covers UC-062. 12 districts x 15 schemes. With six schemes under 15
+      applications, most of the grid is zero or one.
+
+  # =========================================================================
+  # 8. IDENTIFIERS AND VALUES
+  # =========================================================================
+
+  - condition: "unmatched_request_id"
+    question: "No CM Elevate application carries the number '{value}'. Shall I search by scheme, district or village instead?"
+    note: Covers ED-004.
+
+  - condition: "request_id_format_invalid"
+    question: "'{value}' is not a CM Elevate application number - they run as REQ followed by four slash-separated parts, such as REQ/001/001/10102025/188877. Shall I search by scheme or village instead?"
+    note: >
+      ED-004 suggests validating prefixes like MPDSI / MEWSI / PTVSI. Those
+      prefixes belong to the requirement workbook's dataset, NOT to this one.
+      CM Elevate application numbers in megh_db all begin REQ/.
+
+  - condition: "workbook_application_number_format"
+    question: "'{value}' is not the application-number format held here - CM Elevate numbers begin with REQ. Shall I search by scheme, district or village instead?"
+    note: >
+      Fires on MPDSI018599, PTVSI000078 and similar identifiers from UC-042 and
+      UC-043. Say plainly that the format belongs to a different extract.
+
+  - condition: "unmatched_status_or_category"
+    question: "'{value}' is not a recorded {dimension}. Did you mean {suggestions}?"
+
+  - condition: "unmatched_applicant_category"
+    question: "Applicant type is recorded as individual, registered or unregistered. Did you mean one of those?"
+
+  - condition: "scheme_specific_key_unknown"
+    question: "'{value}' is not a field recorded by {scheme}. Shall I list the fields that scheme does record?"
+
+  - condition: "scheme_specific_cross_scheme_key"
+    question: "'{value}' is recorded by some CM Elevate schemes and not others, so a programme-wide answer would silently read as empty for the rest. Which scheme shall I answer for?"
+    note:
+      critical: true
+      text: >
+        THE MAIN CORRECTNESS TRAP IN scheme_specific. 25 columns are common to all
+        15 schemes; 125 appear in exactly one. A JSONB read with ->> returns NULL
+        for a missing key rather than erroring, so a missing field is
+        indistinguishable from an empty one. Every scheme_specific query must be
+        scoped to a scheme.
+
+  # =========================================================================
+  # 9. SHAPE OF THE ANSWER
+  # =========================================================================
+
+  - condition: "missing_aggregation_level"
+    question: "At what level - statewide, by scheme, by district, by block, or by village?"
+
+  - condition: "list_vs_aggregate"
+    question: "Do you want the individual applications listed, or a summary count?"
+
+  - condition: "percentage_vs_count"
+    question: "As percentages, or as counts?"
+
+  - condition: "ranking_direction_unclear"
+    question: "Highest or lowest?"
+
+  - condition: "missing_comparison_target"
+    question: "Compare {value} with which other scheme, or which other district?"
+
+  - condition: "columns_for_record_listing"
+    question: "Which fields do you need - application number, scheme, district, block, village, applicant type and status are the usual set? Personal details are not available."
+    note: >
+      Never offer names, dates of birth, addresses, contact details or bank
+      details in this list. See dob_or_address_requested.
+
+  - condition: "multi_measure_table"
+    question: "The table can carry applications, distinct villages, districts covered and the status split. Which of those do you need?"
+    note: >
+      Deliberately no money columns offered. This is the CM Elevate equivalent of
+      PMAY's multi_measure_table and it is shorter because the data is thinner.
+
+  - condition: "chart_type_for_skewed_distribution"
+    question: "The scheme distribution is very uneven - two schemes hold about 78% of applications. Shall I show all 15 on a log scale, or the top 5 with the rest grouped as 'other'?"
+
+  - condition: "map_requested"
+    question: "A district map can be drawn from the application counts. Shall I map applications by district?"
+    note: >
+      UC-030 asks for a district choropleth of disbursement, which is
+      unanswerable. A choropleth of application COUNTS is answerable - offer that
+      instead, clearly relabelled.

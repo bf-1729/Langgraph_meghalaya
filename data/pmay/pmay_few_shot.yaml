@@ -1,0 +1,848 @@
+# pmay_few_shot.yaml
+#
+# Validated question-to-SQL pairs for PMAY-G - node 5.10.
+#
+# ===========================================================================
+# v2.0 - 2026-08-24 - RETARGETED TO THE CURATED STAR SCHEMA
+#
+# Every example was rewritten against curated.v_pmay. The v1.0 examples ran
+# against the flat table pmay_beneficiaries, which does not exist in megh_db.
+#
+# House rules encoded in every example below:
+#   FROM curated.v_pmay              never pmay_beneficiaries
+#   WHERE NOT is_placeholder         on every count and every sum
+#   is_completed                     never status_name = 'Completed'
+#   financial_year_short             never a CASE derivation from sanction_date
+#   SUM(amount_pending)              never sanctioned_amount - amount_released
+#   installments_paid                never installment_paid
+#   lgd_district / lgd_block         UPPERCASE literals - dim_geography stores them so
+#   village_code                     for counting villages, never a name
+#   amounts are RUPEES               divide by 1e7 for crore, and say the unit
+#
+# Examples marked status: RETIRED_v2.0 are kept as NEGATIVE examples - their
+# premise is gone (beneficiary names dropped at ingest, pmay_fy_summary absent).
+# Never emit their v1_sql. They are here so a stale retrieval hit is recognised.
+#
+# NOT ONE OF THESE QUERIES HAS BEEN EXECUTED against megh_db. They are correct
+# against the structure in SCHEMA_FOR_DEVELOPERS.md (2026-08-24) and unverified
+# against the data. Run them before trusting a result.
+# ===========================================================================
+
+sql_generation_examples:
+# --- 2026-09-28 PMAY-G use-case QA (KI-089, KI-092, KI-093): one row per named area,
+# ratio of totals, no LIMIT 1 on a comparison. Executed against megh_db.
+- question: Give me the PMAY financial summary for Mawphlang block.
+  sql: |
+    SELECT COUNT(*) AS houses,
+           SUM(sanctioned_amount) AS sanctioned_rupees,
+           SUM(COALESCE(amount_released, 0)) AS released_rupees,
+           SUM(sanctioned_amount) - SUM(COALESCE(amount_released, 0)) AS remaining_rupees
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_block = 'MAWPHLANG';
+  tables:
+  - curated.v_pmay
+- question: What percentage of the sanctioned amount has been released in East Khasi Hills?
+  sql: |
+    SELECT ROUND(100.0 * SUM(COALESCE(amount_released, 0)) / NULLIF(SUM(sanctioned_amount), 0), 2) AS released_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanctioned_amount > 0
+      AND lgd_district = 'EAST KHASI HILLS';
+  tables:
+  - curated.v_pmay
+- question: Compare the sanctioned amounts of Umsning and Amlarem blocks.
+  sql: |
+    SELECT lgd_block, COUNT(*) AS houses, SUM(sanctioned_amount) AS sanctioned_rupees
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_block IN ('UMSNING', 'AMLAREM')
+    GROUP BY lgd_block
+    ORDER BY sanctioned_rupees DESC;
+  tables:
+  - curated.v_pmay
+- question: How many PMAY houses are there?
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: How many distinct beneficiaries are there?
+  sql: |
+    SELECT COUNT(DISTINCT reg_no) AS distinct_beneficiaries
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: How many houses are there in West Garo Hills?
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_pmay
+- question: Houses by district
+  sql: |
+    SELECT lgd_district, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    ORDER BY houses DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: How many sanction orders were issued?
+  sql: |
+    SELECT COUNT(DISTINCT sanction_no) AS sanction_orders
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_no IS NOT NULL;
+  tables:
+  - curated.v_pmay
+- question: How many houses are completed?
+  sql: |
+    SELECT COUNT(*) AS completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_completed;
+  tables:
+  - curated.v_pmay
+- question: Break down houses by construction stage
+  sql: |
+    SELECT status_name, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND status_name IS NOT NULL
+    GROUP BY status_name
+    ORDER BY CASE status_name
+               WHEN 'Proposed Site'             THEN 1
+               WHEN 'Existing site(Old House)'  THEN 2
+               WHEN 'House Sanctioned'          THEN 3
+               WHEN 'Plinth'                    THEN 4
+               WHEN 'Roof Cast'                 THEN 5
+               WHEN 'Completed'                 THEN 6
+             END
+    LIMIT 6;
+  tables:
+  - curated.v_pmay
+- question: How many houses are not yet completed?
+  sql: |
+    SELECT COUNT(*) AS not_completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_completed IS DISTINCT FROM TRUE;
+  tables:
+  - curated.v_pmay
+  note: 'v2.0: no status_name IS NOT NULL guard. is_completed is nullable, and a house with no recorded stage is still not
+    completed - the v1.0 guard dropped it.'
+- question: How many houses are under construction?
+  sql: |
+    SELECT COUNT(*) AS in_progress_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_in_progress;
+  tables:
+  - curated.v_pmay
+  note: 'v2.0: is_in_progress is the database roll-up. The v1.0 member list (''Roof Cast'',''Plinth'',''House Sanctioned'')
+    was this project''s reconstruction of it; if the two disagree the flag wins.'
+- question: What percentage of houses are completed?
+  sql: |
+    SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE is_completed)
+                 / NULLIF(COUNT(*), 0), 2) AS completion_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: Completion rate by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) AS houses,
+           COUNT(*) FILTER (WHERE is_completed) AS completed,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE is_completed)
+                 / NULLIF(COUNT(*), 0), 2) AS completion_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    ORDER BY completion_pct DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: Which district has the most completed houses?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_completed
+    GROUP BY lgd_district
+    ORDER BY completed_houses DESC
+    LIMIT 1;
+  tables:
+  - curated.v_pmay
+- question: How many houses are at plinth stage in Ri Bhoi?
+  sql: |
+    SELECT COUNT(*) AS plinth_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'RI BHOI'
+      AND status_name = 'Plinth';
+  tables:
+  - curated.v_pmay
+- question: Status breakdown for East Khasi Hills
+  sql: |
+    SELECT status_name, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'EAST KHASI HILLS'
+      AND status_name IS NOT NULL
+    GROUP BY status_name
+    ORDER BY houses DESC
+    LIMIT 6;
+  tables:
+  - curated.v_pmay
+- question: How many houses went to women?
+  sql: |
+    SELECT COUNT(*) AS houses_to_women
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND house_alloted_to IN ('Woman-Married', 'Woman-Widow',
+                               'Woman-Unmarried', 'Woman');
+  tables:
+  - curated.v_pmay
+- question: How many houses went to women including joint allotments?
+  sql: |
+    SELECT COUNT(*) AS houses_with_female_ownership
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND house_alloted_to IN ('Woman-Married', 'Woman-Widow', 'Woman-Unmarried',
+                               'Woman', 'Joint(Husband and Wife)');
+  tables:
+  - curated.v_pmay
+- question: Break down houses by allotment category
+  sql: |
+    SELECT house_alloted_to, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY house_alloted_to
+    ORDER BY houses DESC
+    LIMIT 7;
+  tables:
+  - curated.v_pmay
+- question: How many widow beneficiaries received houses?
+  sql: |
+    SELECT COUNT(*) AS widow_allotments
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND house_alloted_to = 'Woman-Widow';
+  tables:
+  - curated.v_pmay
+- question: How many houses were jointly allotted to husband and wife?
+  sql: |
+    SELECT COUNT(*) AS joint_allotments
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND house_alloted_to = 'Joint(Husband and Wife)';
+  tables:
+  - curated.v_pmay
+- question: Share of houses allotted to women by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) AS houses,
+           COUNT(*) FILTER (WHERE house_alloted_to IN ('Woman-Married', 'Woman-Widow',
+                                                       'Woman-Unmarried', 'Woman'))
+             AS houses_to_women,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE house_alloted_to IN ('Woman-Married',
+                   'Woman-Widow', 'Woman-Unmarried', 'Woman'))
+                 / NULLIF(COUNT(*), 0), 2) AS women_share_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    ORDER BY women_share_pct DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: What is the total amount released?
+  sql: |
+    SELECT ROUND(SUM(amount_released) / 10000000.0, 2) AS amount_released_crore
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: Total amount released in East Khasi Hills
+  sql: |
+    SELECT ROUND(SUM(amount_released) / 10000000.0, 2) AS amount_released_crore
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'EAST KHASI HILLS';
+  tables:
+  - curated.v_pmay
+- question: Amount released by district
+  sql: |
+    SELECT lgd_district,
+           ROUND(SUM(amount_released) / 10000000.0, 2) AS amount_released_crore
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    ORDER BY amount_released_crore DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: Top 5 blocks by amount released
+  sql: |
+    SELECT lgd_district, lgd_block,
+           ROUND(SUM(amount_released) / 10000000.0, 2) AS amount_released_crore
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district, lgd_block
+    ORDER BY amount_released_crore DESC
+    LIMIT 5;
+  tables:
+  - curated.v_pmay
+- question: What is the total sanctioned amount?
+  sql: |
+    SELECT ROUND(SUM(sanctioned_amount) / 10000000.0, 2) AS sanctioned_crore,
+           COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: How much sanctioned amount has not been released?
+  sql: |
+    SELECT ROUND(SUM(amount_pending) / 10000000.0, 2)
+             AS unreleased_crore
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND amount_released IS NOT NULL;
+  tables:
+  - curated.v_pmay
+- question: What is the fund utilisation rate?
+  sql: |
+    SELECT ROUND(100.0 * SUM(amount_released)
+                 / NULLIF(SUM(sanctioned_amount), 0), 2) AS utilisation_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: Fund utilisation by district
+  sql: |
+    SELECT lgd_district,
+           ROUND(SUM(sanctioned_amount) / 10000000.0, 2) AS sanctioned_crore,
+           ROUND(SUM(amount_released) / 10000000.0, 2)   AS released_crore,
+           ROUND(100.0 * SUM(amount_released)
+                 / NULLIF(SUM(sanctioned_amount), 0), 2) AS utilisation_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    ORDER BY utilisation_pct DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: What is the average amount released for completed houses?
+  sql: |
+    SELECT ROUND(AVG(amount_released), 2) AS average_released_rupees
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND is_completed;
+  tables:
+  - curated.v_pmay
+- question: How many houses received three installments?
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND installments_paid = 3;
+  tables:
+  - curated.v_pmay
+- question: Break down houses by number of installments paid
+  sql: |
+    SELECT installments_paid, COUNT(*) AS houses,
+           ROUND(AVG(amount_released), 2) AS average_released_rupees
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND installments_paid IS NOT NULL
+    GROUP BY installments_paid
+    ORDER BY installments_paid
+    LIMIT 3;
+  tables:
+  - curated.v_pmay
+- question: What is the total number of installments paid in West Garo Hills?
+  sql: |
+    SELECT SUM(installments_paid) AS total_installments
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_pmay
+- question: How many houses have no payment recorded?
+  sql: |
+    SELECT COUNT(*) AS houses_without_release
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND amount_released IS NULL;
+  tables:
+  - curated.v_pmay
+- question: How many houses were sanctioned in each financial year?
+  sql: |
+    SELECT financial_year_short AS sanction_fy_start,
+           COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date IS NOT NULL
+    GROUP BY sanction_fy_start
+    ORDER BY sanction_fy_start
+    LIMIT 7;
+  tables:
+  - curated.v_pmay
+- question: How many houses were sanctioned in FY 2022-23?
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND financial_year_short = '2022-23';
+  tables:
+  - curated.v_pmay
+  note: 'v2.0: financial_year_short is a stored column. The v1.0 sanction_date range is no longer the right pattern for an
+    FY question. If dim_year turns out not to cover this year, year_key is NULL and the date range is the fallback - see the
+    coverage_conflict note in pmay_entity_resolver.yaml.'
+- question: Completion rate by financial year
+  sql: |
+    SELECT financial_year_short AS sanction_fy_start,
+           COUNT(*) AS houses,
+           COUNT(*) FILTER (WHERE is_completed) AS completed,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE is_completed)
+                 / NULLIF(COUNT(*), 0), 2) AS completion_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date IS NOT NULL
+    GROUP BY sanction_fy_start
+    ORDER BY sanction_fy_start
+    LIMIT 7;
+  tables:
+  - curated.v_pmay
+- question: Amount released by financial year
+  sql: |
+    SELECT financial_year_short AS sanction_fy_start,
+           ROUND(SUM(amount_released) / 10000000.0, 2) AS amount_released_crore
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date IS NOT NULL
+    GROUP BY sanction_fy_start
+    ORDER BY sanction_fy_start
+    LIMIT 7;
+  tables:
+  - curated.v_pmay
+- question: Houses sanctioned by district and financial year
+  sql: |
+    SELECT lgd_district,
+           financial_year_short AS sanction_fy_start,
+           COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date IS NOT NULL
+    GROUP BY lgd_district, sanction_fy_start
+    ORDER BY lgd_district, sanction_fy_start
+    LIMIT 84;
+  tables:
+  - curated.v_pmay
+- question: Show the financial year summary
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT sanction_fy, houses, completed, completion_pct,
+           sanctioned_cr, released_cr, pending_cr, utilisation_pct
+    FROM pmay_fy_summary
+    ORDER BY sanction_fy
+    LIMIT 7;
+- question: Which financial year had the most houses sanctioned?
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT sanction_fy, houses
+    FROM pmay_fy_summary
+    ORDER BY houses DESC
+    LIMIT 1;
+- question: How much is pending in each financial year?
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT sanction_fy, sanctioned_cr, released_cr, pending_cr
+    FROM pmay_fy_summary
+    ORDER BY pending_cr DESC
+    LIMIT 7;
+- question: How many houses were sanctioned in 2023?
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date >= '2023-01-01'
+      AND sanction_date <  '2024-01-01';
+  tables:
+  - curated.v_pmay
+- question: Houses sanctioned by calendar year
+  sql: |
+    SELECT EXTRACT(YEAR FROM sanction_date) AS sanction_year,
+           COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date IS NOT NULL
+    GROUP BY sanction_year
+    ORDER BY sanction_year
+    LIMIT 7;
+  tables:
+  - curated.v_pmay
+- question: Monthly sanctions in 2023
+  sql: |
+    SELECT sanction_month AS sanction_month,
+           COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date >= '2023-01-01'
+      AND sanction_date <  '2024-01-01'
+    GROUP BY sanction_month
+    ORDER BY sanction_month
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+  note: 'v2.0: sanction_month is stored - group on it directly.'
+- question: What period does the data cover?
+  sql: |
+    SELECT MIN(sanction_date) AS first_sanction,
+           MAX(sanction_date) AS last_sanction,
+           COUNT(*) FILTER (WHERE sanction_date IS NULL) AS undated_records,
+           COUNT(*) AS total_records
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: How many houses are there in the Garo Hills?
+  sql: |
+    SELECT COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district IN ('East Garo Hills', 'North Garo Hills',
+                                       'South Garo Hills', 'South West Garo Hills',
+                                       'West Garo Hills');
+  tables:
+  - curated.v_pmay
+- question: Houses by block in West Garo Hills
+  sql: |
+    SELECT lgd_block, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'WEST GARO HILLS'
+    GROUP BY lgd_block
+    ORDER BY houses DESC
+    LIMIT 20;
+  tables:
+  - curated.v_pmay
+- question: Top 10 villages by completed houses in East Garo Hills
+  sql: |
+    SELECT village_code, lgd_village_name, lgd_block,
+           COUNT(*) AS completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'EAST GARO HILLS'
+      AND is_completed
+    GROUP BY village_code, lgd_village_name, lgd_block
+    ORDER BY completed_houses DESC
+    LIMIT 10;
+  tables:
+  - curated.v_pmay
+- question: How many villages have PMAY houses in South Garo Hills?
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'SOUTH GARO HILLS';
+  tables:
+  - curated.v_pmay
+- question: How many villages and blocks does each district cover?
+  sql: |
+    SELECT lgd_district,
+           COUNT(DISTINCT lgd_block)   AS blocks,
+           COUNT(DISTINCT village_code) AS villages,
+           COUNT(*)                     AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    ORDER BY houses DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+  note: 'v2.0: blocks are counted BY NAME because the curated layer has no block code column. That is safe only because no
+    block name repeats across districts in the source profiling - villages still must be counted by village_code, where 198
+    names are shared.'
+- question: List the blocks in West Khasi Hills
+  sql: |
+    SELECT DISTINCT lgd_block
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district = 'WEST KHASI HILLS'
+    ORDER BY lgd_block
+    LIMIT 50;
+  tables:
+  - curated.v_pmay
+  note: 'v2.0: the v1.0 block LGD code column has no equivalent in the curated layer, so the name is all that can be returned.'
+- question: Compare West Garo Hills and East Khasi Hills
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) AS houses,
+           COUNT(*) FILTER (WHERE is_completed) AS completed,
+           ROUND(SUM(amount_released) / 10000000.0, 2) AS amount_released_crore
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_district IN ('West Garo Hills', 'East Khasi Hills')
+    GROUP BY lgd_district
+    ORDER BY houses DESC
+    LIMIT 2;
+  tables:
+  - curated.v_pmay
+- question: Compare the sanctioned amounts of Dambo Rongjeng and Samanda, the block, not the village, across all financial years
+  sql: |
+    SELECT lgd_block,
+           SUM(sanctioned_amount) AS sanctioned_amount_total
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND lgd_block IN ('DAMBO RONGJENG', 'SAMANDA')
+    GROUP BY lgd_block
+    ORDER BY sanctioned_amount_total DESC
+    LIMIT 2;
+  tables:
+  - curated.v_pmay
+  note: 'Two or more named blocks to compare -> IN-list + GROUP BY lgd_block, one row per block. Never collapse them into a single filter/total — that silently drops every block but one.'
+- question: Compare completed houses between FY 2021-22 and FY 2022-23 by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE financial_year_short = '2021-22'
+                              AND is_completed) AS completed_2021_22,
+           COUNT(*) FILTER (WHERE financial_year_short = '2022-23'
+                              AND is_completed) AS completed_2022_23
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND financial_year_short IN ('2021-22', '2022-23')
+    GROUP BY lgd_district
+    ORDER BY completed_2022_23 DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+  note: 'v2.0: grouped on the stored financial year rather than sanction_date ranges. FY 2021-22 may fall outside dim_year
+    - verify before trusting the left column.'
+- question: Which blocks have the lowest completion rate?
+  sql: |
+    SELECT lgd_district, lgd_block,
+           COUNT(*) AS houses,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE is_completed)
+                 / NULLIF(COUNT(*), 0), 2) AS completion_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district, lgd_block
+    ORDER BY completion_pct ASC
+    LIMIT 5;
+  tables:
+  - curated.v_pmay
+- question: Find the beneficiary with registration number MG123676572
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT reg_no, beneficiary_name, sanction_no, sanction_date,
+           sanctioned_amount, amount_released, installment_paid, house_status,
+           mapped_village_lgd_name, mapped_block_lgd_name, mapped_district_lgd_name
+    FROM pmay_beneficiaries
+    WHERE reg_no = 'MG123676572'
+    LIMIT 2;
+- question: Show the PMAY records for Ambare Ading village
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT reg_no, beneficiary_name, sanction_date, amount_released, house_status
+    FROM pmay_beneficiaries
+    WHERE mapped_village_lgd_name = 'Ambare Ading'
+    ORDER BY sanction_date
+    LIMIT 100;
+- question: Find beneficiaries whose name looks like Sangma in Ri Bhoi
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT reg_no, beneficiary_name, mapped_village_lgd_name,
+           mapped_block_lgd_name, house_status
+    FROM pmay_beneficiaries
+    WHERE mapped_district_lgd_name = 'Ri Bhoi'
+      AND beneficiary_name ILIKE '%sangma%'
+    ORDER BY beneficiary_name
+    LIMIT 100;
+- question: Which houses are covered by sanction number MG04002/1/987?
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT reg_no, beneficiary_name, sanction_date, house_status,
+           mapped_village_lgd_name
+    FROM pmay_beneficiaries
+    WHERE sanction_no LIKE 'MG04002/1/987%'
+    ORDER BY beneficiary_name
+    LIMIT 100;
+- question: Which sanction orders cover the most houses?
+  sql: |
+    SELECT sanction_no, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_no IS NOT NULL
+    GROUP BY sanction_no
+    ORDER BY houses DESC
+    LIMIT 5;
+  tables:
+  - curated.v_pmay
+# FIXED 2026-09-08: the two examples below used to share the same GROUP BY
+# breakdown SQL for both questions (bucket values were unknown at v2.0 time,
+# so a precise filtered COUNT couldn't be written). mapping_category values are
+# now confirmed against live data — 'Fully Mapped' / 'Fuzzy Mapped', 136,141 /
+# 34,966 rows, same values used by "Mapping quality by district" below — so
+# each question now gets its own filtered count instead of a breakdown that
+# doesn't actually answer either one.
+- question: How many records are fully mapped?
+  sql: |
+    SELECT COUNT(*) AS fully_mapped_records
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND mapping_category = 'Fully Mapped';
+  tables:
+  - curated.v_pmay
+- question: How many records are fuzzy mapped?
+  sql: |
+    SELECT COUNT(*) AS fuzzy_mapped_records,
+           ROUND(100.0 * COUNT(*) FILTER (WHERE mapping_category = 'Fuzzy Mapped')
+                 / NULLIF(COUNT(*), 0), 2) AS share_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: Mapping quality by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE mapping_category = 'Fully Mapped') AS fully_mapped,
+           COUNT(*) FILTER (WHERE mapping_category = 'Fuzzy Mapped') AS fuzzy_mapped,
+           COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    ORDER BY fuzzy_mapped DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: How many records have missing sanction dates?
+  sql: |
+    SELECT COUNT(*) AS undated_records
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+      AND sanction_date IS NULL;
+  tables:
+  - curated.v_pmay
+- question: Which registration numbers appear more than once?
+  sql: |
+    SELECT reg_no, COUNT(*) AS records
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY reg_no
+    HAVING COUNT(*) > 1
+    ORDER BY reg_no
+    LIMIT 100;
+  tables:
+  - curated.v_pmay
+- question: How complete is each field?
+  sql: null
+  status: RETIRED_v2.0
+  reason: This example referenced an object or column that does not exist in the curated layer (a beneficiary name column,
+    or the pmay_fy_summary pre-aggregate). It is kept as a negative example so a stale retrieval hit is recognised as stale.
+    See pmay_schema_partitions.yaml for the v2.0 replacement pattern.
+  v1_sql: |
+    SELECT COUNT(*) AS total_records,
+           COUNT(*) FILTER (WHERE sanction_date IS NULL)   AS missing_sanction_date,
+           COUNT(*) FILTER (WHERE house_status IS NULL)    AS missing_house_status,
+           COUNT(*) FILTER (WHERE amount_released IS NULL) AS missing_amount_released,
+           COUNT(*) FILTER (WHERE father_mother_name IS NULL) AS missing_parent_name
+    FROM pmay_beneficiaries;
+- question: Which districts have more than 5000 PMAY houses?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    HAVING COUNT(*) > 5000
+    ORDER BY houses DESC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: Which districts have fewer than 500 completed houses?
+  sql: |
+    SELECT lgd_district, COUNT(*) FILTER (WHERE is_completed) AS completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY lgd_district
+    HAVING COUNT(*) FILTER (WHERE is_completed) < 500
+    ORDER BY completed_houses ASC
+    LIMIT 12;
+  tables:
+  - curated.v_pmay
+- question: What percentage of total sanctioned amount does East Khasi Hills account for?
+  sql: |
+    SELECT ROUND(100.0 * SUM(sanctioned_amount) FILTER (WHERE lgd_district = 'EAST KHASI HILLS')
+                 / NULLIF(SUM(sanctioned_amount), 0), 2) AS east_khasi_hills_share_pct
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder;
+  tables:
+  - curated.v_pmay
+- question: Average number of PMAY houses per district
+  sql: |
+    SELECT ROUND(AVG(houses), 2) AS avg_houses_per_district
+    FROM (
+      SELECT lgd_district, COUNT(*) AS houses
+      FROM curated.v_pmay
+      WHERE NOT is_placeholder
+      GROUP BY lgd_district
+    ) d;
+  tables:
+  - curated.v_pmay
+- question: Compare the Garo Hills and Khasi Hills regions on PMAY
+  sql: |
+    SELECT CASE
+             WHEN lgd_district IN ('EAST GARO HILLS', 'NORTH GARO HILLS',
+                                   'SOUTH GARO HILLS', 'SOUTH WEST GARO HILLS',
+                                   'WEST GARO HILLS')        THEN 'Garo Hills'
+             WHEN lgd_district IN ('EAST KHASI HILLS', 'EASTERN WEST KHASI HILLS',
+                                   'SOUTH WEST KHASI HILLS',
+                                   'WEST KHASI HILLS')       THEN 'Khasi Hills'
+             WHEN lgd_district IN ('EAST JAINTIA HILLS',
+                                   'WEST JAINTIA HILLS')     THEN 'Jaintia Hills'
+             WHEN lgd_district = 'RI BHOI'                   THEN 'Ri Bhoi'
+             ELSE 'Unassigned'
+           END AS region,
+           COUNT(*) AS houses,
+           COUNT(*) FILTER (WHERE is_completed) AS completed_houses
+    FROM curated.v_pmay
+    WHERE NOT is_placeholder
+    GROUP BY region
+    ORDER BY houses DESC;
+  tables:
+  - curated.v_pmay
+  note: 'Hill-range groupings are NOT a column in megh_db - they expand to a CASE over the district list. Districts must be uppercase to match storage.'

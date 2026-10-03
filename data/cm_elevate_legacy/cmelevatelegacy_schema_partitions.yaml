@@ -1,0 +1,1641 @@
+schema_version: '1.0'
+schema_name: cmelevatelegacy_curated_semantic_schema
+display_name: CM Elevate Legacy (Disbursement) Curated Star-Schema Semantic Schema (megh_db)
+
+# ===========================================================================
+# v1.0 - 2026-09-23 - WRITTEN AGAINST THE LIVE DATABASE
+#
+# There is no v1.0 flat-table ancestor for this scheme. CM Elevate Legacy was
+# loaded straight into the curated star schema, so this file has no migration
+# history to record - unlike PMAY, where v2.0 replaced a flat `pmay_beneficiaries`
+# table. Every statement here is written against megh_db as it stands.
+#
+# Authority: SCHEMA_FOR_DEVELOPERS.md, generated from the live database
+# 2026-09-22 11:35 UTC.
+#
+# ---------------------------------------------------------------------------
+# THIS IS NOT THE CM ELEVATE SCHEME IN Annotations/CMElevate/
+# ---------------------------------------------------------------------------
+# Two different schemes share the name. They must never be merged, joined or
+# cross-referenced:
+#
+#   Annotations/CMElevate/        fact_cm_elevate_application    ~8,627 rows
+#                                 dim_cm_elevate_scheme          15 schemes
+#                                 NO money, NO time              COUNT(*) only
+#
+#   THIS FILE                     fact_cm_elevate_disbursement    2,822 rows
+#                                 dim_cm_elevate_disb_scheme     13 schemes
+#                                 money AND financial year
+#
+# The database states it on the fact table: there is NO SHARED IDENTIFIER
+# between the two source files, confirmed separate by the client, and the
+# fact-to-fact join is prohibited (semantic.join_graph,
+# 005_join_graph_prohibitions.sql).
+#
+# The CM Elevate rule "no measure, no time - COUNT(*) is the entire aggregate
+# vocabulary" belongs to the APPLICATION fact only. It is false here and must
+# never be copied into this partition.
+#
+# PROVENANCE OF NUMBERS IN THIS FILE
+#   Column names, types, nullability, defaults, PKs, FKs  -> live DB, 2026-09-22. Trust.
+#   Record counts, distinct counts, value distributions   -> source workbook
+#                                                            `Cm Elevate to share to BLH.xlsx`,
+#                                                            profiled 2026-09-23 (2,823 rows).
+#                                                            NOT re-verified against megh_db,
+#                                                            which holds 2,822 after one
+#                                                            quarantine. Marked
+#                                                            `unverified_in_db: true`.
+#   No CM Elevate Legacy figure may be published until it is measured against
+#   the database.
+#
+# STILL UNCONFIRMED AT v1.0 - see README §7 before relying on these:
+#   dim_scheme.scheme_code for this scheme, and its money_unit / grain_note /
+#   time_semantics; the exact stored spelling of the 13 scheme names; whether
+#   dim_geography stores district and block UPPERCASE for this partition too.
+# ===========================================================================
+
+architecture_alignment:
+  schema_linking: Enriched table and column documents are embedded for scheme-partitioned Qdrant retrieval.
+  entity_resolution: Dimension catalogue plus approved aliases, RapidFuzz, and BGE-small fallback.
+  join_discovery: information_schema FKs plus SME-reviewed implicit FK YAML; LLM never invents joins.
+  sql_generation: Retrieved schema, resolved entities, graph-generated joins, and curated question-to-SQL examples.
+  safety: SQLGlot read-only validation, enforced LIMIT, SELECT-only database role.
+  observability: Inputs, outputs, rule firings, SQL, results, chart spec, and response are traceable.
+
+database:
+  name: megh_db
+  schema: curated
+  read_role: megh_readonly
+  primary_query_surface: curated.v_cm_elevate_disbursement
+  structure_verified: '2026-09-22'
+  volumes_verified: false
+
+datasets:
+
+  # =========================================================================
+  # PRIMARY QUERY SURFACE - query this, not the fact table
+  # =========================================================================
+  v_cm_elevate_disbursement:
+    table_name: curated.v_cm_elevate_disbursement
+    object_type: view
+    over: curated.fact_cm_elevate_disbursement
+    column_count: 38
+    grain: one row per applicant's sanction-and-disbursement record
+    row_count: unverified_in_db
+    row_count_note: >
+      The source workbook holds 2,823 rows and the loader quarantined one
+      (corrupted_identity), so 2,822 is expected. The curated count has not been
+      measured. Do not quote a total until it is.
+    aggregate_before_reporting: false
+    grain_note: >
+      One row IS one applicant record, so COUNT(*) needs no prior aggregation.
+      The row is NOT an application in the CM Elevate sense and NOT a person -
+      the same person can appear under two schemes.
+    money_unit: rupees
+    money_unit_authority: curated.dim_scheme.money_unit
+    money_unit_verified: false
+    money_unit_note: >
+      Rupees is inferred from magnitude - the Piggery entitlement is 125,000,
+      i.e. Rs 1.25 lakh. The stored dim_scheme.money_unit has NOT been read.
+      Confirm before any template hardcodes a conversion.
+    names_excluded: true
+    names_excluded_note: >
+      first_name, middle_name and last_name exist on the fact for audit only and
+      are dropped entirely from this view, and from
+      semantic.v_embedding_documents via is_chatbot_visible = false. There is no
+      join that recovers them.
+    columns:
+
+    # ---- keys -------------------------------------------------------------
+    - name: cm_elevate_disb_fact_id
+      source_column: fact_cm_elevate_disbursement.cm_elevate_disb_fact_id
+      meaning: Surrogate primary key of the CM Elevate Legacy disbursement fact.
+      type: bigint
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [record id, row id, fact id]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - Not stable across a reload. Never export it or store it outside the database.
+
+    - name: source_row_id
+      source_column: fact_cm_elevate_disbursement.source_row_id
+      meaning: The source workbook's own `id` column, carried through for lineage.
+      type: integer
+      nullable: false
+      category: technical_identifier
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [source id, original id, source row id, excel id]
+      sample_values: [429, 532, 1351, 1894, 2392]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "UNIQUE in the database. 2,823 distinct values in the source workbook."
+      - The anchor for every data-quality finding in this partition - the four corrupted dates, the 1985 loan date and the quarantined row are all cited by this id.
+      - Not dense, and not guaranteed stable across a reload by the data owner.
+
+    - name: application_number
+      source_column: fact_cm_elevate_disbursement.application_number
+      meaning: The scheme's application reference for this applicant record.
+      type: varchar(20)
+      nullable: false
+      category: application_identifier
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT, COUNT DISTINCT]
+      synonyms: [application number, application no, application id, app number, reference number]
+      sample_values: [MPDSI018328, MPFSI000961, ARVSR000104, PTVSI000088, MSWCS000042]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "UNIQUE in the database. Every value is exactly 11 characters (unverified_in_db)."
+      - "NEVER PARSE IT. The leading letters look like a scheme code but are not one - 7 of the 13 schemes use more than one prefix, and one Poultry row (source_row_id 1894, MPDSI001154) carries Piggery's prefix. Resolve the scheme through scheme_name, never through this column."
+      - "The 5th character looks like an applicant-type code (I/R/U) but is not reliable - two schemes have five-letter acronyms whose 5th character is part of the acronym. There is NO applicant-type column in this partition. Do not invent one."
+
+    # ---- scheme -----------------------------------------------------------
+    - name: scheme_name
+      source_column: dim_cm_elevate_disb_scheme.scheme_name
+      meaning: Which of the 13 CM Elevate Legacy schemes this record belongs to.
+      type: text
+      nullable: true
+      category: scheme_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [scheme, scheme name, programme, sub-scheme, sector]
+      sample_values:
+      - Meghalaya Piggery Development Scheme
+      - Meghalaya Poultry Farming Scheme
+      - Meghalaya Sericulture & Weaving Scheme (spinning)
+      - Meghalaya Sericulture & Weaving Scheme(weaving)
+      - Prime Agriculture Response Vehicle Scheme
+      - Meghalaya Dairy Development Scheme
+      - Prime Tourism Vehicle Scheme
+      - Meghalaya Agriculture Warehouse Scheme
+      - Meghalaya Goat Farming Scheme
+      - Meghalaya Any Business Venture Scheme
+      - Meghalaya Common Facility Center Scheme
+      - Meghalaya Sports & Wellness Scheme
+      - Meghalaya Motorcaravan Scheme
+      business_rules:
+      - "THE ONLY authoritative scheme identity. The loader looks the name up directly; it never derives the scheme from application_number."
+      - "SPELLING TRAP: the two Sericulture rows differ only in a space - 'Scheme (spinning)' has one before the bracket, 'Scheme(weaving)' does not. An exact-match filter on the wrong spelling returns zero rows silently. Verify the stored form against dim_cm_elevate_disb_scheme before emitting either."
+      - "HEAVILY SKEWED (unverified_in_db): Piggery 1,353 rows of 2,823 (48%), Poultry 454, then a long tail down to Motorcaravan at 1. A statewide average is dominated by Piggery - say so."
+      - Never merge or compare these names with dim_cm_elevate_scheme's 15 names. Different scheme, different table.
+
+    # ---- time -------------------------------------------------------------
+    - name: year_key
+      source_column: fact_cm_elevate_disbursement.year_key
+      meaning: Financial-year key of the record, resolved against dim_year.
+      type: smallint
+      nullable: true
+      category: time_key
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [year key, financial year key]
+      business_rules:
+      - "CRITICAL: NULLABLE, and on a large share of rows. 395 of 2,823 source rows (14%) carry no financial year at all (unverified_in_db)."
+      - A bare GROUP BY year_key silently drops those rows. Count them and state the count before reporting any time series.
+      - The view reaches dim_year through a LEFT JOIN, so those rows survive in the view. They vanish only when you group or filter on time.
+
+    - name: financial_year
+      source_column: dim_year.financial_year
+      meaning: Canonical financial year of the record.
+      type: char(9)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [financial year, FY, fiscal year, year]
+      sample_values: ['2024-2025', '2025-2026']
+      business_rules:
+      - "ONLY TWO YEARS EXIST in this partition - FY2024-25 (2,291 rows) and FY2025-26 (137 rows), plus 395 rows with none (unverified_in_db). A 'trend over the years' has two points."
+      - "Derived from the source's stated financial_year label, NOT from any disbursement date."
+      - NULL wherever year_key is NULL.
+
+    - name: financial_year_short
+      source_column: dim_year.financial_year_short
+      meaning: Short form of the financial year.
+      type: char(7)
+      nullable: true
+      category: time_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [FY short, financial year short]
+      sample_values: ['2024-25', '2025-26']
+      business_rules:
+      - Prefer this for display; prefer financial_year for canonical matching.
+
+    - name: year_note
+      source_column: dim_year.data_quality_note
+      meaning: Year-level data-quality warning attached to the financial year.
+      type: text
+      nullable: true
+      category: time_quality_metadata
+      nlp_sql_priority: medium
+      sql_operations: [WHERE]
+      synonyms: [year note, data quality note, year warning]
+      business_rules:
+      - Never a grouping key. It is a caveat to carry, not a dimension.
+      - When it is non-null for a year in the result, it must be surfaced alongside that year's numbers.
+
+    # ---- geography --------------------------------------------------------
+    - name: geography_key
+      source_column: fact_cm_elevate_disbursement.geography_key
+      meaning: Surrogate key into the conformed geography dimension.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [geography key]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - NOT stable across a reload. Use village_code for anything leaving the database.
+
+    - name: village_code
+      source_column: fact_cm_elevate_disbursement.village_code
+      meaning: LGD village code - the national village identifier, denormalised onto the row.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [village code, LGD village code, mapped village code]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "VILLAGE IDENTITY. 17 village names in this source map to more than one code (unverified_in_db), so count villages with COUNT(DISTINCT village_code), never by name."
+      - Denormalised on the row - filter on it directly, no join to dim_geography needed.
+      - "1,051 distinct codes in the source workbook (unverified_in_db)."
+
+    - name: lgd_village_name
+      source_column: dim_geography.lgd_village_name
+      meaning: LGD-standardised village name.
+      type: varchar(200)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [village, LGD village, mapped village, village name]
+      business_rules:
+      - Display and filter name. NOT an identity - see village_code.
+      - "404 source rows (14.3%) have no village at all and resolve to an Unresolved placeholder - see entity_type."
+
+    - name: lgd_block
+      source_column: dim_geography.lgd_block
+      meaning: LGD-standardised block name.
+      type: varchar(150)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [block, LGD block, mapped block, block name]
+      business_rules:
+      - "CASING. The source workbook is Title Case ('Mawkyrwat'); dim_geography is documented as storing block UPPERCASE. A mixed-case exact match returns zero rows SILENTLY, not as an error. Compare case-folded and emit the stored form. CONFIRM the stored casing before this rule is relied on - see README §7."
+      - "NO BLOCK CODE is exposed. The source's mapped_block_lgd_code is not carried into the curated layer."
+      - "59 blocks in the source workbook (unverified_in_db). 19 rows sit in Municipal Boards - Resubelpara, William Nagar, Tura - which are urban wards, not villages. Do not describe this scheme as wholly rural."
+
+    - name: lgd_district
+      source_column: dim_geography.lgd_district
+      meaning: LGD-standardised district name.
+      type: varchar(100)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [district, LGD district, mapped district, district name]
+      sample_values:
+      - WEST GARO HILLS
+      - RI BHOI
+      - SOUTH WEST GARO HILLS
+      - EAST KHASI HILLS
+      - WEST KHASI HILLS
+      - EASTERN WEST KHASI HILLS
+      - EAST GARO HILLS
+      - WEST JAINTIA HILLS
+      - NORTH GARO HILLS
+      - SOUTH WEST KHASI HILLS
+      - SOUTH GARO HILLS
+      - EAST JAINTIA HILLS
+      business_rules:
+      - "CASING. Same rule and same caveat as lgd_block - sample_values above are given in the documented UPPERCASE form, which is NOT yet confirmed for this partition."
+      - "NO DISTRICT CODE is exposed. The source's mapped_district_lgd_code is not carried into the curated layer."
+      - "All 12 Meghalaya districts are present. Distribution is uneven (unverified_in_db): West Garo Hills 493, Ri Bhoi 486, South West Garo Hills 461, down to East Jaintia Hills 35."
+      - District and block are present on every source row even where the village is not.
+
+    - name: entity_type
+      source_column: dim_geography.entity_type
+      meaning: Whether the resolved locality is a real village, a ward, or an Unresolved placeholder.
+      type: varchar(10)
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [entity type, locality type, resolved type]
+      sample_values: [Village, Ward, Unresolved]
+      business_rules:
+      - "CRITICAL. entity_type = 'Unresolved' means the source row's locality could not be matched to any real village. 404 source rows have no village code (unverified_in_db)."
+      - These rows are included at district grain so scheme totals reconcile to the source file. Keep them in money and count totals.
+      - "EXCLUDE them from every village-count and village-list answer: add `AND entity_type <> 'Unresolved'` and state how many rows were set aside."
+      - on_roster is always FALSE for an Unresolved row.
+
+    - name: on_roster
+      source_column: dim_geography.on_roster
+      meaning: Whether the village is in the official LGD roster or was only seen in a data file.
+      type: boolean
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [on roster, official village, in roster]
+      business_rules:
+      - Shared with every other scheme through dim_geography.
+      - Off-roster villages are real; do not filter them out unless the question is about roster coverage.
+
+    - name: has_geo_conflict
+      source_column: dim_geography.has_geo_conflict
+      meaning: Sources disagree on this village's block or district; the roster value is what is stored.
+      type: boolean
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [geo conflict, geography conflict, district mismatch]
+      business_rules:
+      - The conflict is recorded rather than silently resolved. Four such village codes are known across megh_db.
+      - Surface the count when a district- or block-level answer rests on conflicted villages.
+
+    # ---- money: sanction ---------------------------------------------------
+    - name: sanctioned_amount
+      source_column: fact_cm_elevate_disbursement.sanctioned_amount
+      meaning: Amount sanctioned to this applicant.
+      type: numeric(14,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [sanctioned amount, sanction amount, amount sanctioned, approved amount, entitlement]
+      business_rules:
+      - "UNIT IS RUPEES (unverified - see money_unit_note). Divide by 1e7 for crore. Do not confuse with MGNREGA expenditure, which is LAKH."
+      - "SANCTIONED IS NOT DISBURSED. Source totals (unverified_in_db): sanctioned Rs 142.74 Cr against total_disbursement Rs 82.90 Cr, i.e. 58.1%."
+      - "A PER-SCHEME CONSTANT for 6 of the 13 schemes (unverified_in_db): Piggery 125,000 on all 1,353 rows, Poultry 120,000, Dairy 300,000, Goat 100,000, Motorcaravan 5,000,000. For those schemes AVG(sanctioned_amount) is the entitlement restated, not a statistic - answer with the entitlement and say it is fixed, as PMAY does for its 130,000."
+      - "NULLABLE on 3 source rows, all of them refusals under Meghalaya Any Business Venture Scheme (source_row_id 2403, 2411, 2425). NULL is missing, never zero."
+
+    - name: bank_sanctioned_amount
+      source_column: fact_cm_elevate_disbursement.bank_sanctioned_amount
+      meaning: A second sanctioned figure whose relationship to sanctioned_amount is not established.
+      type: numeric(14,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure_unconfirmed
+      nlp_sql_priority: low
+      sql_operations: [WHERE]
+      synonyms: [bank sanctioned, bank sanctioned amount, bank amount, bank share]
+      business_rules:
+      - "MEANING UNCONFIRMED. DO NOT BUILD A METRIC ON THIS COLUMN, and never present it as a bank's share of the sanction."
+      - "50.8% of rows are exactly 0 (unverified_in_db). Where non-zero the ratio to sanctioned_amount clusters at 0.20, 0.50, 0.496 and 0.60 with a long tail."
+      - "REFINEMENT OF THE DATABASE COMMENT. The comment says the ratio varies within a single scheme, and it does - but only in 5 of the 13 schemes. In the other 8 it is a single fixed ratio (see bank_sanctioned_ratio_by_scheme below). That pattern is consistent with a per-scheme subsidy tier that the vehicle, warehouse and sports schemes apply case by case. STILL UNCONFIRMED - it is a better description of the data, not a confirmed meaning."
+      - A question that needs this column gets an explicit meaning-unconfirmed caveat, or a refusal. Never a silent SUM.
+      bank_sanctioned_ratio_by_scheme:
+        provenance: source workbook, non-zero rows only, 2026-09-23 (unverified_in_db)
+        fixed_ratio:
+        - {scheme: Meghalaya Piggery Development Scheme,               rows: 536, ratio: 0.50}
+        - {scheme: Meghalaya Sericulture & Weaving Scheme (spinning),  rows: 198, ratio: 0.20}
+        - {scheme: Meghalaya Sericulture & Weaving Scheme(weaving),    rows: 197, ratio: 0.20}
+        - {scheme: Meghalaya Any Business Venture Scheme,              rows: 30,  ratio: 0.60}
+        - {scheme: Meghalaya Common Facility Center Scheme,            rows: 27,  ratio: 0.20}
+        - {scheme: Meghalaya Dairy Development Scheme,                 rows: 23,  ratio: 0.50}
+        - {scheme: Meghalaya Goat Farming Scheme,                      rows: 10,  ratio: 0.50}
+        - {scheme: Meghalaya Motorcaravan Scheme,                      rows: 1,   ratio: 0.68}
+        varying_ratio:
+        - {scheme: Prime Tourism Vehicle Scheme,                 rows: 92,  distinct: 5, range: 0.47-0.67}
+        - {scheme: Prime Agriculture Response Vehicle Scheme,    rows: 130, distinct: 4, range: 0.47-0.50}
+        - {scheme: Meghalaya Poultry Farming Scheme,             rows: 55,  distinct: 3, range: 0.42-0.52}
+        - {scheme: Meghalaya Agriculture Warehouse Scheme,       rows: 87,  distinct: 2, range: 0.20-0.30}
+        - {scheme: Meghalaya Sports & Wellness Scheme,           rows: 2,   distinct: 2, range: 0.58-0.70}
+
+    # ---- money: subsidy tranches -------------------------------------------
+    - name: subsidy_disbursement_1
+      source_column: fact_cm_elevate_disbursement.subsidy_disbursement_1
+      meaning: First subsidy tranche paid to the applicant.
+      type: numeric(12,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: medium
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [first subsidy, subsidy 1, first tranche, first installment]
+      business_rules:
+      - "Prefer total_subsidy_disbursement for any 'how much subsidy' question. Reach for a tranche only when the question is explicitly about the first/second/third payment."
+      - "2,344 source rows populated, all greater than zero (unverified_in_db)."
+      - "AN ENTITLEMENT LADDER, not a continuous amount, in the two largest schemes: 1,332 rows are exactly 31,250 (Piggery, one quarter of the 1,25,000 entitlement) and 450 are exactly 30,000 (Poultry, one quarter of 1,20,000). A second tranche of the same size takes each to half the sanction - which is why 1,145 Piggery records sit at exactly 62,500 disbursed."
+      - NULL is missing, never zero.
+      tranche_1_value_ladder:
+        provenance: source workbook, 2026-09-23 (unverified_in_db)
+        top_values:
+        - {amount: 31250,  rows: 1332, scheme: Piggery,  note: quarter of the 1,25,000 entitlement}
+        - {amount: 30000,  rows: 450,  scheme: Poultry,  note: quarter of the 1,20,000 entitlement}
+        - {amount: 75000,  rows: 128,  scheme: Dairy,    note: quarter of the 3,00,000 entitlement}
+        - {amount: 491935.50, rows: 63, scheme: Prime Tourism Vehicle}
+        - {amount: 498744, rows: 52,   scheme: Prime Agriculture Response Vehicle}
+        - {amount: 40000,  rows: 48,   scheme: Goat,     note: "the only scheme with no loans at all - 0 of 48 records"}
+
+    - name: subsidy_disbursement_date_1
+      source_column: fact_cm_elevate_disbursement.subsidy_disbursement_date_1
+      meaning: Date of the first subsidy tranche.
+      type: date
+      nullable: true
+      category: time_detail
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, MIN, MAX]
+      synonyms: [first disbursement date, subsidy date, date of first payment]
+      business_rules:
+      - "THE CORRUPTED-CENTURY COLUMN. 4 source rows (source_row_id 1351, 1355, 1378, 1556, all Piggery) carried a date with a broken century - literal strings '1015-01-15', '1014-11-06', '1014-11-20', '1015-02-18'. They load as NULL. The amounts beside them are real and unaffected: all four are exactly Rs 31,250. DO NOT GUESS A CORRECTED DATE."
+      - "TWO FURTHER ROWS are dated 2026-09-04 (source_row_id 1602, 1696) - AFTER the extract's own created_date of 2026-09-03. They parse cleanly and survive into the database. A MIN/MAX date answer hits them; caveat any date extremum."
+      - "NAMING: this is the source workbook's `disbursement_date`, not its `disbursement_date_1`. The source numbers its dates one behind its amounts; the loader realigned them. Anyone re-profiling the Excel must not read the two `_1` columns as the same thing."
+      - "Do NOT derive the financial year from this column - see the time_runtime_rule. Stated FY and date-derived FY disagree on 114 of 1,842 comparable source rows."
+
+    - name: subsidy_disbursement_2
+      source_column: fact_cm_elevate_disbursement.subsidy_disbursement_2
+      meaning: Second subsidy tranche paid to the applicant.
+      type: numeric(12,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: medium
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [second subsidy, subsidy 2, second tranche, second installment]
+      business_rules:
+      - "TWO TRANCHES IS THE NORM: 1,863 source rows have exactly two subsidy tranches, 469 have one, 13 have three, 478 have none (unverified_in_db)."
+      - NULL is missing, never zero.
+
+    - name: subsidy_disbursement_date_2
+      source_column: fact_cm_elevate_disbursement.subsidy_disbursement_date_2
+      meaning: Date of the second subsidy tranche.
+      type: date
+      nullable: true
+      category: time_detail
+      nlp_sql_priority: low
+      sql_operations: [WHERE, MIN, MAX]
+      synonyms: [second disbursement date]
+      business_rules:
+      - "NAMING: this is the source workbook's `disbursement_date_1`. See the offset note on subsidy_disbursement_date_1."
+
+    - name: subsidy_disbursement_3
+      source_column: fact_cm_elevate_disbursement.subsidy_disbursement_3
+      meaning: Third subsidy tranche paid to the applicant.
+      type: numeric(12,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: low
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [third subsidy, subsidy 3, third tranche, final tranche]
+      business_rules:
+      - "Rare: 29 source rows populated, of which 5 are zero rather than null (unverified_in_db). Too few to support a breakdown on its own."
+
+    - name: subsidy_disbursement_date_3
+      source_column: fact_cm_elevate_disbursement.subsidy_disbursement_date_3
+      meaning: Date of the third subsidy tranche.
+      type: date
+      nullable: true
+      category: time_detail
+      nlp_sql_priority: low
+      sql_operations: [WHERE, MIN, MAX]
+      synonyms: [third disbursement date]
+      business_rules:
+      - "NAMING: this is the source workbook's `disbursement_date_2`. 24 rows populated."
+
+    - name: total_subsidy_disbursement
+      source_column: fact_cm_elevate_disbursement.total_subsidy_disbursement
+      meaning: Total subsidy paid across the three tranches.
+      type: numeric(14,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [total subsidy, subsidy disbursed, subsidy total, subsidy amount]
+      business_rules:
+      - "VERIFIED DERIVED. Equals subsidy_disbursement_1 + _2 + _3 on every one of the 2,823 source rows, maximum absolute difference 0.00. Never re-derive it by summing the tranches - use the stored column."
+      - UNIT IS RUPEES. Divide by 1e7 for crore.
+      - "Source total Rs 52.57 Cr (unverified_in_db)."
+      - "This is ONE of three answers to 'how much was disbursed'. See the disbursement_ambiguity rule - do not pick it silently."
+
+    # ---- money: loan tranches ----------------------------------------------
+    - name: loan_disbursement_1
+      source_column: fact_cm_elevate_disbursement.loan_disbursement_1
+      meaning: First loan tranche disbursed to the applicant.
+      type: numeric(12,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: medium
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [first loan, loan 1, first loan tranche]
+      business_rules:
+      - "830 source rows populated, of which 28 are zero (unverified_in_db). Loans are single-tranche almost always."
+      - NULL is missing, never zero.
+
+    - name: loan_disbursement_date_1
+      source_column: fact_cm_elevate_disbursement.loan_disbursement_date_1
+      meaning: Date of the first loan tranche.
+      type: date
+      nullable: true
+      category: time_detail
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, MIN, MAX]
+      synonyms: [loan date, first loan date, loan disbursement date]
+      business_rules:
+      - "ONE IMPLAUSIBLE VALUE: source_row_id 532 carries 1985-07-22 against a real Rs 20,000 Piggery loan. It parses as a valid date, so it survives into the database and into any date filter. It is NOT recorded in the database's own column comments. Treat MIN(loan_disbursement_date_1) as suspect and raise the row with the data owner."
+      - "NAMING: this is the source workbook's `loan_disbursement_date`, not its `loan_disbursement_date_1`."
+
+    - name: loan_disbursement_2
+      source_column: fact_cm_elevate_disbursement.loan_disbursement_2
+      meaning: Second loan tranche disbursed to the applicant.
+      type: numeric(12,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: low
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [second loan, loan 2]
+      business_rules:
+      - "Very rare: 13 source rows (unverified_in_db)."
+
+    - name: loan_disbursement_date_2
+      source_column: fact_cm_elevate_disbursement.loan_disbursement_date_2
+      meaning: Date of the second loan tranche.
+      type: date
+      nullable: true
+      category: time_detail
+      nlp_sql_priority: low
+      sql_operations: [WHERE, MIN, MAX]
+      synonyms: [second loan date]
+      business_rules:
+      - "NAMING: this is the source workbook's `loan_disbursement_date_1`."
+
+    - name: loan_disbursement_3
+      source_column: fact_cm_elevate_disbursement.loan_disbursement_3
+      meaning: Third loan tranche disbursed to the applicant.
+      type: numeric(12,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: low
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [third loan, loan 3]
+      business_rules:
+      - "Four source rows only (unverified_in_db). Never the basis of a breakdown."
+
+    - name: loan_disbursement_date_3
+      source_column: fact_cm_elevate_disbursement.loan_disbursement_date_3
+      meaning: Date of the third loan tranche.
+      type: date
+      nullable: true
+      category: time_detail
+      nlp_sql_priority: low
+      sql_operations: [WHERE, MIN, MAX]
+      synonyms: [third loan date]
+      business_rules:
+      - "NAMING: this is the source workbook's `loan_disbursement_date_2`."
+
+    - name: total_loan_disbursement
+      source_column: fact_cm_elevate_disbursement.total_loan_disbursement
+      meaning: Total loan disbursed across the three tranches.
+      type: numeric(14,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [total loan, loan disbursed, loan total, loan amount]
+      business_rules:
+      - "VERIFIED DERIVED. Equals loan_disbursement_1 + _2 + _3 on every one of the 2,823 source rows, maximum absolute difference 0.00. Use the stored column."
+      - UNIT IS RUPEES. Divide by 1e7 for crore.
+      - "Source total Rs 30.33 Cr (unverified_in_db)."
+      - "A LOAN IS NOT A SUBSIDY. Subsidy is a grant; loan is credit the applicant carries. Adding them without saying so is the most common wrong answer available here."
+
+    - name: total_disbursement
+      source_column: fact_cm_elevate_disbursement.total_disbursement
+      meaning: Total money disbursed to the applicant - subsidy plus loan.
+      type: numeric(14,2)
+      nullable: true
+      unit: rupees
+      category: financial_measure
+      nlp_sql_priority: critical
+      sql_operations: [SUM, AVG, MIN, MAX]
+      synonyms: [total disbursement, total disbursed, amount disbursed, disbursed, disbursement]
+      business_rules:
+      - "VERIFIED DERIVED. Equals total_subsidy_disbursement + total_loan_disbursement on every one of the 2,823 source rows, maximum absolute difference 0.00."
+      - UNIT IS RUPEES. Divide by 1e7 for crore.
+      - "Source total Rs 82.90 Cr against Rs 142.74 Cr sanctioned (unverified_in_db)."
+      - "THE DEFAULT for a bare 'disbursed' question ONLY AFTER the gate has confirmed the user means subsidy + loan together. See disbursement_ambiguity."
+      - "449 source rows have zero disbursement, 195 of them Sericulture spinning, whose scheme disbursed 0.1% of what it sanctioned (unverified_in_db). Zero is a real value here, not missing."
+      - "4 source rows disburse MORE than they sanctioned (source_row_id 321, 354, 376, 1760). Not an error to filter away - report it if a sanctioned-vs-disbursed comparison surfaces it."
+
+    # ---- loan attributes ---------------------------------------------------
+    - name: loan_entity
+      source_column: fact_cm_elevate_disbursement.loan_entity
+      meaning: Which lender carried the loan.
+      type: varchar(20)
+      nullable: true
+      category: loan_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [loan entity, lender, bank, financing entity, loan provider]
+      sample_values: [Bank, LIFCOM]
+      business_rules:
+      - "ONLY TWO VALUES: Bank 1,733 rows, LIFCOM 689, NULL 401 (unverified_in_db)."
+      - "'Bank' here is a literal stored value naming an unspecified bank, not the name of a bank. There is no bank-name column in this partition."
+      - "THE NULL BUCKET IS NOT EMPTY OF MONEY: 19 of the 401 null rows carry loan money anyway. A GROUP BY loan_entity drops them - report the unattributed bucket rather than letting it disappear."
+
+    - name: loan_disbursed_status
+      source_column: fact_cm_elevate_disbursement.loan_disbursed_status
+      meaning: Whether a loan was disbursed to this applicant.
+      type: varchar(20)
+      nullable: true
+      category: loan_status
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [loan disbursed, loan status, loan paid]
+      sample_values: ['disbursed', 'not disbursed']
+      business_rules:
+      - "FULLY DERIVED FROM THE MONEY. 'disbursed' holds exactly where total_loan_disbursement > 0, on every source row without exception (802 and 2,020). It carries no independent information."
+      - Usable as a convenient filter. Never quote it as corroboration of an amount - it is the same fact stated twice.
+      - "Lowercase stored values. 'disbursed' and 'not disbursed', not 'Disbursed'/'Y'/'N'."
+
+    # ---- refusal -----------------------------------------------------------
+    - name: desanctioned_reason_raw
+      source_column: fact_cm_elevate_disbursement.desanctioned_reason_raw
+      meaning: Recorded reason the sanction was withdrawn, verbatim from the source.
+      type: varchar(30)
+      nullable: true
+      category: refusal_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [desanctioned, desanction reason, refused, cancelled, withdrawn]
+      sample_values: [Refused, Duplicate]
+      business_rules:
+      - "TWO VALUES ONLY, on 83 of 2,823 source rows: Refused 52, Duplicate 31. NULL on the other 2,740 - and NULL means 'nothing recorded', not 'not refused'."
+      - "NOT AUTHORITATIVE. It disagrees with refused_flag_raw - see the refusal_disagreement rule. Never answer a refusal question from this column alone without naming it as the source."
+      - "'Duplicate' is weakly evidenced: only 6 of the 31 rows have an observable same-name-same-scheme twin in the source file (unverified_in_db)."
+      - "A DESANCTION IS NOT A REJECTED APPLICATION. These are post-sanction outcomes. They must never be offered as the answer to 'how many applications were not sanctioned'."
+
+    - name: refused_flag_raw
+      source_column: fact_cm_elevate_disbursement.refused_flag_raw
+      meaning: Source flag marking the record as refused.
+      type: boolean
+      nullable: true
+      category: refusal_flag
+      nlp_sql_priority: high
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [refused flag, refused, refusal flag]
+      business_rules:
+      - "SET ON 8 ROWS ONLY, and its only stored positive is true - there is no recorded false. A non-refused row is NULL here, not FALSE."
+      - "SO `NOT refused_flag_raw` IS NOT THE COMPLEMENT - it drops every NULL. For 'not refused' write (refused_flag_raw IS DISTINCT FROM TRUE)."
+      - "DISAGREES WITH desanctioned_reason_raw: 2 of the 8 have no desanction reason at all, and 47 of the 52 'Refused' rows do not carry this flag."
+
+    - name: refused_reason_text
+      source_column: fact_cm_elevate_disbursement.refused_reason_text
+      meaning: Free-text reason for refusal.
+      type: text
+      nullable: true
+      category: refusal_detail
+      nlp_sql_priority: medium
+      sql_operations: [WHERE]
+      synonyms: [refusal reason, why refused, reason]
+      sample_values:
+      - Unable to connect
+      - Government Employee
+      - Wife is a government employee
+      - Repeated name
+      - Family emergency
+      - Economical reason
+      business_rules:
+      - "SEVEN ROWS POPULATED, six distinct free-text values (unverified_in_db). Free text, not a coded dimension - never GROUP BY it as if it were one."
+      - "One row (source_row_id 429) carries Refused AND the flag but a BLANK reason - the reason being absent does not mean the refusal is absent."
+      - "May contain personal circumstance ('Wife is a government employee'). Quote it only when the user asks for refusal reasons, and never alongside a geography narrow enough to identify someone."
+
+  # =========================================================================
+  # UNDERLYING FACT - documented for lineage; query the view instead
+  # =========================================================================
+  fact_cm_elevate_disbursement:
+    table_name: curated.fact_cm_elevate_disbursement
+    object_type: table
+    column_count: 38
+    grain: one row per applicant's sanction-and-disbursement record
+    primary_key: cm_elevate_disb_fact_id
+    row_count: unverified_in_db
+    query_preference: >
+      Use curated.v_cm_elevate_disbursement. It pre-joins
+      dim_cm_elevate_disb_scheme, dim_geography and dim_year, so the generator
+      never has to emit those joins - and it drops the applicant names, which the
+      fact table still carries.
+    foreign_keys:
+    - {column: scheme_key,      references: curated.dim_scheme.scheme_key,                          declared: true, nullable: false}
+    - {column: disb_scheme_key, references: curated.dim_cm_elevate_disb_scheme.disb_scheme_key,     declared: true, nullable: false}
+    - {column: year_key,        references: curated.dim_year.year_key,                              declared: true, nullable: true}
+    - {column: geography_key,   references: curated.dim_geography.geography_key,                    declared: true, nullable: false}
+    - {column: raw_id,          references: raw.source_rows.raw_id,                                 declared: true, nullable: true}
+    unique_constraints:
+    - application_number
+    - source_row_id
+    columns_not_in_view:
+    - name: scheme_key
+      meaning: FK to dim_scheme. Constant for this partition.
+      business_rules: [Never a grouping key within CM Elevate Legacy - it has one value.]
+    - name: disb_scheme_key
+      type: smallint
+      meaning: FK to dim_cm_elevate_disb_scheme. The view exposes scheme_name instead.
+      business_rules:
+      - Use scheme_name in generated SQL. The key is for the join the view already made.
+      - Never join it to dim_cm_elevate_scheme. That is the other scheme's 15-row dimension.
+    - name: first_name
+      type: text
+      meaning: Applicant's first name. PII, audit only.
+      business_rules:
+      - "EXCLUDED FROM THE VIEW and from semantic.v_embedding_documents (is_chatbot_visible = false). Never select it, never join to recover it."
+    - name: middle_name
+      type: text
+      meaning: Applicant's middle name. PII, audit only.
+      business_rules: [Excluded from the view. Null on 1,829 of 2,823 source rows.]
+    - name: last_name
+      type: text
+      meaning: Applicant's last name. PII, audit only.
+      business_rules: [Excluded from the view. Null on 14 source rows.]
+    - name: raw_id
+      meaning: FK to raw.source_rows for full lineage back to the source cell.
+      business_rules: [Not readable by megh_readonly - raw is outside the read boundary.]
+    - name: source_row_num
+      meaning: Audit.
+    - name: batch_id
+      type: uuid
+      meaning: Audit - the load batch.
+    - name: source_system
+      type: varchar(50)
+      default: "'cm_elevate_disbursement'"
+      meaning: Audit - constant for this partition, and the string that distinguishes it from 'cm_elevate'.
+    - name: ingested_at
+      type: timestamptz
+      meaning: Audit.
+    not_loaded_from_source:
+    - column: month
+      reason: >
+        Present in the source workbook, not carried into the curated layer - and it
+        is not a month in any useful sense. Only four values exist (Nov, Apr, Feb,
+        Mar) across two financial years; it is a disbursement-batch label. Monthly
+        analysis is impossible for this scheme and would be misleading if the column
+        were reinstated. PMAY is the only scheme in megh_db with a real monthly grain.
+    - column: mapped_constituency_name
+      reason: >
+        Present in the source workbook (55 values, e.g. '30 MAIRANG') and NOT loaded.
+        dim_geography does hold ac_name and ac_number, so the data exists in the
+        warehouse, but this view does not expose it. Constituency questions are a
+        refusal with a named fix - a view change, not a data gap. See README §5.2.
+    - column: mapped_constituency_name_and_number
+      reason: Same as mapped_constituency_name.
+    - column: loan_repaid
+      reason: >
+        Dead column - the value is 0 on all 2,823 source rows. Never present it as
+        'no loans have been repaid'; nothing about repayment is recorded here.
+    - column: version
+      reason: Dead column - constant 1. Extract artefact.
+    - column: scheme_master_id
+      reason: Dead column - constant 11. Extract artefact.
+    - column: created_date
+      reason: >
+        Dead column - a single timestamp 2026-09-03 04:40:48.282 on every row. It is
+        when the extract was produced, not when anything happened.
+    - column: updated_date
+      reason: Dead column - identical to created_date on every row.
+    - column: mapped_district_lgd_code
+      reason: Used to resolve geography_key at load; no code column survives in the curated layer.
+    - column: mapped_block_lgd_code
+      reason: Used to resolve geography_key at load; no code column survives in the curated layer.
+
+  # =========================================================================
+  # DIMENSIONS
+  # =========================================================================
+  dim_cm_elevate_disb_scheme:
+    table_name: curated.dim_cm_elevate_disb_scheme
+    object_type: table
+    column_count: 4
+    row_count: 13
+    grain: one row per scheme in the CM Elevate Disbursement file
+    primary_key: disb_scheme_key
+    scheme_scoped: true
+    columns:
+    - {name: disb_scheme_key,         type: smallint,    nullable: false, meaning: PK.}
+    - {name: scheme_name,             type: text,        nullable: false, meaning: The scheme as named in the source file. UNIQUE.}
+    - {name: application_id_prefixes, type: ARRAY,       nullable: true,  meaning: Observed application_number prefixes for this scheme.}
+    - {name: created_at,              type: timestamptz, nullable: false, meaning: Audit.}
+    business_rules:
+    - Pre-joined into the view as scheme_name. Do not join it yourself.
+    - "DISTINCT FROM curated.dim_cm_elevate_scheme (15 rows), which belongs to the separate CM_ELEVATE application scheme. Do not merge or cross-reference the two."
+    - "application_id_prefixes IS OBSERVATIONAL, NOT A RULE. 7 of the 13 schemes use more than one prefix, and one Poultry row carries Piggery's MPDSI prefix. Never use it to derive a scheme from an application_number."
+    - "KNOWN DEFECT IN THE DB COMMENT: it cites the cross-prefixed Poultry row as id=2045. That row is an ordinary MPFSI000961. The real one is source_row_id 1894, MPDSI001154."
+
+  dim_scheme:
+    table_name: curated.dim_scheme
+    object_type: table
+    column_count: 8
+    row_count: 6
+    grain: one row per scheme in the warehouse
+    primary_key: scheme_key
+    shared_across_schemes: true
+    columns:
+    - {name: scheme_key,     type: smallint,     nullable: false, meaning: PK.}
+    - {name: scheme_code,    type: varchar(40),  nullable: false, meaning: Short scheme code.}
+    - {name: scheme_name,    type: text,         nullable: false, meaning: Full scheme name.}
+    - {name: ministry,       type: varchar(100), nullable: true,  meaning: Owning ministry.}
+    - {name: grain_note,     type: text,         nullable: false, meaning: What one fact row means for this scheme.}
+    - {name: money_unit,     type: varchar(20),  nullable: false, meaning: The scheme's money unit.}
+    - {name: time_semantics, type: text,         nullable: false, meaning: What the year on a row means.}
+    - {name: created_at,     type: timestamptz,  nullable: false, meaning: Audit.}
+    business_rules:
+    - "AUTHORITY ON MONEY UNIT. Read money_unit rather than hardcoding 'rupees' - several units are live across megh_db."
+    - "UNREAD AT v1.0. The scheme_code for CM Elevate Legacy has not been read from the live table and is NOT recorded in this file. Do not invent one - read it. See README §7."
+    - "time_semantics matters here: this scheme's year is a STATED LABEL from the source, not a date-derived year. Carry that into any comparative answer."
+    - Constant within this partition, so never a grouping key.
+
+  dim_year:
+    table_name: curated.dim_year
+    object_type: table
+    column_count: 9
+    row_count: 9
+    grain: one row per financial year
+    primary_key: year_key
+    shared_across_schemes: true
+    coverage_in_this_partition: FY 2024-25 and FY 2025-26 only
+    business_rules:
+    - Pre-joined into the view as financial_year, financial_year_short and year_note.
+    - "The dimension holds 9 years; THIS SCHEME USES TWO. Do not offer a multi-year trend built on the dimension's range."
+    - "Reached by LEFT JOIN, so the 395 rows with no financial year are kept in the view and lost only when you group or filter on time."
+    - data_quality_note on a year must be surfaced with any answer covering that year.
+
+  dim_geography:
+    table_name: curated.dim_geography
+    object_type: table
+    column_count: 13
+    row_count: 7377
+    grain: one row per LGD village, ward or Unresolved placeholder
+    primary_key: geography_key
+    natural_key: village_code
+    shared_across_schemes: true
+    business_rules:
+    - "CONFORMED ACROSS EVERY SCHEME on the LGD village code, which is a national identifier. This is what makes cross-scheme comparison possible at all."
+    - Pre-joined into the view. Do not join it yourself.
+    - District and block exist as NAMES only - there is no district or block code column in the curated layer.
+    - "Documented as storing district and block UPPERCASE. Confirm for this partition - a mixed-case filter fails silently."
+    - "Carries ac_number and ac_name (assembly constituency), which this scheme's view does NOT expose. See not_loaded_from_source."
+    - "entity_type = 'Unresolved' rows are synthetic placeholders, not villages."
+
+  # =========================================================================
+  # CROSS-SCHEME VIEWS - this scheme is NOT in any of them
+  # =========================================================================
+  cross_scheme_availability:
+    status: NONE
+    note: >
+      curated.v_cross_scheme_money_district_year and
+      curated.v_cross_scheme_village_coverage exist, but both are built from
+      MGNREGA and PMAY only - CM Elevate Legacy does not appear in either. There
+      is NO sanctioned cross-scheme surface for this scheme at v1.0.
+    runtime_behavior: >
+      A question comparing CM Elevate Legacy money or coverage with another
+      scheme must be refused, with the reason that no cross-scheme view covers
+      this scheme yet. Do NOT substitute a fact-to-fact join - every one of them
+      is prohibited.
+
+# ===========================================================================
+# SCHEME PROFILES
+# One row per scheme, so an answer can say what shape a scheme has before it
+# quotes a number from it. All figures: source workbook 2026-09-23,
+# unverified_in_db.
+# ===========================================================================
+scheme_profiles:
+  provenance: source workbook, 2,823 rows, profiled 2026-09-23
+  columns_explained:
+    records: rows in the source
+    sanctioned_cr: SUM(sanctioned) in crore rupees
+    disbursed_cr: SUM(total_disbursement) in crore rupees
+    disbursed_pct: disbursed as a share of sanctioned
+    with_subsidy: records carrying any subsidy money
+    with_loan: records carrying any loan money
+    fixed_entitlement: the per-record sanction where the scheme pays a constant
+    financial_years: the FY labels present on the scheme's records
+  schemes:
+  - {scheme: Meghalaya Piggery Development Scheme,               records: 1353, sanctioned_cr: 16.91, disbursed_cr: 9.52,  disbursed_pct: 56.3, with_subsidy: 1353, with_loan: 211, fixed_entitlement: 125000, financial_years: ['2024-25']}
+  - {scheme: Meghalaya Poultry Farming Scheme,                   records: 454,  sanctioned_cr: 5.45,  disbursed_cr: 4.01,  disbursed_pct: 73.5, with_subsidy: 454,  with_loan: 219, fixed_entitlement: 120000, financial_years: ['2024-25']}
+  - {scheme: Meghalaya Sericulture & Weaving Scheme (spinning),  records: 198,  sanctioned_cr: 2.01,  disbursed_cr: 0.00,  disbursed_pct: 0.1,  with_subsidy: 0,    with_loan: 2,   fixed_entitlement: null, financial_years: []}
+  - {scheme: Meghalaya Sericulture & Weaving Scheme(weaving),    records: 197,  sanctioned_cr: 3.43,  disbursed_cr: 0.59,  disbursed_pct: 17.1, with_subsidy: 9,    with_loan: 17,  fixed_entitlement: null, financial_years: []}
+  - {scheme: Prime Agriculture Response Vehicle Scheme,          records: 192,  sanctioned_cr: 21.17, disbursed_cr: 14.21, disbursed_pct: 67.1, with_subsidy: 135,  with_loan: 135, fixed_entitlement: null, financial_years: ['2024-25', '2025-26']}
+  - {scheme: Meghalaya Dairy Development Scheme,                 records: 132,  sanctioned_cr: 3.96,  disbursed_cr: 1.27,  disbursed_pct: 32.1, with_subsidy: 130,  with_loan: 23,  fixed_entitlement: 300000, financial_years: ['2024-25']}
+  - {scheme: Prime Tourism Vehicle Scheme,                       records: 92,   sanctioned_cr: 17.60, disbursed_cr: 14.31, disbursed_pct: 81.3, with_subsidy: 78,   with_loan: 78,  fixed_entitlement: null, financial_years: ['2024-25', '2025-26']}
+  - {scheme: Meghalaya Agriculture Warehouse Scheme,             records: 87,   sanctioned_cr: 44.34, disbursed_cr: 22.62, disbursed_pct: 51.0, with_subsidy: 79,   with_loan: 63,  fixed_entitlement: null, financial_years: ['2024-25', '2025-26']}
+  - {scheme: Meghalaya Goat Farming Scheme,                      records: 48,   sanctioned_cr: 0.48,  disbursed_cr: 0.19,  disbursed_pct: 40.0, with_subsidy: 48,   with_loan: 0,   fixed_entitlement: 100000, financial_years: ['2024-25']}
+  - {scheme: Meghalaya Any Business Venture Scheme,              records: 33,   sanctioned_cr: 7.38,  disbursed_cr: 5.38,  disbursed_pct: 73.0, with_subsidy: 30,   with_loan: 27,  fixed_entitlement: null, financial_years: ['2024-25']}
+  - {scheme: Meghalaya Common Facility Center Scheme,            records: 27,   sanctioned_cr: 7.76,  disbursed_cr: 4.42,  disbursed_pct: 57.0, with_subsidy: 21,   with_loan: 23,  fixed_entitlement: null, financial_years: ['2024-25']}
+  - {scheme: Meghalaya Sports & Wellness Scheme,                 records: 9,    sanctioned_cr: 11.76, disbursed_cr: 5.87,  disbursed_pct: 49.9, with_subsidy: 7,    with_loan: 3,   fixed_entitlement: null, financial_years: ['2024-25']}
+  - {scheme: Meghalaya Motorcaravan Scheme,                      records: 1,    sanctioned_cr: 0.50,  disbursed_cr: 0.50,  disbursed_pct: 100.0, with_subsidy: 1,   with_loan: 1,   fixed_entitlement: 5000000, financial_years: ['2024-25']}
+  readings_the_generator_must_respect:
+  - "BIGGEST IS AMBIGUOUS. Piggery is the largest by records (1,353 of 2,823) and Agriculture Warehouse by money (Rs 44.34 Cr of Rs 142.74 Cr). A 'biggest scheme' question must say which measure it used."
+  - "SERICULTURE SPINNING HAS NO SUBSIDY AT ALL - 0 of 198 records - and only 2 loans. Its Rs 26,000 of disbursement comes from those two. Never describe it as underperforming without saying nothing was paid out at all."
+  - "GOAT FARMING HAS NO LOANS AT ALL - 0 of 48. A loan breakdown that shows Goat at zero is correct, not a gap."
+  - "PARV and Prime Tourism Vehicle pay subsidy and loan on the SAME records (135/135 and 78/78), so for those two schemes subsidy and loan are two halves of one package rather than alternatives."
+  - "Piggery takes loans on 211 of 1,353 records and Poultry on 219 of 454 - a far higher rate in the smaller scheme. A statewide 'how many took loans' figure hides that."
+
+# ===========================================================================
+# DATA-QUALITY REGISTER
+# Every anomaly found in this scheme, with the source_row_id that anchors it.
+# The register exists so an answer can name a specific record rather than
+# gesture at "some rows".
+# ===========================================================================
+data_quality_register:
+  provenance: source workbook, profiled 2026-09-23 (unverified_in_db)
+  in_the_database:
+  - id: DQ-01
+    rows: [1351, 1355, 1378, 1556]
+    column: subsidy_disbursement_date_1
+    finding: "Corrupted century in the source - literal strings 1015-01-15, 1014-11-06, 1014-11-20, 1015-02-18. All four are Piggery."
+    loaded_as: NULL
+    money_affected: false
+    money_note: all four amounts are intact at exactly Rs 31,250
+    recorded_in_db_comment: true
+    handling: Do not guess a corrected date. A date filter silently drops these four; a money total over the same filter is still complete.
+  - id: DQ-02
+    rows: [532]
+    column: loan_disbursement_date_1
+    finding: "A loan dated 1985-07-22 against a real Rs 20,000 Piggery loan, 39 years before the scheme existed."
+    loaded_as: as stored - it parses as a valid date
+    recorded_in_db_comment: false
+    handling: "MIN(loan_disbursement_date_1) returns 1985. Caveat every date extremum, and raise this row with the data owner."
+  - id: DQ-03
+    rows: [1602, 1696]
+    column: subsidy_disbursement_date_1
+    finding: "Dated 2026-09-04, one day AFTER the extract's own created_date of 2026-09-03."
+    loaded_as: as stored
+    recorded_in_db_comment: false
+    handling: A payment cannot post-date the file that reports it. Treat MAX() as suspect.
+  - id: DQ-04
+    rows: [321, 354, 376, 1760]
+    column: total_disbursement
+    finding: "Disbursed more than sanctioned. Three are Prime Tourism Vehicle, one Poultry."
+    recorded_in_db_comment: false
+    handling: Report as recorded and flag. A derived pending amount goes negative on these four - do not clamp it.
+  - id: DQ-05
+    rows: [2403, 2411, 2425]
+    column: sanctioned_amount
+    finding: "No sanctioned amount at all. All three are refusals under Meghalaya Any Business Venture Scheme with a written reason."
+    handling: The blank is explained by the refusal, not by a load fault. Excluded from averages, never counted as zero.
+  - id: DQ-06
+    rows: [2823]
+    column: every money column
+    finding: "A record with a sanctioned amount of 62,726 and nothing else - no disbursement, no dates, no financial year, no lender, no village."
+    handling: Present in the database as a row of NULLs. Not a placeholder flag - this scheme has none.
+  - id: DQ-07
+    rows: [429]
+    column: refused_reason_text
+    finding: "Carries desanctioned_reason_raw = 'Refused' AND refused_flag_raw = TRUE but a BLANK reason - and still received Rs 62,500."
+    recorded_in_db_comment: true
+    handling: The fifth candidate the database comment mentions. A missing reason does not mean a missing refusal.
+  - id: DQ-08
+    rows: [1415]
+    column: desanctioned_reason_raw
+    finding: "Marked 'Duplicate' with reason 'Repeated name' and the refusal flag set - and received Rs 62,500 anyway."
+    handling: The clearest single example of refusal and payment coexisting.
+  - id: DQ-09
+    rows: [1894]
+    column: application_number
+    finding: "A Poultry record carrying MPDSI001154, which is Piggery's prefix everywhere else."
+    recorded_in_db_comment: partially
+    correction:
+      critical: true
+      text: "The database comment on dim_cm_elevate_disb_scheme.application_id_prefixes cites this row as id=2045. That is wrong - id=2045 is an ordinary MPFSI000961. The correct row is source_row_id 1894."
+  not_in_the_database:
+  - id: DQ-10
+    rows: [2392]
+    finding: "The one QUARANTINED record - reason corrupted_identity. Its name fields read '4' / 'For' / 'All', i.e. the team name '4 For All', under MSWCS000042, Meghalaya Sports & Wellness Scheme."
+    handling:
+      critical: true
+      text: "Very likely a real organisation name rather than corruption. If so this scheme is short one record and Sports & Wellness is understated. Raise with the data owner; never reverse the quarantine in SQL. Any Sports & Wellness total should carry the caveat."
+  population_level:
+  - id: DQ-11
+    rows_affected: 395
+    finding: "No financial year - and they are EXACTLY the two Sericulture schemes, 198 spinning plus 197 weaving, with no record from any other scheme."
+    handling: A financial-year grouping removes Sericulture entirely rather than scattering stragglers. Report the bucket or say the schemes are excluded.
+  - id: DQ-12
+    rows_affected: 114
+    finding: "The stated financial year disagrees with the year implied by the first subsidy date - 77 stated 2024-25 deriving to 2025-26, 34 the other way, 2 to 2026-27, 1 to 2023-24."
+    handling: Never derive an FY from a date. An FY answer and a date-range answer over the same period will not reconcile.
+  - id: DQ-13
+    rows_affected: 404
+    finding: "No village - the locality could not be matched to any roster entry. District and block are known on all of them."
+    handling: Keep in district and state totals, exclude from village answers, state the count.
+  - id: DQ-14
+    rows_affected: 401
+    finding: "No loan entity recorded, and 19 of those carry loan money anyway."
+    handling: COALESCE the grouping so the bucket stays visible.
+  - id: DQ-15
+    rows_affected: 449
+    finding: "Zero disbursement against a real sanction. 195 are Sericulture spinning, 172 weaving."
+    handling: A recorded zero, not missing data. Test with = 0, never IS NULL.
+
+# ===========================================================================
+# WHAT THIS PARTITION CAN AND CANNOT ANSWER
+# Mapped against the 36 use cases in Use_Cases_-_CM_Elevate.xlsx so a
+# retrieval hit can be checked against the source of the request.
+# ===========================================================================
+use_case_coverage:
+  workbook: datasets/CMelevate Legacy/Use_Cases_-_CM_Elevate.xlsx
+  total_cases: 36
+  answerable: 18
+  answerable_with_clarification: 8
+  not_answerable: 10
+  bands:
+  - band: programme narrative
+    cases: [TC-01, TC-02, TC-03, TC-04, TC-05, TC-06, TC-07, TC-08, TC-09, TC-10]
+    verdict: NOT ANSWERABLE
+    reason: >
+      Objectives, beneficiaries, sectors, credit design, entrepreneurship framing, target
+      numbers, the application process - none of it is in this data and there is no
+      scheme document in this folder. Do not answer from general knowledge.
+  - band: counts and scheme mix
+    cases: [TC-11, TC-12, TC-13]
+    verdict: ANSWERABLE
+    note: TC-13 "which schemes have the highest number" needs the biggest-is-ambiguous caveat.
+  - band: sanction status
+    cases: [TC-14, TC-15, TC-16, TC-19, TC-35]
+    verdict: NOT ANSWERABLE AS WRITTEN
+    reason: >
+      TC-14 and TC-19 become "every record here is a sanction record" plus a count.
+      TC-15 (sanction rate), TC-16 (not sanctioned) and the sanctioned half of TC-35 are
+      refusals - see semantic_rules.sanction_status_rule.
+  - band: money
+    cases: [TC-17, TC-18, TC-24, TC-27, TC-30, TC-32]
+    verdict: ANSWERABLE AFTER CLARIFICATION
+    reason: every one of them says "disbursed" without saying which of the three.
+  - band: loan entity
+    cases: [TC-20, TC-21, TC-22]
+    verdict: ANSWERABLE
+    note: carry the 401-record unattributed bucket into the answer.
+  - band: financial year
+    cases: [TC-23, TC-25]
+    verdict: ANSWERABLE
+    note: two years only, and Sericulture is absent from both.
+  - band: geography
+    cases: [TC-26, TC-28, TC-29, TC-33, TC-34, TC-36]
+    verdict: ANSWERABLE
+    note: TC-34 (village drill-down) must exclude the 404 unresolved records and say so.
+  - band: constituency
+    cases: [TC-31, TC-32]
+    verdict: ANSWERABLE THROUGH THE DIM_GEOGRAPHY JOIN
+    reason: >
+      The view exposes no constituency column, but geography_key is a declared FK to
+      dim_geography, which holds ac_name / ac_number. The join reproduces the source's
+      mapped_constituency_name exactly (Mairang 52 = 52; 2026-09-25 use-case QA).
+  vocabulary_warning:
+    critical: true
+    text: >
+      The workbook calls every row an "application" and the programme "CM-ELEVATE". The
+      grain here is one applicant's sanction-and-disbursement record, and "CM-ELEVATE"
+      names a DIFFERENT scheme in this warehouse. Never adopt the workbook's wording in
+      an answer without translating it.
+
+# ===========================================================================
+semantic_rules:
+
+  scheme_disambiguation:
+    critical: true
+    text: >
+      "CM Elevate" names two different schemes in megh_db. This partition is the
+      DISBURSEMENT scheme (curated.v_cm_elevate_disbursement, 13 sub-schemes,
+      money and financial year). The other is the APPLICATION scheme
+      (curated.v_cm_elevate, 15 sub-schemes, no money and no time). They share no
+      identifier and the join between their facts is prohibited.
+    runtime_behavior: >
+      A bare "CM Elevate" question that needs money, disbursement, sanction,
+      loan or financial year belongs here. One that needs application status,
+      applicant category, on-hold or withdrawal belongs to the other partition.
+      A question that needs both cannot be answered by either and must be refused.
+      A sanction RATE is answered here as the share of THIS dataset's records carrying
+      a sanctioned amount, with the caveat that never-sanctioned applications live in
+      the other dataset (2026-09-25 use-case QA).
+
+  geography_hierarchy:
+  - lgd_district
+  - lgd_block
+  - lgd_village_name
+
+  geography_codes:
+  - village_code
+  geography_codes_note: >
+    Only the village code survives into the curated layer. The source workbook's
+    district and block codes are used at load and then dropped, so a question
+    asking for a district or block LGD code cannot be answered.
+
+  geography_unresolved_rule:
+    critical: true
+    text: >
+      404 source rows (14.3%) have no village and resolve to an Unresolved
+      placeholder. They are included at district grain so money and count totals
+      reconcile to the source file, and they must be EXCLUDED from every
+      village-count and village-list answer with
+      `AND entity_type <> 'Unresolved'`. State how many rows were set aside
+      whenever that predicate fires.
+
+  constituency_rule: >
+    The source workbook carries mapped_constituency_name, and dim_geography
+    carries ac_name / ac_number, but neither the fact nor the view exposes a
+    constituency column on this scheme. Constituency questions (use cases TC-31,
+    TC-32) are answered by joining curated.dim_geography on geography_key and
+    filtering g.ac_name - the same route Focus Legacy uses (2026-09-25 use-case QA). Records with
+    no village carry no constituency.
+
+  time_dimension: financial_year
+  time_dimensions_available: [financial_year, financial_year_short, year_key]
+  time_detail_columns: [subsidy_disbursement_date_1, subsidy_disbursement_date_2, subsidy_disbursement_date_3, loan_disbursement_date_1, loan_disbursement_date_2, loan_disbursement_date_3]
+  time_runtime_rule:
+    critical: true
+    text: >
+      A financial-year question uses the stored financial_year column, which comes
+      from the source's stated FY label. Do NOT derive a financial year from any
+      disbursement date. The two disagree: on 114 of 1,842 comparable source rows
+      the stated FY and the date-derived FY are different years, and 9 rows carry a
+      real date with no stated FY at all. Focus Legacy's equivalent check found
+      zero mismatches - this scheme is the opposite case. An FY answer and a
+      date-range answer over the same period will not reconcile, and if a question
+      asks for both, say so rather than presenting one as the other.
+  time_null_rule: >
+    year_key, financial_year and every disbursement date are nullable. 395 source
+    rows (14%) have no financial year. A GROUP BY or WHERE on time drops them
+    silently - count them and say so in the answer.
+  time_monthly_rule: >
+    MONTHLY ANALYSIS IS NOT AVAILABLE. The source's month column is not loaded,
+    and it holds only four values across two financial years - it is a
+    disbursement-batch label, not a time series. Do not offer a monthly trend, and
+    do not synthesise one from the disbursement dates without saying that the
+    dates disagree with the stated financial year.
+
+  disbursement_ambiguity:
+    critical: true
+    text: >
+      "Disbursed" is a THREE-WAY ambiguity in this scheme and "sanctioned" is a
+      fourth number that is not disbursement at all:
+        total_subsidy_disbursement  - grant paid            Rs 52.57 Cr
+        total_loan_disbursement     - credit extended       Rs 30.33 Cr
+        total_disbursement          - the two together      Rs 82.90 Cr
+        sanctioned_amount           - approved, not paid    Rs 142.74 Cr
+      (source workbook, unverified_in_db)
+    runtime_behavior: >
+      A bare "how much was disbursed" must be clarified, not guessed. Once the
+      user confirms the whole figure, total_disbursement is the measure. A
+      subsidy/loan split must never be presented as one number without labelling
+      which it is, and sanctioned must never be described as disbursed.
+
+  sanctioned_constant_rule: >
+    sanctioned_amount is a per-scheme CONSTANT for 6 of the 13 schemes - Piggery
+    125,000, Poultry 120,000, Dairy 300,000, Goat 100,000, Motorcaravan 5,000,000,
+    and Sericulture spinning near-constant. For those, AVG(sanctioned_amount) is
+    the entitlement restated rather than a statistic. Answer with the entitlement,
+    say that it is fixed, and offer the distribution if the user wants to see the
+    spread. This is the same situation as PMAY's 130,000 per house.
+
+  derived_totals_rule: >
+    total_subsidy_disbursement, total_loan_disbursement and total_disbursement are
+    each an exact sum of their components on all 2,823 source rows, verified twice
+    - once by the loader and once in this folder's profiling. Use the stored
+    totals. Never re-derive them by adding the tranche columns, and never present
+    a tranche sum as a check on the total; they are the same number.
+
+  refusal_disagreement:
+    critical: true
+    text: >
+      NO REFUSAL FIELD IS AUTHORITATIVE, and the three disagree:
+        desanctioned_reason_raw   52 Refused + 31 Duplicate, NULL on 2,740
+        refused_flag_raw          set on 8 rows, positive-only, NULL otherwise
+        refused_reason_text       populated on 7 rows, free text
+      Only 4 rows carry all three. source_row_id 429 carries the first two with a
+      blank reason. 2 flagged rows have no desanction reason at all. Of the 31
+      Duplicate rows only 6 have an observable same-name-same-scheme twin.
+    runtime_behavior: >
+      "How many were refused" is a CLARIFICATION, not a default. Every refusal
+      count must name the field it came from and state that the fields disagree.
+      Never silently union or intersect them.
+    money_caveat: >
+      REFUSAL DOES NOT STOP THE MONEY. 9 of the 52 Refused rows and 23 of the 31
+      Duplicate rows still carry a disbursement (unverified_in_db). Excluding
+      desanctioned rows from a money total is a CHOICE that changes the answer -
+      state it, never apply it silently.
+
+  sanction_status_rule:
+    critical: true
+    text: >
+      THERE IS NO SANCTION-STATUS COLUMN AND THERE CANNOT BE A SANCTION RATE.
+      Every row in this partition IS a sanction record - 2,820 of 2,823 carry a
+      sanctioned amount and the 3 that do not are refusals. The denominator "all
+      applications" lives in fact_cm_elevate_application, a different scheme with
+      no join key to this one.
+    runtime_behavior: >
+      "How many sanctioned" answers with the row count, stated as "every record in
+      this dataset is a sanction record", never as a filtered subset. "Sanction
+      rate" and "how many were not sanctioned" are REFUSED, with the reason that
+      the application population is a separate dataset with no linkage. The 83
+      desanctioned rows must NEVER be offered as "not sanctioned" - they are a
+      post-sanction outcome and that substitution is the most misleading answer
+      available in this partition.
+
+  applicant_term:
+    status: DEFINED_AS_RECORD_COUNT
+    reason: >
+      The grain is one applicant's sanction-and-disbursement record, and the name
+      columns are dropped from the view. "Applicant" and "beneficiary" can only
+      mean a record here.
+    runtime_behavior: >
+      For "how many applicants/beneficiaries" use COUNT(*) and state that the
+      answer is a record count.
+    distinct_behavior: >
+      COUNT(DISTINCT application_number) equals COUNT(*) - both are unique. There
+      is no de-duplication to perform and no distinct-person count to offer: the
+      same person can hold records under two schemes and nothing in the view
+      identifies them.
+    name_lookup: >
+      NOT POSSIBLE. first_name, middle_name and last_name are excluded from the
+      view and from the embedding layer. A name lookup returns "not held in this
+      data", never an improvised join to the fact table.
+
+  applicant_category_rule: >
+    THERE IS NO APPLICANT-CATEGORY COLUMN in this partition. The 5th character of
+    application_number resembles the Individual / Registered / Unregistered split
+    used by the CM Elevate APPLICATION scheme, but it is unreliable - two schemes
+    have five-letter acronyms whose 5th character is part of the acronym. Do not
+    parse it, and do not borrow applicant_category from the other scheme.
+
+  data_quality_findings:
+  - "source_row_id 1351, 1355, 1378, 1556 - subsidy_disbursement_date_1 corrupted century, loaded NULL, amounts intact at Rs 31,250 each."
+  - "source_row_id 532 - loan_disbursement_date_1 of 1985-07-22 against a real Rs 20,000 loan. Parses cleanly, survives into the database, NOT recorded in the DB comments."
+  - "source_row_id 1602, 1696 - subsidy_disbursement_date_1 of 2026-09-04, after the extract's own creation date."
+  - "source_row_id 321, 354, 376, 1760 - total_disbursement exceeds sanctioned_amount."
+  - "source_row_id 2392 - the one QUARANTINED row (corrupted_identity). Its name fields read '4' / 'For' / 'All', i.e. '4 For All', which is very likely a real Sports & Wellness team name rather than corruption. If so this partition is short one record and that scheme's sanctioned total is understated. Raise with the data owner; do not reverse the quarantine in SQL."
+
+  null_behavior: NULL is missing; never silently coerce NULL to zero. The exception is total_disbursement, where a stored 0 is a real 'nothing was paid' on 449 source rows.
+
+  identifier_behavior:
+  - cm_elevate_disb_fact_id and source_row_id are technical identifiers.
+  - application_number is an application identifier and IS unique - unlike PMAY's reg_no.
+  - village_code and geography_key are geographic identifiers.
+  - year_key, scheme_key and disb_scheme_key are dimension keys.
+  - Identifiers and keys must never be SUMed or AVGed.
+  - geography_key and cm_elevate_disb_fact_id are unstable across a reload - never export them.
+
+# ===========================================================================
+nlp_sql_rules:
+  read_only: true
+  allowed_operations: [SELECT]
+  default_from: curated.v_cm_elevate_disbursement
+
+  aggregation_defaults:
+    records: COUNT(*)
+    applicants: COUNT(*)
+    beneficiaries: COUNT(*)
+    sanctioned_amount: SUM(sanctioned_amount)
+    total_disbursement: SUM(total_disbursement)
+    subsidy: SUM(total_subsidy_disbursement)
+    loan: SUM(total_loan_disbursement)
+    average_disbursement: AVG(total_disbursement)
+    distinct_villages: COUNT(DISTINCT village_code)
+    distinct_schemes: COUNT(DISTINCT scheme_name)
+
+  mandatory_predicate:
+    clause: none
+    note: >
+      This partition has NO is_placeholder equivalent - there is no row to exclude
+      from every query, unlike PMAY. The conditional predicates are
+      `entity_type <> 'Unresolved'` for village-level answers only, and an
+      explicit, stated refusal filter when the user asks to exclude desanctioned
+      records.
+
+  date_behavior: >
+    A financial-year request filters or groups financial_year / financial_year_short.
+    A date-range request filters the relevant disbursement date column, and the
+    answer must say that dates and stated financial years disagree on some rows.
+    There is no monthly grouping.
+
+  comparison: >
+    Filter the requested period and GROUP BY the requested dimension; preserve the
+    distinction between a financial-year question and a date-range question, and
+    never present one as the other.
+
+  ranking: >
+    ORDER BY the requested aggregate and default top 5 when N is omitted for plural
+    'top' requests; singular 'highest/lowest' uses LIMIT 1. With only 13 schemes, a
+    'top schemes' request should usually return all 13 rather than a truncated list.
+
+  entity_behavior: >
+    Resolve exact scheme, district, block, village, loan entity and financial-year
+    values using canonical stored values and approved aliases before SQL generation.
+    District and block are documented as UPPERCASE in dim_geography. The two
+    Sericulture scheme names differ only by a space before the bracket.
+
+  unknown_entity: Do not guess; return not-found/did-you-mean.
+
+  join_behavior: >
+    The view pre-joins dim_cm_elevate_disb_scheme, dim_geography and dim_year, so
+    the generator emits NO joins for ordinary questions. Every fact-to-fact join is
+    prohibited, starting with fact_cm_elevate_application - see
+    cmelevatelegacy_foreign_key_augmentation.yaml.
+
+  cross_scheme_behavior: >
+    NOT AVAILABLE. No cross-scheme view includes this scheme. A comparison against
+    MGNREGA, PMAY, Focus+, Focus Legacy or CM Elevate applications is refused, not
+    improvised.
+
+  money_behavior: >
+    The view is in RUPEES (unconfirmed against dim_scheme.money_unit - see the
+    header). Convert explicitly, divide by 1e7 for crore, and state the unit in
+    every answer. Never mix a figure from this scheme with MGNREGA's LAKH columns.
+
+  disbursement_behavior: >
+    A bare 'disbursed' is ambiguous three ways and must be clarified before SQL is
+    emitted. Once clarified, use the stored total, never a sum of tranches.
+
+  refusal_behavior: >
+    A refusal question must name which of the three refusal fields it used and
+    state that they disagree. A money total must say whether desanctioned rows were
+    included.
+
+# ===========================================================================
+few_shot_examples:
+
+- question: How many records are there under CM Elevate Legacy?
+  explanation: One row is one applicant's sanction-and-disbursement record. There is no placeholder flag to exclude.
+  sql: |
+    SELECT COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement;
+
+- question: How many records are there under each scheme?
+  explanation: Thirteen schemes, heavily skewed towards Piggery. Return all of them rather than a top-N.
+  sql: |
+    SELECT scheme_name, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY records DESC;
+
+- question: What is the total amount disbursed under CM Elevate Legacy?
+  explanation: Only emitted after the gate confirms the user means subsidy and loan together. total_disbursement is stored and verified, so it is never re-derived from the tranches.
+  sql: |
+    SELECT ROUND(SUM(total_disbursement) / 1e7, 2) AS disbursed_cr
+    FROM curated.v_cm_elevate_disbursement;
+
+- question: How much was paid as subsidy and how much as loan?
+  explanation: The honest answer to an ambiguous 'disbursed' question - show the split rather than choosing one.
+  sql: |
+    SELECT ROUND(SUM(total_subsidy_disbursement) / 1e7, 2) AS subsidy_cr,
+           ROUND(SUM(total_loan_disbursement)    / 1e7, 2) AS loan_cr,
+           ROUND(SUM(total_disbursement)         / 1e7, 2) AS total_cr
+    FROM curated.v_cm_elevate_disbursement;
+
+- question: What is the total amount disbursed under each scheme?
+  explanation: Sanctioned is carried alongside so the answer cannot be misread as full payment of the sanction.
+  sql: |
+    SELECT scheme_name,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY disbursed_cr DESC;
+
+- question: What is the sanctioned amount for the Piggery scheme?
+  explanation: Piggery's sanction is a fixed entitlement, so the distribution is shown rather than an average that would restate the constant as a statistic.
+  sql: |
+    SELECT sanctioned_amount, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme'
+    GROUP BY sanctioned_amount
+    ORDER BY records DESC;
+
+- question: How many records are there in each district?
+  explanation: District is a name on dim_geography, pre-joined into the view and documented as stored uppercase.
+  sql: |
+    SELECT lgd_district, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY records DESC;
+
+- question: What is the total disbursement for West Garo Hills?
+  explanation: Unresolved rows are kept here on purpose - they belong to the district and dropping them would understate the district total.
+  sql: |
+    SELECT ROUND(SUM(total_disbursement) / 1e7, 2) AS disbursed_cr,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'WEST GARO HILLS';
+
+- question: How many villages received CM Elevate Legacy support in West Garo Hills?
+  explanation: A village count must exclude the Unresolved placeholders and count distinct codes, never names - 17 names are shared by more than one village.
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'WEST GARO HILLS'
+      AND entity_type <> 'Unresolved';
+
+- question: How many records could not be matched to a village?
+  explanation: The count that must accompany any village-level answer, so the excluded rows are visible rather than silently dropped.
+  sql: |
+    SELECT lgd_district, COUNT(*) AS unresolved_records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE entity_type = 'Unresolved'
+    GROUP BY lgd_district
+    ORDER BY unresolved_records DESC;
+
+- question: Show the number of records in each block of Ri Bhoi
+  explanation: Drill-down from district to block. Block is a name only; no block code exists in the curated layer.
+  sql: |
+    SELECT lgd_block, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE lgd_district = 'RI BHOI'
+    GROUP BY lgd_block
+    ORDER BY records DESC;
+
+- question: How many records are there for each financial year?
+  explanation: Only two financial years exist, and the rows with none are reported rather than dropped by the grouping.
+  sql: |
+    SELECT COALESCE(financial_year_short, '(no financial year)') AS financial_year,
+           COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY financial_year_short
+    ORDER BY financial_year;
+
+- question: What was the total disbursement in FY 2024-25?
+  explanation: The stored financial year is used, never a year derived from a disbursement date - the two disagree on some rows.
+  sql: |
+    SELECT ROUND(SUM(total_disbursement) / 1e7, 2) AS disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE financial_year_short = '2024-25';
+
+- question: How many records have no financial year?
+  explanation: 395 source rows carry no FY label. They vanish from every time series, so the count is offered before one is reported.
+  sql: |
+    SELECT COUNT(*) AS records_without_financial_year
+    FROM curated.v_cm_elevate_disbursement
+    WHERE year_key IS NULL;
+
+- question: Which loan entities are used, and how much went through each?
+  explanation: The unattributed bucket is kept visible - 19 rows carry loan money with no entity recorded.
+  sql: |
+    SELECT COALESCE(loan_entity, '(not recorded)') AS loan_entity,
+           COUNT(*) AS records,
+           ROUND(SUM(total_loan_disbursement) / 1e7, 2) AS loan_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY loan_entity
+    ORDER BY loan_cr DESC;
+
+- question: How many records were desanctioned?
+  explanation: Answers from one named field and reports both values, because the refusal fields disagree and none is authoritative.
+  sql: |
+    SELECT desanctioned_reason_raw, COUNT(*) AS records
+    FROM curated.v_cm_elevate_disbursement
+    WHERE desanctioned_reason_raw IS NOT NULL
+    GROUP BY desanctioned_reason_raw
+    ORDER BY records DESC;
+
+- question: Show how the refusal fields disagree
+  explanation: The cross-tab that must back any refusal answer. refused_flag_raw is positive-only, so IS DISTINCT FROM TRUE is used rather than NOT.
+  sql: |
+    SELECT COALESCE(desanctioned_reason_raw, '(none)') AS desanctioned_reason,
+           (refused_flag_raw IS TRUE)                  AS refused_flag,
+           (refused_reason_text IS NOT NULL)           AS has_reason_text,
+           COUNT(*)                                    AS records
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY 1, 2, 3
+    ORDER BY records DESC;
+
+- question: Did any desanctioned records still receive money?
+  explanation: They did. Excluding desanctioned rows from a money total is a choice that changes the answer, so the overlap is shown rather than assumed away.
+  sql: |
+    SELECT desanctioned_reason_raw,
+           COUNT(*)                                          AS records,
+           COUNT(*) FILTER (WHERE total_disbursement > 0)     AS with_disbursement,
+           ROUND(SUM(total_disbursement) / 1e7, 2)            AS disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    WHERE desanctioned_reason_raw IS NOT NULL
+    GROUP BY desanctioned_reason_raw;
+
+- question: Which schemes have the largest gap between sanctioned and disbursed?
+  explanation: The gap is the finding of this dataset - Sericulture spinning sanctioned crores and disbursed almost nothing.
+  sql: |
+    SELECT scheme_name,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS disbursed_cr,
+           ROUND(100.0 * SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0), 1) AS disbursed_pct
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY scheme_name
+    ORDER BY disbursed_pct;
+
+- question: How many records received no money at all?
+  explanation: Zero is a real recorded value here, not a missing one, so it is tested with = 0 rather than IS NULL.
+  sql: |
+    SELECT scheme_name, COUNT(*) AS records_with_no_disbursement
+    FROM curated.v_cm_elevate_disbursement
+    WHERE total_disbursement = 0
+    GROUP BY scheme_name
+    ORDER BY records_with_no_disbursement DESC;
+
+- question: Find the record with application number MPDSI018328
+  explanation: application_number is unique, so at most one row returns. Applicant names are not in the view, so the detail is scheme, geography, money and outcome.
+  sql: |
+    SELECT application_number, scheme_name, financial_year_short,
+           lgd_district, lgd_block, lgd_village_name,
+           sanctioned_amount, total_subsidy_disbursement,
+           total_loan_disbursement, total_disbursement,
+           loan_entity, desanctioned_reason_raw
+    FROM curated.v_cm_elevate_disbursement
+    WHERE application_number = 'MPDSI018328';
+
+- question: Give me a district-wise summary of records and disbursement
+  explanation: The administrative summary asked for by use case TC-36, with the sanction column alongside so the two are not confused.
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                                AS records,
+           ROUND(SUM(sanctioned_amount)  / 1e7, 2) AS sanctioned_cr,
+           ROUND(SUM(total_disbursement) / 1e7, 2) AS disbursed_cr
+    FROM curated.v_cm_elevate_disbursement
+    GROUP BY lgd_district
+    ORDER BY disbursed_cr DESC;
+
+# ---- questions that must be refused -----------------------------------
+- question: What percentage of applications have been sanctioned?
+  explanation: >
+    There is no sanction rate. Every row in this partition IS a sanction record;
+    the denominator - all applications - lives in fact_cm_elevate_application,
+    a different scheme with no join key to this one. Refuse and explain, and do
+    NOT substitute the 83 desanctioned rows, which are a post-sanction outcome
+    rather than a rejected application.
+  sql: null
+
+- question: How many applications were not sanctioned?
+  explanation: >
+    Same reason as the sanction rate. This dataset contains no unsanctioned
+    applications at all, so any number returned would be an answer to a different
+    question.
+  sql: null
+
+- question: Who received the largest disbursement?
+  explanation: >
+    first_name, middle_name and last_name are excluded from the view and from the
+    embedding layer, and there is no join that recovers them. Return the
+    application_number and scheme instead, and say that applicant names are not
+    held in the query surface.
+  sql: null
+
+- question: How many applications are mapped to Mairang constituency?
+  explanation: >
+    Constituency is in the source workbook and in dim_geography (ac_name), but it
+    is not carried onto this fact and not exposed by this view. This is a refusal
+    with a named fix - the view would have to expose ac_name - not a data gap.
+  sql: null
+
+- question: Show me the monthly disbursement trend
+  explanation: >
+    No monthly grain exists. The source's month column is not loaded and holds
+    only four values across two financial years - it is a batch label. Offer the
+    two financial years instead, and note that the disbursement dates disagree
+    with the stated financial year on some rows.
+  sql: null
+
+- question: What share of the sanctioned amount did the bank sanction?
+  explanation: >
+    bank_sanctioned_amount has no confirmed meaning. It is zero on half the rows
+    and its ratio to sanctioned_amount varies within a single scheme, so no share
+    or percentage may be built on it. Decline, and say the column's meaning is
+    unconfirmed with the client.
+  sql: null
+
+- question: Show the CM Elevate applications for these disbursement records
+  explanation: >
+    fact_cm_elevate_application is a DIFFERENT scheme despite the name. No shared
+    identifier exists between the two source files and the fact-to-fact join is
+    prohibited. Refuse; there is no bridge to offer.
+  sql: null
+
+- question: Compare CM Elevate Legacy and PMAY spending by district
+  explanation: >
+    No cross-scheme view includes this scheme - v_cross_scheme_money_district_year
+    covers MGNREGA and PMAY only. Refuse rather than improvising a join or
+    stitching two independent aggregates together without a sanctioned surface.
+  sql: null
+
+- question: What is the LGD code of East Khasi Hills district?
+  explanation: >
+    dim_geography carries village_code only. District and block exist as names,
+    with no code column in the curated layer.
+  sql: null
+
+- question: How many loans have been repaid?
+  explanation: >
+    Nothing about repayment is recorded. The source's loan_repaid column is 0 on
+    every row and was not loaded; answering "none" would present an empty column
+    as a finding.
+  sql: null
+
+- question: Update the sanctioned amount for an applicant
+  explanation: The read role permits SELECT only. Refuse rather than translating into write SQL.
+  sql: null

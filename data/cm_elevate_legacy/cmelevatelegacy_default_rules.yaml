@@ -1,0 +1,491 @@
+# cmelevatelegacy_default_rules.yaml
+#
+# Default rules for CM Elevate Legacy - node 5.5. Runs after the clarification
+# gate. Each rule fills a missing detail silently and hands the response composer
+# an assumption line, so the user can correct it without being interrupted first.
+# Editable by analysts - no code change needed.
+#
+# A condition must live in EITHER cmelevatelegacy_classification_rules.yaml OR
+# this file. The gate runs first, so any condition present in both will always
+# ask and never default. {placeholders} are filled from the resolved query at
+# runtime.
+#
+# ===========================================================================
+# v1.0 - 2026-09-23 - WRITTEN AGAINST THE LIVE DATABASE
+#
+# Reserved for the gate, NOT defaulted here - these are the five things this
+# scheme must never decide on the user's behalf:
+#
+#   1. WHICH CM ELEVATE. Two schemes share the name; only one has money.
+#   2. WHICH DISBURSEMENT. Subsidy, loan, or both - they differ by up to 64%.
+#   3. WHICH REFUSAL FIELD. Three fields disagree and none is authoritative.
+#   4. WHETHER DESANCTIONED RECORDS COUNT in a money total. It changes the answer.
+#   5. ANYTHING RESTING ON bank_sanctioned_amount, whose meaning is unconfirmed.
+#
+# EVERY NUMBER IN AN assumption_text BELOW IS A SOURCE-WORKBOOK FIGURE
+# (`Cm Elevate to share to BLH.xlsx`, profiled 2026-09-23, 2,823 rows) AND HAS
+# NOT BEEN RE-MEASURED AGAINST megh_db, which holds 2,822 after one quarantine.
+# A stated assumption with a stale number is still better than a silent one, but
+# re-verify before these reach a user.
+# ===========================================================================
+
+default_rules:
+
+  # ---- scheme identity - fires before everything else --------------------
+  - condition: "missing_scheme"
+    default_value: "cm_elevate_legacy"
+    assumption_text: "Answering from the CM Elevate Legacy sanction and disbursement records."
+
+  - condition: "scheme_resolved_to_this_partition"
+    default_value: "curated.v_cm_elevate_disbursement"
+    assumption_text: "Answered from the disbursement records - 13 schemes, with amounts and financial years."
+    note: >
+      Only fires once the gate has established which CM Elevate is meant, or when the
+      question names a field that exists only here - sanctioned, disbursed, subsidy,
+      loan, lender, financial year.
+
+  - condition: "all_schemes_in_partition"
+    default_value: "no_scheme_filter"
+    assumption_text: "Covering all 13 schemes in CM Elevate Legacy."
+
+  # ---- no mandatory exclusion in this scheme ----------------------------
+  - condition: "row_exclusion_unspecified"
+    default_value: "include_all_rows"
+    assumption_text: "All records are included."
+    note:
+      critical: true
+      text: >
+        UNLIKE PMAY, which excludes is_placeholder from every count and sum. This scheme
+        has NO such flag and no row that must always be dropped. The only conditional
+        exclusions are entity_type = 'Unresolved' for village-level answers, and an
+        explicitly stated refusal filter. Do not invent a blanket predicate.
+
+  - condition: "quarantined_row_in_completeness_question"
+    default_value: "state_the_gap"
+    assumption_text: "One source record was held back at load as a corrupted identity, so 2,822 of 2,823 are available."
+    note: >
+      source_row_id 2392. Its name fields read '4' / 'For' / 'All' - very likely a real
+      Sports & Wellness team name rather than corruption. If a Sports & Wellness total
+      is being reported, say the scheme may be short one record. Do not attempt to
+      recover it in SQL.
+
+  # ---- which measure ----------------------------------------------------
+  - condition: "bare_amount_term_after_clarification"
+    default_value: "total_disbursement"
+    assumption_text: "Using total disbursement - subsidy and loan together."
+    sql_effect: "SUM(total_disbursement)"
+    note: >
+      Fires only AFTER the gate's bare_disbursement_measure_ambiguous has been answered,
+      or when the user's wording already names the whole. Never a silent first choice.
+
+  - condition: "money_aggregation_unspecified"
+    default_value: "SUM"
+    assumption_text: "Amounts are summed across the selected records."
+
+  - condition: "derived_totals_requested"
+    default_value: "use_stored_total"
+    assumption_text: "Totals are read from the recorded total columns, which match the sum of their instalments exactly on every record."
+    note: >
+      total_subsidy_disbursement, total_loan_disbursement and total_disbursement are each
+      an exact sum of their components on all 2,823 rows, verified by the loader and again
+      in this folder's profiling. Never re-derive them by adding the tranche columns.
+
+  - condition: "utilisation_term"
+    default_value: "disbursed_over_sanctioned"
+    assumption_text: "Utilisation is total disbursed over total sanctioned - 58.1% statewide."
+    sql_effect: "SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0)"
+
+  - condition: "pending_amount_term"
+    default_value: "derive_and_label"
+    assumption_text: "Pending is calculated as sanctioned minus disbursed - it is not a recorded column in this scheme."
+    sql_effect: "SUM(sanctioned_amount) - SUM(total_disbursement)"
+    note:
+      critical: true
+      text: >
+        UNLIKE PMAY, where amount_pending is stored. Here it is a derivation and must be
+        labelled as one. Four records disburse MORE than they sanctioned, so the
+        derivation can go negative for a small group - do not clamp it to zero silently.
+
+  - condition: "subsidy_term_named"
+    default_value: "total_subsidy_disbursement"
+    assumption_text: "Subsidy means the grant paid, Rs 52.57 Cr statewide, excluding loans."
+    sql_effect: "SUM(total_subsidy_disbursement)"
+
+  - condition: "loan_term_named"
+    default_value: "total_loan_disbursement"
+    assumption_text: "Loan means the credit disbursed, Rs 30.33 Cr statewide, excluding subsidy."
+    sql_effect: "SUM(total_loan_disbursement)"
+
+  - condition: "tranche_unspecified_in_subsidy_question"
+    default_value: "use_total_not_tranche"
+    assumption_text: "Using the subsidy total rather than a single instalment; two instalments is the normal pattern."
+    note: >
+      1,863 records have two subsidy tranches, 469 have one, 13 have three, 478 have none.
+      Reach for a tranche column only when the question names first, second or third.
+
+  - condition: "sanctioned_term_named"
+    default_value: "sanctioned_amount"
+    assumption_text: "Sanctioned means the amount approved, Rs 142.74 Cr statewide - not the amount paid out."
+    sql_effect: "SUM(sanctioned_amount)"
+
+  - condition: "sanctioned_amount_ranking"
+    default_value: "report_with_entitlement_note"
+    assumption_text: "For the six schemes with a fixed entitlement, ranking by sanctioned amount is the same as ranking by number of records."
+
+  - condition: "bare_count_subject"
+    default_value: "count_records"
+    assumption_text: "Counted as records - one row is one applicant's sanction and disbursement under one scheme."
+
+  - condition: "applicant_uniqueness_unspecified"
+    default_value: "count_all_records"
+    assumption_text: "Counting records rather than people; the same person can hold records under more than one scheme and nothing in the data links them."
+    note: >
+      COUNT(DISTINCT application_number) equals COUNT(*) - both are unique. There is no
+      de-duplication to perform and no distinct-person count to offer.
+
+  # ---- refusal and outcome ----------------------------------------------
+  - condition: "refusal_field_resolved_to_desanctioned"
+    default_value: "desanctioned_reason_raw"
+    assumption_text: "Counted from the desanction reason - 52 refused and 31 marked duplicate. The other two refusal fields disagree with it."
+    sql_effect: "WHERE desanctioned_reason_raw IS NOT NULL"
+    note: >
+      Fires only after the gate has settled which field to use, or when the user's
+      wording names desanction or duplication specifically.
+
+  - condition: "not_refused_filter_requested"
+    default_value: "is_distinct_from_true"
+    assumption_text: "Not refused covers every record without a refusal flag, including those where nothing was recorded either way."
+    sql_effect: "WHERE refused_flag_raw IS DISTINCT FROM TRUE"
+    note:
+      critical: true
+      text: >
+        A CORRECTNESS FIX, the same shape as PMAY's is_completed rule. refused_flag_raw is
+        positive-only - it is TRUE on 8 rows and NULL everywhere else, never FALSE. So
+        `NOT refused_flag_raw` returns nothing at all. IS DISTINCT FROM TRUE is required.
+
+  - condition: "desanctioned_rows_in_money_total_after_clarification"
+    default_value: "include_and_state"
+    assumption_text: "Desanctioned records are included in the totals; 32 of them did receive money."
+    note: >
+      Fires only after the gate's exclude_desanctioned_from_money_unclear has been
+      answered. Including them is the default because the source file's own totals
+      include them.
+
+  - condition: "refusal_reason_text_requested"
+    default_value: "report_verbatim_with_count"
+    assumption_text: "Refusal reasons are free text and are recorded on only 7 records, so they are listed rather than grouped."
+    note: >
+      Never GROUP BY this column as if it were a coded dimension - the six values are
+      one-off sentences. One of them names a family circumstance; do not pair it with a
+      geography narrow enough to identify someone.
+
+  - condition: "loan_presence_filter"
+    default_value: "total_loan_disbursement_gt_zero"
+    assumption_text: "A record counts as having a loan when a loan amount is recorded."
+    sql_effect: "WHERE total_loan_disbursement > 0"
+    note: >
+      loan_disbursed_status says exactly the same thing - it is 'disbursed' precisely
+      where the amount is above zero on every row. Either works; the amount is preferred
+      because it is the measure being reported.
+
+  - condition: "zero_disbursement_rows"
+    default_value: "include_with_note"
+    assumption_text: "449 records with no disbursement are included; zero is recorded here, not missing."
+
+  # ---- time -------------------------------------------------------------
+  - condition: "missing_time_period"
+    default_value: "all_available_years"
+    assumption_text: "Covering all records held, across FY 2024-25 and FY 2025-26."
+
+  - condition: "relative_year_latest"
+    default_value: "2025-26"
+    assumption_text: "Taking the latest year as FY 2025-26, which holds 137 records against 2,291 in FY 2024-25."
+
+  - condition: "relative_year_previous"
+    default_value: "2024-25"
+    assumption_text: "Taking the previous year as FY 2024-25."
+
+  - condition: "relative_year_earliest"
+    default_value: "2024-25"
+    assumption_text: "Taking the earliest year as FY 2024-25 - only two financial years are held."
+
+  - condition: "comparison_without_second_period"
+    default_value: "the_other_financial_year"
+    assumption_text: "Compared against FY {other_year}, the only other year held."
+
+  - condition: "records_with_no_financial_year_in_time_query"
+    default_value: "report_separately"
+    assumption_text: "395 records carry no financial year and are reported separately rather than dropped."
+    sql_effect: "GROUP BY financial_year_short with COALESCE label, not WHERE year_key IS NOT NULL"
+    note:
+      critical: true
+      text: >
+        14% of the file. A bare GROUP BY or WHERE on the financial year makes them vanish
+        without a trace. The view keeps them via a LEFT JOIN precisely so they can be
+        reported.
+
+  - condition: "financial_year_requested"
+    default_value: "use_stored_financial_year"
+    assumption_text: "Financial years are read from the recorded year label, not calculated from the disbursement dates."
+    sql_effect: "WHERE financial_year_short = ..."
+    note:
+      critical: true
+      text: >
+        The two disagree on 114 of 1,842 comparable records, and 9 records carry a real
+        date with no stated year. Never emit a CASE expression over a disbursement date
+        to derive a financial year.
+
+  - condition: "date_range_requested"
+    default_value: "subsidy_disbursement_date_1"
+    assumption_text: "Dated by the first subsidy disbursement date; the recorded financial year may not agree with it on every record."
+    note: >
+      Four records have no usable first date at all - a corrupted century, loaded as NULL.
+      They drop out of any date filter while keeping their amounts in a non-dated total.
+
+  - condition: "time_dimension_unspecified"
+    default_value: "financial_year"
+    assumption_text: "Grouped by the recorded financial year."
+
+  - condition: "year_range_partly_outside_data"
+    default_value: "clamp_to_available_range"
+    assumption_text: "Only FY 2024-25 and FY 2025-26 are held, so the period has been trimmed to {applied_range}."
+
+  - condition: "no_records_in_requested_period"
+    default_value: "state_data_span"
+    assumption_text: "No records are held for {value}; this scheme covers FY 2024-25 and FY 2025-26 only."
+
+  # ---- geography --------------------------------------------------------
+  - condition: "missing_geography"
+    default_value: "all_districts"
+    assumption_text: "Covering all 12 districts of Meghalaya."
+
+  - condition: "whole_state_reference"
+    default_value: "no_district_filter"
+    assumption_text: "Figures are statewide."
+
+  - condition: "missing_breakdown_level"
+    default_value: "district"
+    assumption_text: "Broken down by district."
+
+  - condition: "geography_filter_form_unspecified"
+    default_value: "lgd_name_uppercase"
+    assumption_text: "Filtered on the LGD district name as stored."
+    note:
+      critical: true
+      text: >
+        dim_geography is documented as storing district and block UPPERCASE while the
+        source file is Title Case. A mixed-case exact match returns zero rows SILENTLY,
+        not as an error. Emit the stored form. CONFIRM the casing for this partition -
+        see README §7.
+
+  - condition: "unresolved_rows_in_district_or_state_total"
+    default_value: "include"
+    assumption_text: "Records whose village could not be identified are included in district and statewide figures, where their district is known."
+
+  - condition: "unresolved_rows_in_village_answer"
+    default_value: "exclude_and_state"
+    assumption_text: "404 records could not be matched to a village and are left out of village figures."
+    sql_effect: "AND entity_type <> 'Unresolved'"
+    note:
+      critical: true
+      text: >
+        The pair above and this one are the whole convention: KEEP them in district and
+        state totals so the figures reconcile to the source file, DROP them from anything
+        counted or listed per village, and say how many were set aside.
+
+  - condition: "village_count_requested"
+    default_value: "count_distinct_village_code"
+    assumption_text: "Villages are counted by LGD code, since 17 village names here are shared by more than one village."
+    sql_effect: "COUNT(DISTINCT village_code)"
+
+  - condition: "colliding_name_without_level"
+    default_value: "block"
+    assumption_text: "Reading {value} as a block, which is the level users usually mean."
+
+  - condition: "region_group_named"
+    default_value: "expand_to_member_districts"
+    assumption_text: "{region} covers {districts}."
+
+  - condition: "geo_conflict_villages_in_answer"
+    default_value: "include_with_note"
+    assumption_text: "Villages where sources disagree on the block or district are included, using the official roster value."
+
+  # ---- units ------------------------------------------------------------
+  - condition: "money_unit_unspecified"
+    default_value: "crore"
+    assumption_text: "Amounts are in crore rupees."
+    sql_effect: "ROUND(SUM(...) / 1e7, 2)"
+    note:
+      critical: true
+      text: >
+        The view stores RUPEES and the conversion is explicit - divide by 1e7. This is
+        INFERRED from magnitude (Piggery's 125,000 is Rs 1.25 lakh); the authority is
+        curated.dim_scheme.money_unit and it has NOT been read. Never add a figure from
+        this scheme to MGNREGA's LAKH columns or to PMAY's pre-aggregated CRORE views.
+
+  - condition: "single_record_money_value"
+    default_value: "rupees"
+    assumption_text: "Amounts are in rupees."
+
+  - condition: "money_below_one_crore"
+    default_value: "lakh"
+    assumption_text: "Amounts are in lakh rupees, as the figures are below one crore."
+
+  - condition: "percentage_precision_unspecified"
+    default_value: 2
+    assumption_text: "Percentages are rounded to two decimal places."
+
+  # ---- shape of the answer ----------------------------------------------
+  - condition: "missing_aggregation_function"
+    default_value: "count_records"
+    assumption_text: "Figures are counts of records."
+
+  - condition: "missing_top_n"
+    default_value: 5
+    assumption_text: "Showing the top 5."
+
+  - condition: "top_n_over_schemes"
+    default_value: "all_13"
+    assumption_text: "All 13 schemes are shown, since the list is short enough to read in full."
+    note: >
+      A truncated scheme list hides the long tail, which is where the interesting cases
+      are - Sericulture spinning disbursed 0.1% of its sanction, Motorcaravan has one
+      record.
+
+  - condition: "singular_superlative_without_n"
+    default_value: 1
+    assumption_text: "Showing the single highest."
+
+  - condition: "ranking_direction_unspecified"
+    default_value: "descending"
+    assumption_text: "Ranked highest first."
+
+  - condition: "missing_sort_column"
+    default_value: "requested_metric"
+    assumption_text: "Sorted by {metric}."
+
+  - condition: "missing_result_limit"
+    default_value: 10
+    assumption_text: "Showing the first 10 rows."
+
+  - condition: "record_listing_limit"
+    default_value: 100
+    assumption_text: "Showing the first 100 matching records."
+
+  - condition: "scheme_ordering_unspecified"
+    default_value: "by_record_count_desc"
+    assumption_text: "Schemes are listed largest first; Piggery alone is 48% of the records."
+
+  - condition: "chart_type_unspecified"
+    default_value: "auto_by_result_shape"
+    assumption_text: "Chart type chosen to suit the shape of the result."
+
+  - condition: "skew_in_statewide_figure"
+    default_value: "state_the_skew"
+    assumption_text: "Piggery is 1,353 of 2,823 records and pays a fixed Rs 1,25,000, so it dominates any statewide average."
+
+  # ---- scheme shape -----------------------------------------------------
+  - condition: "scheme_profile_requested"
+    default_value: "records_sanctioned_disbursed"
+    assumption_text: "A scheme summary shows records, amount sanctioned, amount disbursed and the share actually paid."
+
+  - condition: "fixed_entitlement_scheme_named"
+    default_value: "report_entitlement_not_average"
+    assumption_text: "{scheme} pays a fixed Rs {amount} to every applicant, so the figure quoted is the entitlement, not a spread."
+    note: >
+      Fires for the six constant schemes - Piggery 1,25,000, Poultry 1,20,000, Dairy
+      3,00,000, Goat 1,00,000, Motorcaravan 50,00,000, and Sericulture spinning at
+      62,726 on all but one record.
+
+  - condition: "varying_entitlement_scheme_named"
+    default_value: "show_range"
+    assumption_text: "{scheme} sanctions vary from Rs {min} to Rs {max}, so the average is a real average rather than a restated entitlement."
+    note: >
+      The seven varying schemes - Any Business Venture (20 distinct values), Prime
+      Tourism Vehicle (8), Sports & Wellness (7), PARV (6), Agriculture Warehouse (3),
+      Common Facility Center (3), Sericulture weaving (3).
+
+  - condition: "loan_breakdown_by_scheme"
+    default_value: "include_zero_rows"
+    assumption_text: "Schemes with no loans are shown as zero rather than left out - Goat Farming has none of its 48 records on a loan."
+
+  - condition: "vehicle_scheme_money_split"
+    default_value: "report_together_with_note"
+    assumption_text: "In the two vehicle schemes subsidy and loan are paid on the same records, so they are two halves of one package rather than alternatives."
+
+  - condition: "sericulture_named_without_split"
+    default_value: "both_spinning_and_weaving"
+    assumption_text: "Covering both Sericulture schemes, spinning and weaving, which are recorded separately."
+    note: >
+      Fires only when the gate's sericulture_spelling_ambiguous has not already asked.
+      Neither scheme carries a financial year, so any FY-scoped answer about Sericulture
+      is empty rather than zero.
+
+  # ---- data quality -----------------------------------------------------
+  - condition: "corrupted_date_rows_in_date_filter"
+    default_value: "exclude_and_state"
+    assumption_text: "Four records have no usable disbursement date and fall outside date filters; their Rs 31,250 payments remain in untimed totals."
+
+  - condition: "suspect_dates_in_range_filter"
+    default_value: "include_and_flag"
+    assumption_text: "Three records carry dates that look wrong - one loan dated 1985 and two payments dated after the file was produced - and are included as recorded."
+
+  - condition: "over_disbursed_rows_in_comparison"
+    default_value: "include_and_flag"
+    assumption_text: "Four records were disbursed more than they were sanctioned and are included as recorded."
+
+  - condition: "negative_derived_pending"
+    default_value: "show_as_negative"
+    assumption_text: "The pending figure is negative for the four over-disbursed records; it is shown as calculated rather than clamped to zero."
+
+  - condition: "duplicate_marked_records"
+    default_value: "treat_as_outcome_not_duplication"
+    assumption_text: "The 31 records marked 'Duplicate' are an outcome recorded against a record, not repeated rows - every application number here is unique."
+
+  # ---- comparison framing -----------------------------------------------
+  - condition: "scheme_comparison_without_measure"
+    default_value: "records_and_money"
+    assumption_text: "Schemes are compared on both record count and amount, since the largest by records and the largest by money are different schemes."
+
+  - condition: "district_money_without_counts"
+    default_value: "add_record_count"
+    assumption_text: "Record counts are shown alongside the money, since district totals are driven by which schemes happen to sit there."
+
+  - condition: "fy_comparison_scope"
+    default_value: "three_schemes_present_in_both"
+    assumption_text: "Only Prime Tourism Vehicle, Agriculture Warehouse and Prime Agriculture Response Vehicle appear in both financial years, so the comparison covers those three."
+
+  - condition: "small_denominator_rate"
+    default_value: "show_counts_with_rate"
+    assumption_text: "The counts are shown with the percentage, since {scope} holds only {records} records."
+
+  # ---- nulls and zeros --------------------------------------------------
+  - condition: "null_measure_values"
+    default_value: "exclude_from_average"
+    assumption_text: "Records with no amount recorded are left out of averages rather than counted as zero."
+    note: >
+      Three records have no sanctioned amount at all, all of them refusals under
+      Meghalaya Any Business Venture Scheme.
+
+  - condition: "zero_vs_null_money"
+    default_value: "treat_separately"
+    assumption_text: "A recorded zero means nothing was paid; a blank means nothing was recorded. The two are counted separately."
+    note:
+      critical: true
+      text: >
+        This scheme has both, and they mean different things. 449 records have
+        total_disbursement = 0, which is a real outcome. Never coerce NULL to zero, and
+        never describe a recorded zero as missing data.
+
+  - condition: "null_loan_entity_in_breakdown"
+    default_value: "show_as_not_recorded"
+    assumption_text: "401 records have no lender recorded and are shown as a separate group; 19 of them carry loan money."
+    sql_effect: "COALESCE(loan_entity, '(not recorded)')"
+
+  - condition: "null_refusal_fields_in_breakdown"
+    default_value: "show_as_none_recorded"
+    assumption_text: "Records with nothing recorded in a refusal field are shown as 'none recorded', which is not the same as 'not refused'."
+
+  - condition: "suspect_dates_in_extremum"
+    default_value: "report_and_flag"
+    assumption_text: "The earliest and latest dates include three values that look wrong - a 1985 loan date and two payments dated after the file was produced."

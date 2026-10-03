@@ -1,0 +1,2200 @@
+resolver_version: '1.0'
+resolver_name: cmelevate_entity_resolver
+display_name: CM Elevate Entity Resolver (Meghalaya) - curated star schema
+generated_from:
+- datasets/Cmelevate/CM_Elevate_AllSchemes_20260818_122217.xlsx
+- datasets/Cmelevate/Megh One AI - CM Elevate NLP Use Cases.xlsx
+- SCHEMA_FOR_DEVELOPERS.md (live database extract, 2026-09-04)
+generated_on: '2026-09-04'
+companion_schema: cmelevate_schema_partitions.yaml
+
+# ===========================================================================
+# v1.0 - 2026-09-04 - FIRST VERSION, WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# There is no flat-table predecessor for CM Elevate. Everything below was
+# derived from the live schema plus a profile of the 2026-08-18 API export.
+#
+# WHAT THIS RESOLVER HAS THAT PMAY'S DOES NOT
+#   * A SUB-SCHEME DIMENSION. CM Elevate is 15 schemes under one scheme_code.
+#     Resolving which of the 15 a user meant is the FIRST job, not an
+#     afterthought - it changes the answer more than geography does.
+#   * A SCHEME CODE INSIDE THE APPLICATION NUMBER. request_id segment 1 is a
+#     stable three-digit per-scheme code, so an application number alone
+#     identifies its scheme. Verified 1:1 across all 15 schemes.
+#   * A JSONB DIMENSION. gender lives in scheme_specific, not in a column.
+#   * WARDS AND URBAN BODIES. Unlike PMAY-G, which is rural only, CM Elevate
+#     reaches Municipal Boards and Town Committees, and 92 of its village names
+#     are ward names.
+#
+# WHAT PMAY'S RESOLVER HAS THAT THIS ONE CANNOT
+#   * No financial_year or calendar_year dimension - CM Elevate has NO DATE.
+#   * No status roll-up flags - no is_completed equivalent exists.
+#   * No money vocabulary - there is no amount column of any kind.
+#   These absences are recorded explicitly in `absent_dimensions` so the
+#   resolver refuses rather than improvising.
+#
+# All record counts, distinct counts and value distributions below are from the
+# source export (8,436 rows, profiled 2026-09-04) and have NOT been re-verified
+# against megh_db, which reports ~8,543 rows.
+#
+# CANONICAL-FORM WARNING, READ BEFORE TRUSTING THE BLOCK AND VILLAGE LISTS
+#   The catalogues below are the values the SOURCE EXPORT carries. The database
+#   resolves geography through dim_geography at ingest, so lgd_block and
+#   lgd_village_name hold the ROSTER's forms, which differ - most visibly, the
+#   source writes "Umling C & RD Block" where the roster is expected to hold
+#   "UMLING". Treat the source forms below as ALIASES to match on, and confirm
+#   the stored canonical forms against dim_geography before shipping. Flagged in
+#   maintenance.open_verification_tasks.
+# ===========================================================================
+
+description: >
+  Value-level entity resolution for the CM Elevate NLP-to-SQL bot. This file answers
+  exactly one question: the user typed some text - which stored database value did they
+  mean? It does NOT define column meanings or aggregation; that is the companion stage2
+  semantic schema. Resolve entities with this file FIRST, then hand the resolved
+  canonical values to schema linking and SQL generation.
+
+scheme:
+  id: cm_elevate
+  display_name: CM Elevate
+  full_name: CM Elevate (Meghalaya livelihood and enterprise programme)
+  scheme_code: CM_ELEVATE
+  state: Meghalaya
+  sub_scheme_count: 15
+  aliases: ["CM Elevate", "CMElevate", "CM-Elevate", "CM elevate scheme", "Elevate",
+            "Chief Minister's Elevate", "Chief Ministers Elevate", "CM Elevate programme",
+            "CME", "elevate programme", "CM Elevate Meghalaya"]
+  programme_note:
+    critical: true
+    text: >
+      CM Elevate is a PROGRAMME, not a scheme. One row in curated.dim_scheme covers
+      FIFTEEN individual schemes, separated by cm_scheme_key. A user saying "CM Elevate"
+      may mean the whole programme or one scheme inside it - see dimensions.cm_scheme
+      and the scheme_scope_missing default. A programme-level total with no sub-scheme
+      breakdown mixes 15 unrelated schemes into one number.
+
+tables:
+  applications: curated.v_cm_elevate               # primary query surface, 22 columns
+  fact: curated.fact_cm_elevate_application        # underlying fact, 20 columns
+  scheme_dim: curated.dim_cm_elevate_scheme        # the 15 sub-schemes
+  reconciliation: meta.v_reconciliation_cm_elevate # one row per sub-scheme endpoint
+  cross_scheme_coverage: curated.v_cross_scheme_village_coverage
+  cross_scheme_money: curated.v_cross_scheme_money_district_year   # CM Elevate NOT in it
+
+dataset_shape:
+  grain: one row per application (request_id) across all 15 CM Elevate schemes
+  row_count: unverified_in_db
+  row_count_note: >
+    The source export held 8,436 rows. megh_db reports ~8,543 by reltuples estimate.
+    Neither is an exact count and they do not agree.
+  single_table: false
+  emits_no_joins: >
+    curated.v_cm_elevate already pre-joins dim_cm_elevate_scheme and dim_geography, so
+    the generator emits WHERE and GROUP BY only. Both joins are INNER and both keys are
+    NOT NULL, so no rows are lost. The one routine exception is a scheme_specific
+    containment query, which must run against the fact to use the GIN index.
+
+# ---------------------------------------------------------------------------
+# HOW TO USE THIS FILE
+# ---------------------------------------------------------------------------
+how_to_use:
+  step_1_classify: >
+    Decide the entity type of each span of user text. Order matters because scheme names
+    contain place-like words and block names collide with village names. Try:
+    cm_scheme -> application_number -> district -> block -> village -> applicant_category
+    -> data_verified -> application_mode -> current_file_status -> current_level ->
+    gender -> measure.
+  step_2_normalise: Apply normalisation.fold to the user text and to candidate values.
+  step_3_match: Walk matching_pipeline in order; stop at the first stage that hits.
+  step_4_emit: Return an output_contract shape. Never put raw user text into SQL.
+  step_5_predicate: Build WHERE using the dimension's sql_predicate template.
+
+  hard_rules:
+  - "RESOLVE THE SUB-SCHEME FIRST. CM Elevate is 15 schemes. Almost every figure in this
+    partition changes by scheme - gender runs from 100% female (Sericulture) to 0%
+    (Green Taxi), and eight schemes do not reach all 12 districts."
+  - "THERE IS NO DATE. No financial_year, no calendar_year, no month. Any time span in
+    the user text resolves to entity_type: time and status: not_available. Never parse
+    request_id for a date, and never use ingested_at."
+  - "THERE IS NO MONEY. No amount, subsidy, loan, sanctioned or disbursed column. A
+    money span resolves to entity_type: measure and status: not_available. Never
+    substitute an application count."
+  - "lgd_district and lgd_block are stored UPPERCASE in dim_geography. lgd_village_name
+    keeps mixed case. Always compare case-folded, and emit the form the column stores."
+  - Villages are resolved by village_code, never by name alone. 36 village names in
+    this data map to more than one LGD code.
+  - "entity_type = 'Unresolved' is not a village. Exclude it from village counts and
+    village lists; keep it everywhere else."
+  - "Applicant names are not in the curated layer. citizen_name, epic_id, mobile_number,
+    pan_number and every bank_account field were stripped at ingest. A name lookup
+    returns not-held, never a guess."
+  - "'On hold' resolves to data_verified = 'On Hold', NEVER to the onhold boolean, which
+    is FALSE on every row and returns zero while looking correct."
+  - "Group applicant type on applicant_category, never on type_raw. The raw labels are
+    per-scheme and carry source typos preserved verbatim."
+  - "request_id is NOT unique - 36 numbers repeat across 64 rows, all inside Piggery.
+    Never treat it as a primary key, and never assume LIMIT 1 is safe."
+  - "Fold case on current_level and current_file_status before grouping - 'level1' and
+    'Level1' are the same level stored twice."
+  - NULL is missing, never zero. 389 rows have no verification outcome recorded.
+  - If more than one candidate survives, return ambiguous and ask. Never pick the first row.
+  - If nothing matches above the fuzzy floor, return not_found with suggestions. Never
+    invent a scheme, district, block, village or status value.
+
+# ---------------------------------------------------------------------------
+normalisation:
+  fold:
+  - trim and collapse internal whitespace to single spaces
+  - uppercase
+  - "strip trailing qualifier words: SCHEME, BLOCK, DISTRICT, VILLAGE, C&RD, C & RD BLOCK,
+     MUNICIPAL BOARD, TOWN COMMITTEE, MB, TC"
+  - "strip leading qualifier words: MEGHALAYA, THE"
+  - map & to AND
+  - treat - / ( ) and . as a single space, then re-collapse whitespace
+  squash: remove every non-alphanumeric character from the folded form
+  numeric_ids: >
+    village_lgd_code arrives from the source as a float (277617.0). Cast with int() and
+    strip any trailing .0 before comparing. Village codes in this data are 5 to 7 digit
+    integers with no letters.
+  meghalaya_prefix_rule:
+    critical: true
+    text: >
+      TEN OF THE 15 SCHEME NAMES BEGIN "Meghalaya". Stripping that prefix during folding
+      is what lets "piggery" reach "Meghalaya Piggery Development Scheme". Never treat a
+      leading "Meghalaya" as a geography token when the span is being classified as a
+      scheme.
+  application_ids: >
+    request_id is uppercase with slashes, e.g. REQ/001/001/10102025/188877. Uppercase and
+    strip spaces before matching. Match on the full string; see
+    identifiers.request_id.scheme_prefix for resolving the scheme from segment 1.
+
+matching_pipeline:
+- { stage: 1_exact,     test: folded user text == folded canonical, confidence: 1.0 }
+- { stage: 2_alias,     test: folded user text in the value's aliases, confidence: 0.98 }
+- { stage: 3_squash,    test: squashed user text == squashed canonical or alias, confidence: 0.95 }
+- { stage: 4_acronym,   test: district acronym table only, confidence: 0.95,
+    note: acronyms are defined for districts only - do not invent them for blocks or schemes }
+- stage: 5_contains
+  test: folded canonical is a whole-word substring of the user text or vice versa
+  confidence: 0.85
+  scheme_note: >
+    This stage carries most of the scheme resolution. "piggery", "goat", "warehouse" and
+    "cinema" are all whole-word substrings of exactly one scheme name.
+- stage: 6_fuzzy
+  test: RapidFuzz token_set_ratio over the dimension catalogue
+  accept_at: ">= 90 and runner-up at least 5 points lower"
+  ask_between: 80 - 89, or any score where the runner-up is within 5 points
+  reject_below: 80
+- stage: 7_embedding
+  test: BGE-small nearest neighbour over the dimension catalogue
+  use_when: fuzzy returned nothing at or above 80
+  accept_at: cosine >= 0.88 AND unique within its dimension
+- { stage: 8_fail, action: emit not_found with up to 5 suggestions }
+
+blocked_matches:
+  purpose: >
+    Pairs fuzzy matching gets wrong. Never let stage 6 or 7 resolve the left value to the
+    right one; require an exact or alias hit.
+  pairs:
+  # --- the three PRIME schemes are NOT interchangeable
+  - ["PRIME Tourism Vehicle Scheme", "PRIME Agriculture Response Vehicle Scheme"]
+  - ["PRIME Agriculture Response Vehicle Scheme", "PRIME Tourism Vehicle Scheme"]
+  - ["PRIME Small Enterprise Empowerment and Development (SEED)", "PRIME Tourism Vehicle Scheme"]
+  - ["PRIME Small Enterprise Empowerment and Development (SEED)", "PRIME Agriculture Response Vehicle Scheme"]
+  # --- two tourism schemes, different things
+  - ["Agro Tourism Villa Scheme", "PRIME Tourism Vehicle Scheme"]
+  - ["PRIME Tourism Vehicle Scheme", "Agro Tourism Villa Scheme"]
+  # --- vehicle schemes
+  - ["Meghalaya Motorcaravan Scheme", "Chief Minister's Green Taxi Scheme"]
+  - ["Chief Minister's Green Taxi Scheme", "Meghalaya Motorcaravan Scheme"]
+  # --- livestock schemes are four distinct schemes
+  - ["Meghalaya Piggery Development Scheme", "Meghalaya Poultry Farming Scheme"]
+  - ["Meghalaya Poultry Farming Scheme", "Meghalaya Piggery Development Scheme"]
+  - ["Meghalaya Goat Farming Scheme", "Meghalaya Poultry Farming Scheme"]
+  - ["Meghalaya Dairy Development Scheme", "Meghalaya Piggery Development Scheme"]
+  # --- geography pairs, inherited from the shared dim_geography
+  - [Laskein, Thadlaskein]
+  - [Thadlaskein, Laskein]
+  - [Mawkynrew, Mawkyrwat]
+  - [Mawkyrwat, Mawkynrew]
+  - [Mawsynram, Mawshynrut]
+  - [Mawshynrut, Mawsynram]
+  - [Saipung, Songsak]
+  - [Mairang, Mawiong]
+  # --- status values that mean different things
+  - ["On Hold", Invalid]
+  - [Invalid, Wrong]
+  - [Wrong, Invalid]
+  - [registered, unregistered]
+  - [unregistered, registered]
+  - [Sendback, Resubmit]
+  scheme_note:
+    critical: true
+    text: >
+      The scheme blocks matter more than the geography ones. "PRIME vehicle" is
+      genuinely ambiguous between two schemes of very different size (403 vs 339
+      applications) and very different applicant profile. Ask, never guess.
+
+output_contract:
+  resolved:
+    status: resolved
+    entity_type: cm_scheme | district | block | village | applicant_category |
+                 data_verified | current_file_status | current_level | application_mode |
+                 gender | application_number | measure
+    user_text: <verbatim span>
+    canonical: <exact stored value>
+    cm_scheme_key: <key, sub-scheme only>
+    lgd_code: <code, geography only>
+    confidence: <0-1>
+    matched_by: <pipeline stage>
+  ambiguous:
+    status: ambiguous
+    entity_type: <type>
+    user_text: <verbatim span>
+    candidates: [ { canonical, cm_scheme_key, lgd_code, district, block, applications } ]
+    question: <one short question naming the distinguishing attribute>
+  not_found:
+    status: not_found
+    entity_type: <type or unknown>
+    user_text: <verbatim span>
+    suggestions: [ up to 5 nearest catalogue values ]
+    message: state plainly that the value is not in the CM Elevate data.
+  not_available:
+    status: not_available
+    entity_type: measure | time
+    user_text: <verbatim span>
+    reason: <which column does not exist>
+    message: >
+      state plainly that CM Elevate does not hold this kind of value, and do not offer a
+      substitute of a different kind. Used for money and time spans - see
+      absent_dimensions.
+    note: >
+      NO PMAY COUNTERPART. PMAY could always answer a money or time question somehow;
+      CM Elevate cannot, and the resolver needs a shape that says so rather than
+      degrading to not_found, which implies a spelling problem.
+
+# ---------------------------------------------------------------------------
+overloaded_terms:
+  why: >
+    A handful of words map to more than one column, or to a column that does not exist.
+    Getting these wrong produces a confidently wrong answer, so they are listed
+    explicitly.
+
+  scheme:
+    readings:
+    - { means: "the CM Elevate programme as a whole", when: "the user says CM Elevate, the programme, or overall" }
+    - { means: "one of the 15 sub-schemes", when: "the user names or hints at a specific scheme" }
+    default: >
+      Ask when unclear. A programme total mixes 15 unrelated schemes; a scheme total is
+      often a handful of rows. The word carries far more weight here than in PMAY, where
+      there is only one scheme.
+
+  on_hold:
+    readings:
+    - { means: "data_verified = 'On Hold'", when: always }
+    critical: true
+    text: >
+      THE MOST DANGEROUS TERM IN THIS PARTITION. There is also a boolean column called
+      onhold, and it is FALSE on every one of the 8,436 source rows. A query against it
+      returns zero and looks perfectly correct. Always resolve "on hold", "held",
+      "held up" and "paused" to data_verified = 'On Hold' - about 1,199 applications.
+
+  pending:
+    readings:
+    - { means: "data_verified = 'On Hold'", when: "the user means applications awaiting a verification outcome" }
+    - { means: "not_available", when: "the user means money awaiting release" }
+    default: >
+      Read it as On Hold and say so. There is no pending AMOUNT in CM Elevate - PMAY's
+      amount_pending has no counterpart here.
+
+  status:
+    readings:
+    - { means: data_verified, when: "default - the only status field that varies usefully" }
+    - { means: current_file_status, when: "the user says file status, workflow, or where the file is" }
+    - { means: current_level, when: "the user says level or stage" }
+    default: >
+      data_verified. current_file_status is 98.4% one value and current_level is 98.6%
+      one value, so neither answers "what is the status split" usefully.
+
+  approved:
+    readings:
+    - { means: not_available, when: always }
+    critical: true
+    text: >
+      There is NO approval field. current_file_status = 'forward' means the file moved to
+      the next step, not that it was approved, and it covers 98.4% of rows. Never resolve
+      "approved", "sanctioned" or "cleared" to it. CM Elevate records applications, not
+      decisions.
+
+  sanctioned:
+    readings:
+    - { means: not_available, when: always }
+    note: >
+      DIFFERENT FROM PMAY, where "sanctioned" is a status, a measure and a date. In CM
+      Elevate it is none of those - there is no sanction stage, no sanctioned amount and
+      no sanction date. Resolve to not_available and say the data stops at the
+      application.
+
+  beneficiaries:
+    readings:
+    - { means: COUNT(*), when: default - the grain is one APPLICATION }
+    - { means: COUNT(DISTINCT request_id), when: "the user says distinct, unique, or individual" }
+    default: COUNT(*), and say the answer is an application count.
+    critical: true
+    text: >
+      An application is a REQUEST, not an award. Nothing in this data confirms that any
+      applicant received anything. Say "applications", never "beneficiaries who
+      received". request_id is not unique either, so the two counts can differ - report
+      both when they do.
+
+  applicants:
+    means: COUNT(*)
+    note: >
+      Same as beneficiaries. There is no person identifier, so distinct PEOPLE cannot be
+      counted at all - only distinct application numbers.
+
+  amount:
+    readings:
+    - { means: not_available, when: always }
+    critical: true
+    text: >
+      NO MONEY COLUMN EXISTS. Not sanctioned, not subsidy, not loan, not disbursed, not
+      pending. PMAY's three-way amount ambiguity has no counterpart here - there is
+      nothing to disambiguate between. Resolve to not_available.
+
+  type:
+    readings:
+    - { means: applicant_category, when: default }
+    - { means: cm_scheme, when: "the user says type of scheme or which type of scheme" }
+    default: applicant_category - individual, registered or unregistered.
+
+  mode:
+    means: application_mode
+    note: online or cmconnectcenter. The cleanest two-value field on this fact.
+
+  vehicle:
+    readings:
+    - { means: "PRIME Tourism Vehicle Scheme", when: "the user says tourism or taxi-for-tourists" }
+    - { means: "PRIME Agriculture Response Vehicle Scheme", when: "the user says agriculture or response" }
+    - { means: "Chief Minister's Green Taxi Scheme", when: "the user says taxi or green" }
+    - { means: "Meghalaya Motorcaravan Scheme", when: "the user says caravan or motorhome" }
+    default: ask. Four schemes involve vehicles and they are not interchangeable.
+
+  tourism:
+    readings:
+    - { means: "PRIME Tourism Vehicle Scheme", when: "the user mentions a vehicle, taxi or transport" }
+    - { means: "Agro Tourism Villa Scheme", when: "the user mentions a villa, homestay or accommodation" }
+    default: ask. 403 applications against 3 - picking wrong is not a rounding error.
+
+# ---------------------------------------------------------------------------
+cross_dimension_collisions:
+  measured:
+    village_names_mapping_to_more_than_one_code: 36
+    block_names_that_are_also_village_names: "unmeasured against dim_geography - see maintenance"
+    district_collisions: 0
+    scheme_word_collisions: "see disambiguation_rules"
+  colliding_village_names: [Chandigre, Bolchugre, Bollonggitok, Mawiong, Lumpyngngad,
+    Matchokgre, Dollonggre, Mawbri, Adugre, Aruagre, Mawhati, Ampanggre, Allagre,
+    Lumsohphoh, Demthring, Mawlein, Mawlieh, Mawlong, Mawryngkang, Mawsaw, Nogorpara,
+    Nongbah, Nongdom, Nongkynrih, Nonglang]
+  colliding_village_names_note: >
+    25 of the 36 shown. Chandigre maps to THREE different LGD codes; the rest map to two.
+    Always resolve a village to its code, and ask when more than one survives.
+  disambiguation_rules:
+  - If the user said "block" or "C&RD block", resolve as block.
+  - If the user said "village" or "gaon", resolve as village.
+  - With no qualifier, default to BLOCK - it is the administrative level users mean.
+  - State the assumption in the answer whenever the default fired on a colliding name.
+  - Districts never collide with anything; resolve them with no qualifier needed.
+  - "SCHEME WORDS BEAT PLACE WORDS. 'Warehouse', 'Cinema', 'Sports' and 'Villa' are
+    scheme words, not places. Classify a span as cm_scheme before trying geography."
+  - "'Meghalaya' at the start of a span is a scheme-name prefix on ten of the 15 schemes,
+    not a geography token. Strip it before classifying."
+
+# ---------------------------------------------------------------------------
+# ABSENT DIMENSIONS - no PMAY counterpart. These exist so the resolver refuses
+# rather than improvising a substitute.
+# ---------------------------------------------------------------------------
+absent_dimensions:
+  purpose: >
+    PMAY's resolver has a financial_year dimension and a money vocabulary. CM Elevate has
+    neither, and a resolver that simply lacked them would fall through to not_found,
+    implying the user mistyped something. These entries make the refusal explicit and
+    give it a reason.
+
+  time:
+    status: NOT_AVAILABLE
+    columns_that_do_not_exist: [year_key, financial_year, financial_year_short,
+                                sanction_date, application_date, month, quarter]
+    what_exists_instead: ingested_at
+    ingested_at_rule:
+      critical: true
+      text: >
+        ingested_at is on the fact and describes WHEN THE ROW WAS LOADED. It is not an
+        application date. Charting it would present ETL activity as applicant behaviour.
+        Never resolve a time span to it.
+    request_id_rule:
+      critical: true
+      text: >
+        request_id segment 4 looks like a date - REQ/001/001/10102025/224638. It is
+        unpadded and ambiguous: 6, 7 or 8 digits with leading zeros dropped, so 1032026
+        is validly 1-Mar-2026 or 10-Mar-2026. A naive parse over the source export
+        resolved only 3,038 of 8,436 rows and produced dates AFTER the export date.
+        Never parse it in generated SQL.
+    resolver_behaviour: >
+      Classify the span as entity_type: time and emit not_available with the reason
+      "CM Elevate applications carry no date in this warehouse". Do not offer a
+      did-you-mean list - it is not a spelling problem.
+    aliases_that_trigger_it: [year, this year, last year, 2024, 2025, FY, financial year,
+      month, monthly, quarter, trend, growth, over time, recent, latest, newest, oldest,
+      since, between, wave, April, November]
+
+  money:
+    status: NOT_AVAILABLE
+    columns_that_do_not_exist: [sanctioned_amount, subsidy, loan, total_disbursement,
+                                amount_released, amount_pending, unit_cost, tranche]
+    what_exists_instead: nothing
+    resolver_behaviour: >
+      Classify the span as entity_type: measure and emit not_available with the reason
+      "CM Elevate holds no monetary values in this warehouse". NEVER substitute an
+      application count - offer it only as an explicitly different question.
+    aliases_that_trigger_it: [amount, money, rupees, crore, lakh, sanctioned, disbursed,
+      disbursement, subsidy, loan, funds, spend, spending, expenditure, released,
+      pending amount, budget, cost, value, per beneficiary, average amount]
+
+  loan_channel:
+    status: NOT_AVAILABLE
+    columns_that_do_not_exist: [loan_entity, bank, lifcom]
+    resolver_behaviour: >
+      "Bank" and "LIFCOM" come from the requirement workbook, which describes a different
+      dataset. Emit not_available. Note that a bank_id field does survive in
+      scheme_specific for some schemes, but it holds an unresolvable numeric code with no
+      lookup table anywhere in megh_db - it is not a loan channel.
+
+  outcome_flags:
+    status: NOT_AVAILABLE
+    columns_that_do_not_exist: [desanctioned, refused, refusal_reason, approved]
+    what_exists_instead: data_verified
+    resolver_behaviour: >
+      Offer data_verified only if clearly relabelled as a data-verification outcome, not
+      a funding decision. is_withdraw exists but is FALSE on every row and means
+      withdrawn by the applicant - never present it as refusal.
+
+  person_identity:
+    status: DROPPED_AT_INGEST
+    columns_that_do_not_exist: [citizen_name, epic_id, mobile_number, pan_number,
+                                bank_account_number, bank_account_no, bank_account]
+    resolver_behaviour:
+      critical: true
+      text: >
+        Classify the span as entity_type: person_name and emit not_found with the reason
+        "personal names are not held in the curated layer" - NOT a did-you-mean list.
+        Never substitute request_id for a name.
+    retained_but_forbidden:
+      columns: [dob, email_id, address, member_id, family_id, pds_id,
+                account_holder_name, ifsc_code]
+      rule:
+        critical: true
+        text: >
+          These DID survive into scheme_specific because the loader's strip list does not
+          cover them, so they are queryable. They must never be resolved, surfaced,
+          exported or embedded. dob plus address plus village is re-identifying. If a
+          user names one, refuse and offer the same question as a group total.
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS
+# ---------------------------------------------------------------------------
+dimensions:
+
+  # =========================================================================
+  # THE SUB-SCHEME DIMENSION - resolve this first. No PMAY counterpart.
+  # =========================================================================
+  cm_scheme:
+    name_column: scheme_name
+    key_column: cm_scheme_key
+    endpoint_column: endpoint
+    source: curated.dim_cm_elevate_scheme, pre-joined into curated.v_cm_elevate
+    stored_case: as shown - mixed case, stored exactly
+    distinct: 15
+    closed_set: true
+    sql_predicate: "scheme_name = '<canonical>'"
+    sql_predicate_by_key: "cm_scheme_key = <key>"
+    prefer: >
+      Filter on scheme_name for readability. Use cm_scheme_key when scoping a
+      scheme_specific JSONB read, where the key is what the schema partition file
+      requires.
+    key_note: >
+      cm_scheme_key values are NOT listed below. They are assigned by the loader and have
+      not been read from the database. Resolve to scheme_name and let the view supply the
+      key. Flagged in maintenance.open_verification_tasks.
+    request_id_prefix_note:
+      critical: true
+      text: >
+        SEGMENT 1 OF request_id IS A STABLE PER-SCHEME CODE, verified 1:1 across all 15
+        schemes in the source export. REQ/001/... is always Piggery, REQ/233/... is
+        always PRIME Small Enterprise. This means an application number alone identifies
+        its scheme, with no lookup. The prefix is recorded on each value below.
+    alias_provenance: >
+      canonical and applications are read from the source export Summary sheet.
+      request_prefix is measured from request_id segment 1. Aliases are curated
+      linguistic forms.
+    distribution_warning:
+      critical: true
+      text: >
+        EXTREMELY SKEWED. The largest scheme has 3,621 applications and the smallest has
+        2 - a ratio of over 1,800:1. Six schemes have fewer than 15 applications. Never
+        emit a percentage for those without the denominator. See the default rules file.
+    values:
+
+    - canonical: "PRIME Small Enterprise Empowerment and Development (SEED)"
+      request_prefix: "233"
+      applications: 3621
+      share_pct: 42.9
+      districts: 12
+      aliases: ["PRIME Small Enterprise", "Prime Small Enterprise Empowerment",
+                "Small Enterprise Empowerment", "Small Enterprise", "PRIME SEED",
+                "Prime Seed", "SEED", "PRIME Small Enterprise Empowerment and Development Scheme",
+                "small business scheme", "enterprise empowerment", "PSEED"]
+      note: >
+        THE LARGEST SCHEME, 43% of the programme, and it is ABSENT from the requirement
+        workbook's 13-scheme list. A user working from that list will not know to ask for
+        it. Its raw applicant label is "Prime Seed individual" - note the internal name.
+
+    - canonical: "Meghalaya Piggery Development Scheme"
+      request_prefix: "001"
+      applications: 2982
+      share_pct: 35.3
+      districts: 12
+      aliases: ["Piggery", "Piggery Development", "Piggery Scheme", "pig", "pigs",
+                "pig farming", "pig rearing", "swine", "piggery development scheme",
+                "Meghalaya Piggery", "pig scheme"]
+      note: >
+        Second largest. Concentrated in Ri Bhoi (1,955 of 2,982). 74.3% female
+        applicants. ALL 36 duplicate request_ids fall in this scheme.
+
+    - canonical: "Meghalaya Poultry Farming Scheme"
+      request_prefix: "002"
+      applications: 488
+      share_pct: 5.8
+      districts: 12
+      aliases: ["Poultry", "Poultry Farming", "Poultry Scheme", "chicken", "hen",
+                "birds", "bird farming", "layer", "broiler", "Meghalaya Poultry",
+                "poultry farm scheme"]
+
+    - canonical: "PRIME Tourism Vehicle Scheme"
+      request_prefix: "017"
+      applications: 403
+      share_pct: 4.8
+      districts: 12
+      aliases: ["PRIME Tourism Vehicle", "Tourism Vehicle", "Tourist Vehicle",
+                "tourism vehicle scheme", "tourist taxi", "tourism cab", "PTV",
+                "Prime Tourism"]
+      note: >
+        Only 19.9% female - the most male-skewed large scheme. Together with Piggery, the
+        only scheme with meaningful non-Forward file statuses (89 sent back, 43
+        resubmitted). Do NOT confuse with Agro Tourism Villa.
+
+    - canonical: "PRIME Agriculture Response Vehicle Scheme"
+      request_prefix: "011"
+      applications: 339
+      share_pct: 4.0
+      districts: 12
+      aliases: ["PRIME Agriculture Response Vehicle", "Agriculture Response Vehicle",
+                "Agri Response Vehicle", "ARV", "response vehicle", "agriculture vehicle",
+                "agri vehicle", "Prime Agriculture Vehicle"]
+      note: >
+        14.7% female - the lowest of any scheme above n=10. Highest share of registered
+        bodies among the large schemes (30 of 339), and the most scheme-specific fields
+        of any scheme (81 source columns).
+
+    - canonical: "Meghalaya Dairy Development Scheme"
+      request_prefix: "004"
+      applications: 294
+      share_pct: 3.5
+      districts: 11
+      aliases: ["Dairy", "Dairy Development", "Dairy Scheme", "milk", "milch",
+                "cattle", "cow", "cows", "dairy farming", "Meghalaya Dairy"]
+      note:
+        critical: true
+        text: >
+          A DOUBLE OUTLIER AND THE ONLY LARGE SCHEME NOT STATEWIDE - 11 districts, not 12.
+          Only 39.8% applied online against 70-100% everywhere else, and only 52.7% are
+          verified Valid against 75-100% elsewhere. Report both as observed; the data does
+          not explain either.
+
+    - canonical: "Meghalaya Any Business Venture Scheme"
+      request_prefix: "006"
+      applications: 136
+      share_pct: 1.6
+      districts: 12
+      aliases: ["Any Business Venture", "Business Venture", "any business",
+                "business scheme", "general business", "ABV", "Meghalaya Any Business"]
+      note: >
+        The stored raw applicant label carries a source typo, "Any Bussiness Venture".
+        Never surface type_raw for this scheme.
+
+    - canonical: "Meghalaya Goat Farming Scheme"
+      request_prefix: "003"
+      applications: 98
+      share_pct: 1.2
+      districts: 12
+      aliases: ["Goat", "Goat Farming", "Goatery", "goats", "goat rearing",
+                "goat scheme", "Meghalaya Goat"]
+      note: >
+        Every applicant is an individual. The stored raw label uses "goatery", not
+        "goat" - another reason to group on applicant_category, not type_raw.
+
+    - canonical: "Meghalaya Warehouse Scheme"
+      request_prefix: "010"
+      applications: 38
+      share_pct: 0.5
+      districts: 9
+      aliases: ["Warehouse", "Warehousing", "Agriculture Warehouse", "godown",
+                "storage", "cold storage", "warehouse scheme", "Meghalaya Warehouse"]
+      note:
+        critical: true
+        text: >
+          THE ONLY SCHEME WHERE REGISTERED BODIES OUTNUMBER INDIVIDUALS - 20 registered
+          against 18 individual. Every "applicants are individuals" assumption is wrong
+          here. Reaches 9 districts, not 12. The requirement workbook calls this the
+          highest-value scheme at Rs 22.62 Cr; no amount is held in this database.
+
+    - canonical: "Meghalaya Sericulture & Weaving Scheme"
+      request_prefix: "018"
+      applications: 14
+      share_pct: 0.2
+      districts: 1
+      aliases: ["Sericulture", "Sericulture and Weaving", "Weaving", "silk",
+                "silk rearing", "spinning", "handloom", "Sericulture Scheme",
+                "Sericulture and Weaving Spinning", "Meghalaya Sericulture"]
+      note:
+        critical: true
+        text: >
+          SINGLE-DISTRICT SCHEME - all 14 applications are in Ri Bhoi, one block, about 4
+          villages. A district breakdown returns one row. 100% female applicants.
+          HELD AS ONE SCHEME, not split into Spinning and Weaving as the requirement
+          workbook assumes (it claims 200 and 197 applications; the real figure is 14
+          combined). The dimension's applicant_types_seen array records a non-standard
+          label, "Sericulture Spinning Collectives", for this scheme.
+
+    - canonical: "Chief Minister's Green Taxi Scheme"
+      request_prefix: "232"
+      applications: 10
+      share_pct: 0.1
+      districts: 7
+      aliases: ["Green Taxi", "CM Green Taxi", "Chief Minister's Green Taxi",
+                "green taxi scheme", "taxi", "electric taxi", "e-taxi", "cab scheme"]
+      note: 100% male applicants and 100% verified Valid - but n=10, so neither is a finding.
+
+    - canonical: "Meghalaya Sports & Wellness Centre Scheme"
+      request_prefix: "007"
+      applications: 6
+      share_pct: 0.1
+      districts: 3
+      aliases: ["Sports and Wellness", "Sports and Wellness Centre", "sports centre",
+                "sports center", "wellness centre", "gym", "fitness centre",
+                "Meghalaya Sports"]
+
+    - canonical: "Agro Tourism Villa Scheme"
+      request_prefix: "015"
+      applications: 3
+      share_pct: 0.04
+      districts: 2
+      aliases: ["Agro Tourism Villa", "Agro Tourism", "Agri Tourism", "villa",
+                "homestay", "farm stay", "agro villa", "tourism villa"]
+      note: Do NOT confuse with PRIME Tourism Vehicle - 3 applications against 403.
+
+    - canonical: "Meghalaya Motorcaravan Scheme"
+      request_prefix: "012"
+      applications: 2
+      share_pct: 0.02
+      districts: 1
+      aliases: ["Motorcaravan", "Motor Caravan", "caravan", "campervan", "motorhome",
+                "camper", "Meghalaya Motorcaravan"]
+      note: >
+        n=2, both in East Khasi Hills. Any breakdown is a listing, not an analysis. The
+        stored raw applicant label is misspelled "Motorcarvan" - another type_raw trap.
+
+    - canonical: "Meghalaya Cinema Theatre Scheme"
+      request_prefix: "008"
+      applications: 2
+      share_pct: 0.02
+      districts: 2
+      aliases: ["Cinema Theatre", "Cinema", "Theatre", "cinema hall", "movie theatre",
+                "multiplex", "Meghalaya Cinema"]
+
+    not_in_this_data:
+      critical: true
+      values: ["Common Facility Center", "Common Facility Centre", "CFC"]
+      rule: >
+        The requirement workbook (UC-083) asks for a Common Facility Center scheme. IT
+        DOES NOT EXIST in megh_db. Return not_found with the 15 real scheme names as
+        did-you-mean candidates. Never fuzzy-match it onto a real scheme - "Sports and
+        Wellness Centre" is the nearest string and is a completely different scheme.
+
+  # =========================================================================
+  # GEOGRAPHY - shared with every other scheme through dim_geography
+  # =========================================================================
+  district:
+    name_column: lgd_district
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    case_note: >
+      The source export writes Title Case ("West Garo Hills") and hyphenates Ri-Bhoi.
+      dim_geography stores district UPPERCASE. The canonical names below are kept in
+      Title Case for display and matching - emit the uppercase form in the predicate.
+    distinct: 12
+    complete: true            # CM Elevate reaches all 12 Meghalaya districts
+    collisions: none
+    sql_predicate: "lgd_district = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    code_note: >
+      dim_geography carries village_code only. The lgd_code values below are useful for
+      RESOLVING a code the user typed to a district name, but the code can never appear
+      in a WHERE clause. A question asking for a district's LGD code is unanswerable.
+    prefer: Filter on the name. There is no alternative.
+    alias_provenance: >
+      canonical and lgd_code are the LGD standard, carried over from the shared
+      dim_geography catalogue. applications, blocks, villages and schemes are measured
+      from the CM Elevate source export. Acronyms and spelling variants are curated.
+    distribution_note: >
+      Heavily skewed - Ri Bhoi holds 2,592 applications and East Jaintia Hills 154, a
+      17:1 range. Ri Bhoi's share is driven almost entirely by Piggery (1,955 of its
+      2,592).
+    values:
+    - canonical: "Ri Bhoi"
+      lgd_code: 276
+      acronym: RB
+      region: "Ri Bhoi"
+      applications: 2592
+      blocks: 5
+      villages: 321
+      schemes_present: 13
+      aliases: ["RB", "R.B.", "Ribhoi", "Ri-Bhoi", "Ri Bhoi District", "Nongpoh district", "Bhoi"]
+      note: >
+        THE SOURCE EXPORT WRITES "Ri-Bhoi" WITH A HYPHEN and the requirement workbook
+        writes "Ri Bhoi" without one. Both resolve to the stored uppercase form.
+
+    - canonical: "West Garo Hills"
+      lgd_code: 278
+      acronym: WGH
+      region: "Garo Hills"
+      applications: 1676
+      blocks: 8
+      villages: 389
+      schemes_present: 11
+      aliases: ["WGH", "W.G.H.", "West Garo Hill", "West Garo", "W Garo Hills", "W Garo Hill", "W Garo", "WestGaroHills", "West Garo Hills District", "Tura district"]
+
+    - canonical: "East Khasi Hills"
+      lgd_code: 274
+      acronym: EKH
+      region: "Khasi Hills"
+      applications: 1017
+      blocks: 12
+      villages: 364
+      schemes_present: 12
+      aliases: ["EKH", "E.K.H.", "East Khasi Hill", "East Khasi", "E Khasi Hills", "E Khasi Hill", "E Khasi", "EastKhasiHills", "East Khasi Hills District", "Shillong district"]
+      note: Most blocks of any district (12), and the only district present in 12 of the 15 schemes.
+
+    - canonical: "East Garo Hills"
+      lgd_code: 273
+      acronym: EGH
+      region: "Garo Hills"
+      applications: 607
+      blocks: 4
+      villages: 136
+      schemes_present: 10
+      aliases: ["EGH", "E.G.H.", "East Garo Hill", "East Garo", "E Garo Hills", "E Garo Hill", "E Garo", "EastGaroHills", "East Garo Hills District", "Williamnagar district"]
+
+    - canonical: "West Khasi Hills"
+      lgd_code: 279
+      acronym: WKH
+      region: "Khasi Hills"
+      applications: 495
+      blocks: 4
+      villages: 160
+      schemes_present: 12
+      aliases: ["WKH", "W.K.H.", "West Khasi Hill", "West Khasi", "W Khasi Hills", "W Khasi Hill", "W Khasi", "WestKhasiHills", "West Khasi Hills District", "Nongstoin district"]
+
+    - canonical: "South Garo Hills"
+      lgd_code: 277
+      acronym: SGH
+      region: "Garo Hills"
+      applications: 461
+      blocks: 5
+      villages: 149
+      schemes_present: 8
+      aliases: ["SGH", "S.G.H.", "South Garo Hill", "South Garo", "S Garo Hills", "S Garo Hill", "S Garo", "SouthGaroHills", "South Garo Hills District", "Baghmara district"]
+
+    - canonical: "South West Khasi Hills"
+      lgd_code: 658
+      acronym: SWKH
+      region: "Khasi Hills"
+      applications: 414
+      blocks: 3
+      villages: 104
+      schemes_present: 9
+      aliases: ["SWKH", "S.W.K.H.", "South West Khasi Hill", "South West Khasi", "S W Khasi Hills", "S W Khasi Hill", "S W Khasi", "SouthWestKhasiHills", "South West Khasi Hills District", "Mawkyrwat district", "S West Khasi Hills"]
+
+    - canonical: "Eastern West Khasi Hills"
+      lgd_code: 740
+      acronym: EWKH
+      region: "Khasi Hills"
+      applications: 331
+      blocks: 3
+      villages: 103
+      schemes_present: 9
+      aliases: ["EWKH", "E.W.K.H.", "Eastern West Khasi Hill", "Eastern West Khasi", "Eastern W Khasi Hills", "Eastern W Khasi Hill", "Eastern W Khasi", "EasternWestKhasiHills", "Eastern West Khasi Hills District", "Mairang district", "E West Khasi Hills", "Eastern WKH"]
+
+    - canonical: "North Garo Hills"
+      lgd_code: 656
+      acronym: NGH
+      region: "Garo Hills"
+      applications: 268
+      blocks: 4
+      villages: 103
+      schemes_present: 8
+      aliases: ["NGH", "N.G.H.", "North Garo Hill", "North Garo", "N Garo Hills", "N Garo Hill", "N Garo", "NorthGaroHills", "North Garo Hills District", "Resubelpara district"]
+
+    - canonical: "West Jaintia Hills"
+      lgd_code: 275
+      acronym: WJH
+      region: "Jaintia Hills"
+      applications: 235
+      blocks: 4
+      villages: 80
+      schemes_present: 11
+      aliases: ["WJH", "W.J.H.", "West Jaintia Hill", "West Jaintia", "W Jaintia Hills", "W Jaintia Hill", "W Jaintia", "WestJaintiaHills", "West Jaintia Hills District", "Jowai district"]
+
+    - canonical: "South West Garo Hills"
+      lgd_code: 663
+      acronym: SWGH
+      region: "Garo Hills"
+      applications: 186
+      blocks: 3
+      villages: 85
+      schemes_present: 9
+      aliases: ["SWGH", "S.W.G.H.", "South West Garo Hill", "South West Garo", "S W Garo Hills", "S W Garo Hill", "S W Garo", "SouthWestGaroHills", "South West Garo Hills District", "Ampati district", "S West Garo Hills"]
+      note: >
+        The requirement workbook calls Zikzak the largest block with 243 applications.
+        In this data Zikzak holds 78, and the largest block is Umling in Ri Bhoi with
+        1,130. That figure describes a different extract.
+
+    - canonical: "East Jaintia Hills"
+      lgd_code: 657
+      acronym: EJH
+      region: "Jaintia Hills"
+      applications: 154
+      blocks: 3
+      villages: 46
+      schemes_present: 8
+      aliases: ["EJH", "E.J.H.", "East Jaintia Hill", "East Jaintia", "E Jaintia Hills", "E Jaintia Hill", "E Jaintia", "EastJaintiaHills", "East Jaintia Hills District", "Khliehriat district"]
+      note: Smallest district in the programme - 154 applications, 46 villages.
+
+  block:
+    name_column: lgd_block
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    case_note: >
+      Canonical names below are Title Case for matching; emit the uppercase form.
+    distinct: 58
+    sql_predicate: "lgd_block = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    code_note:
+      critical: true
+      text: >
+        THE SOURCE CARRIES block_lgd_code AND IT IS NEVER TRUSTED - a confirmed
+        incompatible numbering system. No block codes are listed below, deliberately.
+        The block on any CM Elevate row comes from the dim_geography join. Do not
+        reintroduce the raw code from raw.source_rows, and do not offer it as an
+        alternative to the name.
+    scope_by_district_when_given: true
+    canonical_form_warning:
+      critical: true
+      text: >
+        THE CANONICAL FORMS BELOW ARE DERIVED, NOT READ FROM dim_geography. The source
+        export writes "Umling C & RD Block"; the roster is expected to store "UMLING".
+        The canonical value below is the source form with its suffix stripped, and the
+        full source form is kept as an alias so either matches. CONFIRM AGAINST
+        dim_geography BEFORE SHIPPING - see maintenance.open_verification_tasks.
+    body_types:
+      critical: true
+      text: >
+        UNLIKE PMAY-G, WHICH IS RURAL-ONLY, CM ELEVATE REACHES URBAN BODIES. Of the 58
+        blocks: 44 are rural C&RD blocks, 6 are Municipal Boards, 4 are Town Committees,
+        and 4 carry no suffix at all. A "how many blocks" answer mixes rural blocks with
+        urban local bodies - say so, or offer the split.
+      counts: { rural_block: 44, municipal_board: 6, town_committee: 4, unsuffixed: 4 }
+      urban_bodies: ["Shillong", "Tura", "Williamnagar", "Resubelpara", "Baghmara",
+                     "Jowai", "Nongpoh", "Mairang", "Nongstoin", "Mawkyrwat"]
+    largest: >
+      Umling (Ri Bhoi) with 1,130 applications, then Jirang (Ri Bhoi) 755 and Rongram
+      (West Garo Hills) 609. The requirement workbook's "Zikzak 243, Umling 224,
+      Rongram 211" describes a different extract.
+    values:
+    - canonical: "Samanda"
+      district: "East Garo Hills"
+      body_type: rural_block
+      applications: 344
+      source_form: "Samanda C & RD Block"
+      aliases: ["Samanda Block", "Samanda C & RD Block", "Samanda C&RD Block", "Samanda CRD Block"]
+    - canonical: "Williamnagar"
+      district: "East Garo Hills"
+      body_type: municipal_board
+      applications: 145
+      source_form: "Williamnagar-Municipal Board"
+      aliases: ["Williamnagar MB", "Williamnagar Municipal Board", "Williamnagar-Municipal Board"]
+    - canonical: "Dambo Rongjeng"
+      district: "East Garo Hills"
+      body_type: rural_block
+      applications: 70
+      source_form: "Dambo Rongjeng C & RD Block"
+      aliases: ["Dambo Rongjeng Block", "Dambo Rongjeng C & RD Block", "Dambo Rongjeng C&RD Block", "Dambo Rongjeng CRD Block"]
+    - canonical: "Songsak"
+      district: "East Garo Hills"
+      body_type: rural_block
+      applications: 48
+      source_form: "Songsak C & RD Block"
+      aliases: ["Songsak Block", "Songsak C & RD Block", "Songsak C&RD Block", "Songsak CRD Block"]
+    - canonical: "Khliehriat"
+      district: "East Jaintia Hills"
+      body_type: rural_block
+      applications: 76
+      source_form: "Khliehriat C & RD Block"
+      aliases: ["Khliehriat Block", "Khliehriat C & RD Block", "Khliehriat C&RD Block", "Khliehriat CRD Block"]
+    - canonical: "Saipung"
+      district: "East Jaintia Hills"
+      body_type: rural_block
+      applications: 68
+      source_form: "Saipung C & RD Block"
+      aliases: ["Saipung Block", "Saipung C & RD Block", "Saipung C&RD Block", "Saipung CRD Block"]
+    - canonical: "Lumshnong"
+      district: "East Jaintia Hills"
+      body_type: unsuffixed
+      applications: 10
+      source_form: "Lumshnong"
+      aliases: ["Lumshnong Block"]
+    - canonical: "Mawphlang"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 144
+      source_form: "Mawphlang C & RD Block"
+      aliases: ["Mawphlang Block", "Mawphlang C & RD Block", "Mawphlang C&RD Block", "Mawphlang CRD Block"]
+    - canonical: "Mawpat"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 113
+      source_form: "Mawpat C & RD Block"
+      aliases: ["Mawpat Block", "Mawpat C & RD Block", "Mawpat C&RD Block", "Mawpat CRD Block"]
+    - canonical: "Pynursla"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 110
+      source_form: "Pynursla C & RD Block"
+      aliases: ["Pynursla Block", "Pynursla C & RD Block", "Pynursla C&RD Block", "Pynursla CRD Block"]
+    - canonical: "Khatarshnong Laitkroh"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 105
+      source_form: "Khatarshnong Laitkroh C & RD Block"
+      aliases: ["Khatarshnong Laitkroh Block", "Khatarshnong Laitkroh C & RD Block", "Khatarshnong Laitkroh C&RD Block", "Khatarshnong Laitkroh CRD Block"]
+    - canonical: "Sohiong"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 105
+      source_form: "Sohiong C & RD Block"
+      aliases: ["Sohiong Block", "Sohiong C & RD Block", "Sohiong C&RD Block", "Sohiong CRD Block"]
+    - canonical: "Mylliem"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 97
+      source_form: "Mylliem C & RD Block"
+      aliases: ["Mylliem Block", "Mylliem C & RD Block", "Mylliem C&RD Block", "Mylliem CRD Block"]
+    - canonical: "Mawryngkneng"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 81
+      source_form: "Mawryngkneng C & RD Block"
+      aliases: ["Mawryngkneng Block", "Mawryngkneng C & RD Block", "Mawryngkneng C&RD Block", "Mawryngkneng CRD Block"]
+    - canonical: "Shillong"
+      district: "East Khasi Hills"
+      body_type: municipal_board
+      applications: 63
+      source_form: "Shillong-Municipal Board"
+      aliases: ["Shillong MB", "Shillong Municipal Board", "Shillong-Municipal Board"]
+    - canonical: "Mawsynram"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 59
+      source_form: "Mawsynram C & RD Block"
+      aliases: ["Mawsynram Block", "Mawsynram C & RD Block", "Mawsynram C&RD Block", "Mawsynram CRD Block"]
+    - canonical: "Mawlai"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 56
+      source_form: "Mawlai C & RD Block"
+      aliases: ["Mawlai Block", "Mawlai C & RD Block", "Mawlai C&RD Block", "Mawlai CRD Block"]
+    - canonical: "Mawkynrew"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 42
+      source_form: "Mawkynrew C & RD Block"
+      aliases: ["Mawkynrew Block", "Mawkynrew C & RD Block", "Mawkynrew C&RD Block", "Mawkynrew CRD Block"]
+    - canonical: "Shella Bholaganj"
+      district: "East Khasi Hills"
+      body_type: rural_block
+      applications: 42
+      source_form: "Shella Bholaganj C & RD Block"
+      aliases: ["Shella Bholaganj Block", "Shella Bholaganj C & RD Block", "Shella Bholaganj C&RD Block", "Shella Bholaganj CRD Block"]
+    - canonical: "Mawthadraishan"
+      district: "Eastern West Khasi Hills"
+      body_type: rural_block
+      applications: 194
+      source_form: "Mawthadraishan C & RD Block"
+      aliases: ["Mawthadraishan Block", "Mawthadraishan C & RD Block", "Mawthadraishan C&RD Block", "Mawthadraishan CRD Block"]
+    - canonical: "Mairang"
+      district: "Eastern West Khasi Hills"
+      body_type: rural_block
+      applications: 99
+      source_form: "Mairang C & RD Block"
+      aliases: ["Mairang Block", "Mairang C & RD Block", "Mairang C&RD Block", "Mairang CRD Block"]
+    - canonical: "Mairang"
+      district: "Eastern West Khasi Hills"
+      body_type: town_committee
+      applications: 38
+      source_form: "Mairang-Town Committee"
+      aliases: ["Mairang TC", "Mairang Town Committee", "Mairang-Town Committee"]
+    - canonical: "Kharkutta"
+      district: "North Garo Hills"
+      body_type: rural_block
+      applications: 93
+      source_form: "Kharkutta C & RD Block"
+      aliases: ["Kharkutta Block", "Kharkutta C & RD Block", "Kharkutta C&RD Block", "Kharkutta CRD Block"]
+    - canonical: "Resubelpara"
+      district: "North Garo Hills"
+      body_type: rural_block
+      applications: 71
+      source_form: "Resubelpara C & RD Block"
+      aliases: ["Resubelpara Block", "Resubelpara C & RD Block", "Resubelpara C&RD Block", "Resubelpara CRD Block"]
+    - canonical: "Bajengdoba"
+      district: "North Garo Hills"
+      body_type: rural_block
+      applications: 65
+      source_form: "Bajengdoba C & RD Block"
+      aliases: ["Bajengdoba Block", "Bajengdoba C & RD Block", "Bajengdoba C&RD Block", "Bajengdoba CRD Block"]
+    - canonical: "Resubelpara"
+      district: "North Garo Hills"
+      body_type: municipal_board
+      applications: 39
+      source_form: "Resubelpara-Municipal Board"
+      aliases: ["Resubelpara MB", "Resubelpara Municipal Board", "Resubelpara-Municipal Board"]
+    - canonical: "Umling"
+      district: "Ri Bhoi"
+      body_type: rural_block
+      applications: 1130
+      source_form: "Umling C & RD Block"
+      aliases: ["Umling Block", "Umling C & RD Block", "Umling C&RD Block", "Umling CRD Block"]
+    - canonical: "Jirang"
+      district: "Ri Bhoi"
+      body_type: rural_block
+      applications: 755
+      source_form: "Jirang C & RD Block"
+      aliases: ["Jirang Block", "Jirang C & RD Block", "Jirang C&RD Block", "Jirang CRD Block"]
+    - canonical: "Umsning"
+      district: "Ri Bhoi"
+      body_type: rural_block
+      applications: 406
+      source_form: "Umsning C & RD Block"
+      aliases: ["Umsning Block", "Umsning C & RD Block", "Umsning C&RD Block", "Umsning CRD Block"]
+    - canonical: "Bhoirymbong"
+      district: "Ri Bhoi"
+      body_type: rural_block
+      applications: 165
+      source_form: "Bhoirymbong C & RD Block"
+      aliases: ["Bhoirymbong Block", "Bhoirymbong C & RD Block", "Bhoirymbong C&RD Block", "Bhoirymbong CRD Block"]
+    - canonical: "Nongpoh"
+      district: "Ri Bhoi"
+      body_type: town_committee
+      applications: 136
+      source_form: "Nongpoh-Town Committee"
+      aliases: ["Nongpoh TC", "Nongpoh Town Committee", "Nongpoh-Town Committee"]
+    - canonical: "Baghmara"
+      district: "South Garo Hills"
+      body_type: rural_block
+      applications: 267
+      source_form: "Baghmara C & RD Block"
+      aliases: ["Baghmara Block", "Baghmara C & RD Block", "Baghmara C&RD Block", "Baghmara CRD Block"]
+    - canonical: "Chokpot"
+      district: "South Garo Hills"
+      body_type: rural_block
+      applications: 89
+      source_form: "Chokpot C & RD Block"
+      aliases: ["Chokpot Block", "Chokpot C & RD Block", "Chokpot C&RD Block", "Chokpot CRD Block"]
+    - canonical: "Rongara"
+      district: "South Garo Hills"
+      body_type: rural_block
+      applications: 47
+      source_form: "Rongara C & RD Block"
+      aliases: ["Rongara Block", "Rongara C & RD Block", "Rongara C&RD Block", "Rongara CRD Block"]
+    - canonical: "Gasuapara"
+      district: "South Garo Hills"
+      body_type: rural_block
+      applications: 40
+      source_form: "Gasuapara C & RD Block"
+      aliases: ["Gasuapara Block", "Gasuapara C & RD Block", "Gasuapara C&RD Block", "Gasuapara CRD Block"]
+    - canonical: "Baghmara"
+      district: "South Garo Hills"
+      body_type: municipal_board
+      applications: 18
+      source_form: "Baghmara-Municipal Board"
+      aliases: ["Baghmara MB", "Baghmara Municipal Board", "Baghmara-Municipal Board"]
+    - canonical: "Zikzak"
+      district: "South West Garo Hills"
+      body_type: rural_block
+      applications: 78
+      source_form: "Zikzak C & RD Block"
+      aliases: ["Zikzak Block", "Zikzak C & RD Block", "Zikzak C&RD Block", "Zikzak CRD Block"]
+    - canonical: "Damalgre"
+      district: "South West Garo Hills"
+      body_type: unsuffixed
+      applications: 59
+      source_form: "Damalgre"
+      aliases: ["Damalgre Block"]
+    - canonical: "Betasing"
+      district: "South West Garo Hills"
+      body_type: rural_block
+      applications: 49
+      source_form: "Betasing C & RD Block"
+      aliases: ["Betasing Block", "Betasing C & RD Block", "Betasing C&RD Block", "Betasing CRD Block"]
+    - canonical: "Ranikor"
+      district: "South West Khasi Hills"
+      body_type: rural_block
+      applications: 263
+      source_form: "Ranikor C & RD Block"
+      aliases: ["Ranikor Block", "Ranikor C & RD Block", "Ranikor C&RD Block", "Ranikor CRD Block"]
+    - canonical: "Mawkyrwat"
+      district: "South West Khasi Hills"
+      body_type: unsuffixed
+      applications: 143
+      source_form: "Mawkyrwat"
+      aliases: ["Mawkyrwat Block"]
+    - canonical: "Mawkyrwat"
+      district: "South West Khasi Hills"
+      body_type: town_committee
+      applications: 8
+      source_form: "Mawkyrwat-Town Committee"
+      aliases: ["Mawkyrwat TC", "Mawkyrwat Town Committee", "Mawkyrwat-Town Committee"]
+    - canonical: "Rongram"
+      district: "West Garo Hills"
+      body_type: rural_block
+      applications: 609
+      source_form: "Rongram C & RD Block"
+      aliases: ["Rongram Block", "Rongram C & RD Block", "Rongram C&RD Block", "Rongram CRD Block"]
+    - canonical: "Tikrikilla"
+      district: "West Garo Hills"
+      body_type: rural_block
+      applications: 272
+      source_form: "Tikrikilla C & RD Block"
+      aliases: ["Tikrikilla Block", "Tikrikilla C & RD Block", "Tikrikilla C&RD Block", "Tikrikilla CRD Block"]
+    - canonical: "Demdema"
+      district: "West Garo Hills"
+      body_type: rural_block
+      applications: 237
+      source_form: "Demdema C & RD Block"
+      aliases: ["Demdema Block", "Demdema C & RD Block", "Demdema C&RD Block", "Demdema CRD Block"]
+    - canonical: "Gambegre"
+      district: "West Garo Hills"
+      body_type: rural_block
+      applications: 164
+      source_form: "Gambegre C & RD Block"
+      aliases: ["Gambegre Block", "Gambegre C & RD Block", "Gambegre C&RD Block", "Gambegre CRD Block"]
+    - canonical: "Dalu"
+      district: "West Garo Hills"
+      body_type: rural_block
+      applications: 121
+      source_form: "Dalu C & RD Block"
+      aliases: ["Dalu Block", "Dalu C & RD Block", "Dalu C&RD Block", "Dalu CRD Block"]
+    - canonical: "Selsella"
+      district: "West Garo Hills"
+      body_type: rural_block
+      applications: 118
+      source_form: "Selsella C & RD Block"
+      aliases: ["Selsella Block", "Selsella C & RD Block", "Selsella C&RD Block", "Selsella CRD Block"]
+    - canonical: "Dadenggiri"
+      district: "West Garo Hills"
+      body_type: rural_block
+      applications: 92
+      source_form: "Dadenggiri C & RD Block"
+      aliases: ["Dadenggiri Block", "Dadenggiri C & RD Block", "Dadenggiri C&RD Block", "Dadenggiri CRD Block"]
+    - canonical: "Tura"
+      district: "West Garo Hills"
+      body_type: municipal_board
+      applications: 63
+      source_form: "Tura Municipal Board-Municipal Board"
+      aliases: ["Tura MB", "Tura Municipal Board", "Tura Municipal Board-Municipal Board"]
+    - canonical: "Thadlaskein"
+      district: "West Jaintia Hills"
+      body_type: rural_block
+      applications: 119
+      source_form: "Thadlaskein C & RD Block"
+      aliases: ["Thadlaskein Block", "Thadlaskein C & RD Block", "Thadlaskein C&RD Block", "Thadlaskein CRD Block"]
+    - canonical: "Laskein"
+      district: "West Jaintia Hills"
+      body_type: rural_block
+      applications: 76
+      source_form: "Laskein C & RD Block"
+      aliases: ["Laskein Block", "Laskein C & RD Block", "Laskein C&RD Block", "Laskein CRD Block"]
+    - canonical: "Amlarem"
+      district: "West Jaintia Hills"
+      body_type: rural_block
+      applications: 25
+      source_form: "Amlarem C & RD Block"
+      aliases: ["Amlarem Block", "Amlarem C & RD Block", "Amlarem C&RD Block", "Amlarem CRD Block"]
+    - canonical: "Jowai"
+      district: "West Jaintia Hills"
+      body_type: municipal_board
+      applications: 15
+      source_form: "Jowai-Municipal Board"
+      aliases: ["Jowai MB", "Jowai Municipal Board", "Jowai-Municipal Board"]
+    - canonical: "Nongstoin"
+      district: "West Khasi Hills"
+      body_type: rural_block
+      applications: 230
+      source_form: "Nongstoin C & RD Block"
+      aliases: ["Nongstoin Block", "Nongstoin C & RD Block", "Nongstoin C&RD Block", "Nongstoin CRD Block"]
+    - canonical: "Mawshynrut"
+      district: "West Khasi Hills"
+      body_type: rural_block
+      applications: 194
+      source_form: "Mawshynrut C & RD Block"
+      aliases: ["Mawshynrut Block", "Mawshynrut C & RD Block", "Mawshynrut C&RD Block", "Mawshynrut CRD Block"]
+    - canonical: "Nongstoin"
+      district: "West Khasi Hills"
+      body_type: town_committee
+      applications: 67
+      source_form: "Nongstoin-Town Committee"
+      aliases: ["Nongstoin TC", "Nongstoin Town Committee", "Nongstoin-Town Committee"]
+    - canonical: "Ri-Muliang"
+      district: "West Khasi Hills"
+      body_type: unsuffixed
+      applications: 4
+      source_form: "Ri-Muliang"
+      aliases: ["Ri-Muliang Block"]
+
+  village:
+    name_column: lgd_village_name
+    code_column: village_code
+    stored_case: >
+      Mixed case in dim_geography.lgd_village_name - NOT uppercased, unlike district and
+      block. The source export itself is inconsistent: 269 of its 2,001 village names are
+      ALL-CAPS ("PEINLANG", "BOLKINGGRE") while the rest are Title Case. Fold case before
+      matching and emit the stored form.
+    distinct_names: 2001
+    distinct_codes: 2038
+    sql_predicate_preferred: "village_code = <lgd_code>"
+    sql_predicate_fallback: "lgd_village_name = '<canonical>'"
+    counting_villages:
+      critical: true
+      text: >
+        Use COUNT(DISTINCT village_code) with entity_type <> 'Unresolved', never
+        COUNT(DISTINCT name). 36 names map to more than one code, so a name count loses
+        villages; and the Unresolved placeholder is not a village at all.
+    catalogue_note: >
+      The 2,038 village codes are NOT enumerated in this file - the list would dominate
+      it and dim_geography is the authority. Resolve villages against dim_geography at
+      runtime, scoped by any district or block the user also gave. Only the ambiguity
+      registry and the shape rules below are recorded here.
+
+    resolution_strategy:
+    - 1. If the user gave a numeric code, cast to int (the source carries floats like 277617.0) and resolve on village_code directly.
+    - 2. Fold the name and look it up in dim_geography scoped by any district or block also given.
+    - 3. If exactly one code survives, resolve and emit the CODE, not the name.
+    - 4. If more than one survives, return ambiguous with candidate codes plus their district and block. Ask which one.
+    - 5. If none survive, run fuzzy then embedding, then not_found with 5 suggestions.
+
+    ambiguity_registry:
+      names_mapping_to_multiple_codes: 36
+      worst_case: { name: Chandigre, codes: 3 }
+      names: [Chandigre, Bolchugre, Bollonggitok, Mawiong, Lumpyngngad, Matchokgre,
+              Dollonggre, Mawbri, Adugre, Aruagre, Mawhati, Ampanggre, Allagre,
+              Lumsohphoh, Demthring, Mawlein, Mawlieh, Mawlong, Mawryngkang, Mawsaw,
+              Nogorpara, Nongbah, Nongdom, Nongkynrih, Nonglang]
+      note: >
+        25 of the 36 are listed. Chandigre maps to three different LGD codes; the rest
+        map to two. Never resolve one of these without a district or block scope.
+
+    ward_names:
+      critical: true
+      count: 92
+      applications: 495
+      examples: ["9-Ward No. 9", "14-Nongstoin (TC) - Ward No.14",
+                 "8-Williamnagar (MB) - Ward No.8", "11-Pahamsyiem - Ward No. 11",
+                 "7-Williamnagar (MB) - Ward No.7"]
+      rule: >
+        92 of the village names are URBAN WARDS, carrying about 495 applications. They
+        correspond to dim_geography.entity_type = 'Ward'. They are real localities and
+        must be counted - do NOT confuse them with entity_type = 'Unresolved', which is
+        a synthetic placeholder and must be excluded from village answers.
+        Their names begin with a ward number and embed "(MB)" or "(TC)". Do not mistake
+        the leading digits for an LGD code.
+
+    numeric_prefix_rule: >
+      Names beginning with a digit ("9-Ward No. 9", "11-Pahamsyiem - Ward No. 11") must
+      not be mistaken for LGD codes. A village code in this data is a 5 to 7 digit
+      integer with no letters or punctuation.
+
+    unresolved_placeholder:
+      critical: true
+      entity_type_value: Unresolved
+      rule: >
+        A synthetic per-district - or global - placeholder created when a source row's
+        locality could not be matched to any roster entry. on_roster is always FALSE.
+        It is NEVER a real village. Keep it in district, block and scheme totals so they
+        reconcile; exclude it from every village count and village list. If a user asks
+        to see it, treat that as a data-completeness question and say what it is.
+      source_signal: 16 rows in the source export carried no village_lgd_code at all.
+
+    largest_villages:
+      note: Measured from the source export, unverified_in_db.
+      values:
+      - { name: Umshaken, code: 277617, district: "Ri Bhoi", applications: 74 }
+      - { name: "11-Pahamsyiem - Ward No. 11", code: 1298479, district: "Ri Bhoi", applications: 66 }
+      - { name: "8-Williamnagar (MB) - Ward No.8", code: 70679, district: "East Garo Hills", applications: 51 }
+      - { name: Watregre, code: 273460, district: "West Garo Hills", applications: 51 }
+      - { name: Balakhawa, code: 277694, district: "Ri Bhoi", applications: 44 }
+
+  # =========================================================================
+  # CATEGORICAL DIMENSIONS
+  # =========================================================================
+  applicant_category:
+    column: applicant_category
+    raw_column: type_raw
+    stored_case: lowercase
+    distinct: 3
+    closed_set: true
+    nullable: true
+    sql_predicate: "applicant_category = '<canonical>'"
+    prefer:
+      critical: true
+      text: >
+        ALWAYS GROUP AND FILTER ON applicant_category, NEVER ON type_raw. type_raw holds
+        the API's per-scheme string and the taxonomy is not shared: each scheme prefixes
+        its own name, and the strings carry source defects preserved verbatim - a double
+        space in "Prime Seed  unregistered", "Any Bussiness Venture", "Motorcarvan",
+        and a capital I in "Sericulture and Weaving Spinning Individual". Grouping on
+        type_raw splits one category into fifteen.
+    derivation: >
+      applicant_category is the last token of type_raw, lowercased. Verified across the
+      whole source export: every one of the 8,436 rows reduces to one of three values.
+    values:
+    - canonical: "individual"
+      applications: 8342
+      share_pct: 98.9
+      aliases: [individual, individuals, person, personal, single applicant, self,
+                individual applicant, farmer, citizen]
+    - canonical: "registered"
+      applications: 83
+      share_pct: 1.0
+      aliases: [registered, registered body, registered society, registered group,
+                registered organisation, registered organization, society, FPC,
+                cooperative, co-operative, collective, SHG, registered entity]
+      note: >
+        Concentrated in two schemes - Agriculture Response Vehicle (30) and Warehouse
+        (20). Warehouse is the ONLY scheme where registered outnumbers individual.
+    - canonical: "unregistered"
+      applications: 11
+      share_pct: 0.1
+      aliases: [unregistered, unregistered body, unregistered group, informal group,
+                unregistered organisation, unregistered society]
+      note: n=11 across the whole programme. Never quote a percentage from it.
+    small_n_warning:
+      critical: true
+      text: >
+        99% of applications are individual. Any breakdown isolating registered or
+        unregistered rests on fewer than 100 rows programme-wide. Always show the count
+        alongside the percentage.
+    null_handling:
+      rule: NULLABLE. Show as "not recorded"; never assume individual.
+
+  data_verified:
+    column: data_verified
+    type: varchar(20)
+    stored_case: Title Case as shown
+    distinct: 4
+    plus_null: true
+    closed_set: true
+    sql_predicate: "data_verified = '<canonical>'"
+    authoritative:
+      critical: true
+      text: >
+        THE ONLY STATUS FIELD ON THIS FACT WITH MEANINGFUL SPREAD, and the correct target
+        for "on hold", "pending", "verified" and "valid". It records whether the
+        APPLICATION'S OWN DATA was found valid - it is NOT a funding decision, an approval
+        or a rejection.
+    not_a_boolean:
+      critical: true
+      text: >
+        Despite the name, this is a varchar with five states including NULL. Never write
+        `WHERE data_verified` and never assume two values.
+    values:
+    - canonical: "Valid"
+      applications: 6700
+      share_pct: 79.4
+      aliases: [valid, verified, ok, clean, data verified, passed, correct]
+    - canonical: "On Hold"
+      applications: 1199
+      share_pct: 14.2
+      aliases: [on hold, onhold, held, held up, paused, pending, awaiting, stuck,
+                on-hold, in hold]
+      note:
+        critical: true
+        text: >
+          THIS IS WHERE "ON HOLD" RESOLVES, not the onhold boolean, which is FALSE on
+          every row. Getting this wrong returns zero and looks correct. It is the single
+          most likely wrong answer in this partition.
+    - canonical: "Wrong"
+      applications: 81
+      share_pct: 1.0
+      aliases: [wrong, incorrect, erroneous, bad data, wrong data]
+    - canonical: "Invalid"
+      applications: 67
+      share_pct: 0.8
+      aliases: [invalid, not valid, failed, rejected data, invalid data]
+      note: >
+        "Wrong" and "Invalid" are SEPARATE stored verdicts. Do not merge them without
+        saying so, and do not read either as a scheme rejection.
+    null_handling:
+      rows: 389
+      share_pct: 4.6
+      rule: >
+        NULL means no verdict was recorded. It is NOT "Valid". Show it as a separate
+        "not recorded" bucket in any breakdown and keep it in totals.
+    ordering: Valid -> On Hold -> Wrong -> Invalid -> not recorded.
+
+  current_file_status:
+    column: current_file_status
+    type: varchar(30)
+    distinct: 4
+    closed_set: true
+    sql_predicate: "LOWER(current_file_status) = LOWER('<canonical>')"
+    near_constant:
+      critical: true
+      text: >
+        98.4% of applications sit at 'forward'. This is not a distribution and should not
+        be charted as one. More importantly, 'forward' means THE FILE MOVED TO THE NEXT
+        STEP - it does NOT mean approved, sanctioned or funded. Never resolve "approved"
+        to it.
+    values:
+    - canonical: "forward"
+      applications: 8302
+      share_pct: 98.4
+      aliases: [forward, forwarded, moved on, sent forward, progressed]
+    - canonical: "sendback to vdv/citizen"
+      applications: 90
+      share_pct: 1.1
+      aliases: [sendback to vdv, sent back to citizen, returned to citizen,
+                sendback to vdv/citizen, returned to applicant]
+    - canonical: "resubmit"
+      applications: 43
+      share_pct: 0.5
+      aliases: [resubmit, resubmitted, re-submitted, submitted again]
+    - canonical: "sendback"
+      applications: 1
+      share_pct: 0.01
+      aliases: [sendback, sent back, returned, send back]
+    wording_collision:
+      critical: true
+      text: >
+        'sendback' (1 row) and 'sendback to vdv/citizen' (90 rows) are two stored strings
+        for a related idea, differing in case and wording. A user asking "how many were
+        sent back" means both - 91 in total. Match with
+        LOWER(current_file_status) LIKE 'sendback%'.
+    scheme_concentration: >
+      Only two schemes carry any non-Forward status: PRIME Tourism Vehicle (89 sent back,
+      43 resubmitted) and Piggery (1 Sendback, 1 sendback to vdv/citizen). Everywhere
+      else this column is constant.
+
+  current_level:
+    column: current_level
+    type: varchar(30)
+    distinct_stored: 4
+    distinct_after_folding: 3
+    sql_predicate: "LOWER(current_level) = '<canonical>'"
+    case_collision:
+      critical: true
+      text: >
+        'level1' (8,273 rows) and 'Level1' (45 rows) ARE THE SAME LEVEL stored two ways.
+        Without LOWER() the same level appears twice in a breakdown. Always fold.
+    no_ordering:
+      critical: true
+      text: >
+        THE DATA DOES NOT ASSERT A PROGRESSION. level0 -> level1 -> level2 is a guess,
+        and level0 co-occurs with 'sendback to vdv/citizen', which suggests it is not
+        simply "earliest". Do not build a funnel, a stage chart or a progress metric from
+        this column. List levels by frequency.
+    values:
+    - { canonical: "level1", applications: 8318, stored_as: [level1, Level1], aliases: [level 1, l1, first level, stage 1] }
+    - { canonical: "level0", applications: 90,  stored_as: [level0], aliases: [level 0, l0, zero level, stage 0] }
+    - { canonical: "level2", applications: 28,  stored_as: [Level2], aliases: [level 2, l2, second level, stage 2] }
+    near_constant: 98.6% of applications are at level1 after folding.
+
+  application_mode:
+    column: application_mode
+    type: varchar(30)
+    distinct: 2
+    closed_set: true
+    stored_case: lowercase ('online' / 'cmconnectcenter'), despite the camelCase-looking source label
+    sql_predicate: "application_mode = '<canonical>'"
+    quality_note: >
+      THE CLEANEST CATEGORICAL ON THIS FACT - two values, no case variants, no nulls
+      observed. Genuinely worth offering as a breakdown.
+    values:
+    - canonical: "online"
+      applications: 7643
+      share_pct: 90.6
+      aliases: [online, internet, web, self service, self-service, applied online,
+                digital, portal]
+    - canonical: "cmconnectcenter"
+      applications: 793
+      share_pct: 9.4
+      aliases: [cm connect center, cm connect centre, connect center, connect centre,
+                cmconnect, CM Connect, assisted, walk in, walk-in, offline, facilitation centre]
+      note: >
+        An ASSISTED WALK-IN CENTRE. Emit the stored camelCase form. Relabelling it
+        "Offline" is acceptable only if the answer says so - it is not the stored value.
+    scheme_variation:
+      critical: true
+      text: >
+        Online share varies sharply by scheme - Dairy is 39.8% online against 70-100%
+        everywhere else, and PRIME Small Enterprise is 99.2%. Never quote the programme
+        figure of 90.6% for a single scheme.
+
+  gender:
+    column: "scheme_specific ->> 'gender_id'"
+    physical_location: jsonb
+    distinct: 3
+    closed_set: true
+    populated: every row in the source export
+    sql_predicate: "scheme_specific ->> 'gender_id' = '<canonical>'"
+    critical_note:
+      critical: true
+      text: >
+        NOT A PROMOTED COLUMN. gender lives inside scheme_specific and must be read with
+        ->>. Despite the source field being named gender_id IT HOLDS TEXT, not a code -
+        there is no gender lookup table and none is needed.
+        It is common to all 15 schemes, so this is the ONE scheme_specific read that does
+        NOT require a scheme scope. Every other key does.
+    values:
+    - { canonical: "Female", applications: 5178, share_pct: 61.4, aliases: [female, women, woman, ladies, girls, f] }
+    - { canonical: "Male",   applications: 3250, share_pct: 38.5, aliases: [male, men, man, gents, boys, m] }
+    - { canonical: "Other",  applications: 8,    share_pct: 0.1,  aliases: [other, others, transgender, third gender] }
+    scheme_variation:
+      critical: true
+      text: >
+        THE PROGRAMME FIGURE HIDES THE FINDING. 61.4% female overall, but Sericulture
+        100%, Piggery 74.3%, Poultry 66.0%, Agro Tourism Villa 66.7%, Dairy 57.8%,
+        Goat 50.0%, Warehouse 39.5%, Any Business Venture 37.5%, Tourism Vehicle 19.9%,
+        Agriculture Response Vehicle 14.7%, Green Taxi 0%. Never quote 61% for a single
+        scheme. This is the most interesting fact in the dataset and the requirement
+        workbook never asks for it.
+
+  # =========================================================================
+  # IDENTIFIERS
+  # =========================================================================
+  identifiers:
+    request_id:
+      column: request_id
+      type: varchar(100)
+      format: "REQ/<scheme>/<sub>/<date-like>/<sequence>, e.g. REQ/001/001/10102025/188877"
+      distinct: 8400
+      rows: 8436
+      duplicates: 36
+      duplicate_rows: 64
+      unique: false
+      unique_constraint_in_db: false
+      aliases: [application number, application id, application no, request id,
+                request number, reference number, file number, acknowledgement number]
+      rule:
+        critical: true
+        text: >
+          NOT UNIQUE and NOT unique-constrained in the database. 36 numbers appear more
+          than once across 64 rows, ALL inside the Piggery scheme. Uniqueness was
+          unverified at ingest and the loader collapses only exact full-row duplicates.
+          Never treat it as a primary key, never assume LIMIT 1 is safe, and report both
+          COUNT(*) and COUNT(DISTINCT request_id) when they differ.
+      resolution: uppercase and strip spaces, then exact match. Do not fuzzy-match it.
+      scheme_prefix:
+        critical: true
+        text: >
+          SEGMENT 1 IS A STABLE PER-SCHEME CODE, verified 1:1 across all 15 schemes in
+          the source export. An application number alone therefore identifies its scheme
+          with no lookup - useful for validating a user's number and for saying which
+          scheme they are asking about before any query runs.
+        map:
+          "001": "Meghalaya Piggery Development Scheme"
+          "002": "Meghalaya Poultry Farming Scheme"
+          "003": "Meghalaya Goat Farming Scheme"
+          "004": "Meghalaya Dairy Development Scheme"
+          "006": "Meghalaya Any Business Venture Scheme"
+          "007": "Meghalaya Sports & Wellness Centre Scheme"
+          "008": "Meghalaya Cinema Theatre Scheme"
+          "010": "Meghalaya Warehouse Scheme"
+          "011": "PRIME Agriculture Response Vehicle Scheme"
+          "012": "Meghalaya Motorcaravan Scheme"
+          "015": "Agro Tourism Villa Scheme"
+          "017": "PRIME Tourism Vehicle Scheme"
+          "018": "Meghalaya Sericulture & Weaving Scheme"
+          "232": "Chief Minister's Green Taxi Scheme"
+          "233": "PRIME Small Enterprise Empowerment and Development (SEED)"
+        caution: >
+          Use it to VALIDATE and to route, not as a substitute for cm_scheme_key in SQL.
+          Filter on scheme_name or cm_scheme_key; the prefix is a resolver convenience.
+      embedded_date:
+        critical: true
+        text: >
+          SEGMENT 4 LOOKS LIKE A DATE AND IS NOT USABLE. Unpadded, 6 to 8 digits, so
+          1032026 is validly 1-Mar-2026 or 10-Mar-2026. A naive parse resolved only
+          3,038 of 8,436 source rows and produced dates after the export date. NEVER
+          parse it in generated SQL and never offer it as a time dimension.
+      format_confusion:
+        critical: true
+        text: >
+          The requirement workbook uses a DIFFERENT identifier format - MPDSI018599,
+          PTVSI000078, MEWSI... - and ED-004 tells the bot to validate those prefixes.
+          Those belong to a different extract. Every CM Elevate application number in
+          megh_db begins "REQ/". If a user supplies an MPDSI/PTVSI-style number, say the
+          format is not the one held here rather than returning a plain not-found.
+
+    cm_elevate_fact_id:
+      column: cm_elevate_fact_id
+      type: bigint
+      unique: true
+      role: the primary key of curated.fact_cm_elevate_application and curated.v_cm_elevate
+      aliases: [record id, row id, fact id]
+      rule: identifier only - never SUM or AVG.
+      unstable: >
+        Surrogate, regenerated on every reload. Never export it or quote it back to a
+        user as a durable reference.
+
+    cm_scheme_key:
+      column: cm_scheme_key
+      type: smallint
+      role: FK to curated.dim_cm_elevate_scheme - the column that separates the 15 schemes
+      aliases: [scheme key, sub-scheme key]
+      rule: >
+        Identifier only. Prefer scheme_name for display and for user-facing filters. Use
+        the key when scoping a scheme_specific JSONB read.
+
+    endpoint:
+      column: endpoint
+      type: varchar(80)
+      unique: true
+      role: >
+        The API endpoint each scheme's applications were ingested from, and the
+        source_dataset value in raw.source_rows and staging.quarantine. It is what
+        meta.v_reconciliation_cm_elevate reports one row per.
+      rule: Internal identity. Prefer scheme_name in any user-facing answer.
+
+    village_code:
+      column: village_code
+      type: integer
+      role: the LGD national village identifier, denormalised onto every row
+      aliases: [village code, LGD village code, LGD code]
+      rule: >
+        Identifier only - never SUM or AVG. It is the correct key for counting villages
+        and for anything leaving the database. The source delivers it as a float
+        (277617.0); cast with int() before comparing.
+
+    geography_key:
+      column: geography_key
+      type: integer
+      role: surrogate key into dim_geography
+      rule: >
+        Identifier only. NOT stable across a reload - use village_code for exports and
+        cross-scheme joins.
+
+    citizen_name:
+      status: STRIPPED_AT_INGEST
+      column: null
+      aliases: [applicant name, beneficiary name, name, citizen name, person, who]
+      rule:
+        critical: true
+        text: >
+          NOT in the curated layer. Stripped by the loader along with epic_id,
+          mobile_number, pan_number and every bank_account field. There is no join that
+          recovers them. A question naming a person, or asking who an applicant is, must
+          return "not held in this data". Never substitute request_id for a name and
+          never build an applicant-lookup feature against this schema.
+      resolver_behaviour: >
+        Classify the span as entity_type: person_name and emit not_found with the reason
+        "personal names are not held in the curated layer" - not a did-you-mean list.
+
+    member_id:
+      status: RETAINED_IN_JSONB_BUT_FORBIDDEN
+      column: "scheme_specific ->> 'member_id'"
+      rule:
+        critical: true
+        text: >
+          This one DID survive, because the loader's strip list does not cover it - as
+          did dob, email_id, address, family_id, pds_id, account_holder_name and
+          ifsc_code. They are queryable and must never be resolved, surfaced, exported or
+          embedded. Refuse and offer the same question as a group total.
+
+# ---------------------------------------------------------------------------
+# MEASURE VOCABULARY - user phrasing to column. stage2 owns aggregation semantics.
+# ---------------------------------------------------------------------------
+measure_vocabulary:
+  note:
+    critical: true
+    text: >
+      THIS SECTION IS DELIBERATELY TINY. PMAY's resolver maps a dozen money and count
+      phrasings to columns. CM Elevate has exactly ONE aggregate - a count - because the
+      fact carries no numeric measure at all. Everything money-shaped resolves through
+      absent_dimensions.money to not_available.
+
+  application_count:
+    column: null
+    aggregate: "COUNT(*)"
+    aliases: [applications, how many, number of, count, total, applicants, beneficiaries,
+              records, farmers, people, cases, requests, files]
+    rule: >
+      The default and only measure. Say "applications" in the answer - an application is
+      a REQUEST, not an award, and nothing here confirms anyone received anything.
+
+  distinct_application_count:
+    column: request_id
+    aggregate: "COUNT(DISTINCT request_id)"
+    aliases: [distinct applications, unique applications, distinct application numbers,
+              unique requests]
+    rule: >
+      Use only when the user explicitly says distinct or unique. request_id is not
+      unique, so this is genuinely a different number - about 8,400 against 8,436 rows.
+
+  distinct_village_count:
+    column: village_code
+    aggregate: "COUNT(DISTINCT village_code) FILTER (WHERE entity_type <> 'Unresolved')"
+    aliases: [villages, how many villages, village count, villages covered, coverage]
+    rule: Never count villages by name - 36 names map to more than one code.
+
+  distinct_block_count:
+    column: lgd_block
+    aggregate: "COUNT(DISTINCT lgd_block)"
+    aliases: [blocks, how many blocks, block count, blocks covered]
+    rule: >
+      58 blocks, of which 44 are rural C&RD blocks and 10 are urban Municipal Boards or
+      Town Committees. Say so, or offer the split.
+
+  distinct_district_count:
+    column: lgd_district
+    aggregate: "COUNT(DISTINCT lgd_district)"
+    aliases: [districts, how many districts, district count, districts covered]
+    rule: All 12 at programme level, but eight individual schemes reach fewer.
+
+  distinct_scheme_count:
+    column: cm_scheme_key
+    aggregate: "COUNT(*) FROM curated.dim_cm_elevate_scheme"
+    aliases: [schemes, how many schemes, sub-schemes, number of schemes]
+    rule:
+      critical: true
+      text: >
+        FIFTEEN. Read it from dim_cm_elevate_scheme, not from a DISTINCT over the fact -
+        a scheme with no applications would be invisible in the fact. The requirement
+        workbook's 13 is wrong for this database.
+
+  share_of_applications:
+    aggregate: "COUNT(*) * 100.0 / SUM(COUNT(*)) OVER ()"
+    aliases: [share, percentage, proportion, percent, what share, how much of]
+    rule: >
+      Round to one decimal. Below about 15 applications show the count instead - six
+      schemes are that small and one record moves them by 7 to 50 points.
+
+# ---------------------------------------------------------------------------
+region_groupings:
+  note:
+    critical: true
+    text: >
+      THERE IS NO REGION COLUMN in dim_geography. These are the resolver's own groupings.
+      Expand into an IN list and STATE in the answer that the grouping was applied here,
+      not read from the data.
+  groups:
+    "Garo Hills":
+      districts: [East Garo Hills, North Garo Hills, South Garo Hills,
+                  South West Garo Hills, West Garo Hills]
+      applications: 3198
+      aliases: [Garo, Garo region, Garo Hills region, GH]
+    "Khasi Hills":
+      districts: [East Khasi Hills, Eastern West Khasi Hills, South West Khasi Hills,
+                  West Khasi Hills]
+      applications: 2257
+      aliases: [Khasi, Khasi region, Khasi Hills region, KH]
+    "Jaintia Hills":
+      districts: [East Jaintia Hills, West Jaintia Hills]
+      applications: 389
+      aliases: [Jaintia, Jaintia region, Jaintia Hills region, JH]
+    "Ri Bhoi":
+      districts: [Ri Bhoi]
+      applications: 2592
+      aliases: [Ri Bhoi region, Bhoi]
+      note: >
+        Ri Bhoi belongs to no hill range - it is its own district and its own group. Both
+        readings produce the same filter, so no clarification is needed. Do not fold it
+        into Khasi Hills. Note it is the LARGEST single unit in the programme, larger
+        than the whole of Khasi Hills.
+  whole_state:
+    aliases: [Meghalaya, state, statewide, whole state, all districts, overall]
+    behaviour: no district filter at all.
+    caution: >
+      "Meghalaya" is also the first word of ten scheme names. Classify the span as
+      cm_scheme before treating it as a whole-state marker.
+
+# ---------------------------------------------------------------------------
+scheme_groupings:
+  note:
+    critical: true
+    text: >
+      NO PMAY COUNTERPART, and NO SECTOR COLUMN EXISTS. Like region_groupings these are
+      the resolver's constructions. Expand into an IN list over scheme_name and say the
+      grouping was applied here. A user asking about "livestock schemes" is asking a
+      question the database cannot answer directly.
+  groups:
+    "livestock":
+      schemes: ["Meghalaya Piggery Development Scheme", "Meghalaya Poultry Farming Scheme",
+                "Meghalaya Goat Farming Scheme", "Meghalaya Dairy Development Scheme"]
+      applications: 3862
+      aliases: [livestock, animal husbandry, animal rearing, farming schemes, cattle schemes]
+    "vehicles":
+      schemes: ["PRIME Tourism Vehicle Scheme", "PRIME Agriculture Response Vehicle Scheme",
+                "Chief Minister's Green Taxi Scheme", "Meghalaya Motorcaravan Scheme"]
+      applications: 754
+      aliases: [vehicle schemes, transport, transport schemes, vehicles]
+    "tourism":
+      schemes: ["PRIME Tourism Vehicle Scheme", "Agro Tourism Villa Scheme"]
+      applications: 406
+      aliases: [tourism schemes, tourist schemes, hospitality]
+      note: Overlaps the vehicles group - PRIME Tourism Vehicle is in both. Never sum the two groups.
+    "PRIME":
+      schemes: ["PRIME Small Enterprise Empowerment and Development (SEED)",
+                "PRIME Tourism Vehicle Scheme", "PRIME Agriculture Response Vehicle Scheme"]
+      applications: 4363
+      aliases: [PRIME, PRIME schemes, PRIME family, prime programme]
+      note: >
+        A real naming family, and the only grouping with any textual basis in the data.
+        Still not a stored attribute.
+    "enterprise":
+      schemes: ["PRIME Small Enterprise Empowerment and Development (SEED)",
+                "Meghalaya Any Business Venture Scheme", "Meghalaya Warehouse Scheme",
+                "Meghalaya Cinema Theatre Scheme", "Meghalaya Sports & Wellness Centre Scheme"]
+      applications: 3803
+      aliases: [enterprise, business schemes, business, commercial schemes]
+  overlap_warning:
+    critical: true
+    text: >
+      THESE GROUPS OVERLAP. PRIME Tourism Vehicle belongs to vehicles, tourism and PRIME.
+      Never sum two groups together - the total will double-count. If a user asks for two
+      groups, return them separately and say they overlap.
+
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLES
+# ---------------------------------------------------------------------------
+worked_examples:
+
+- user: "how many CM Elevate applications"
+  resolve:
+  - { text: "how many applications", type: measure, canonical: "COUNT(*)" }
+  sql: "SELECT COUNT(*) AS applications FROM curated.v_cm_elevate;"
+  expected: ~8436 in the source export; unverified_in_db
+  note: Say "applications", not "beneficiaries". An application is a request, not an award.
+
+- user: "how many piggery applications"
+  resolve:
+  - { text: piggery, type: cm_scheme, canonical: "Meghalaya Piggery Development Scheme",
+      matched_by: 5_contains }
+  sql: "SELECT COUNT(*) FROM curated.v_cm_elevate WHERE scheme_name = 'Meghalaya Piggery Development Scheme';"
+  expected: 2982
+  note: >
+    "piggery" is a whole-word substring of exactly one scheme name, so stage 5 resolves
+    it cleanly. The requirement workbook's 1,357 is from a different extract.
+
+- user: "applications in EGH"
+  resolve:
+  - { text: EGH, type: district, canonical: "East Garo Hills", lgd_code: 273, matched_by: 4_acronym }
+  sql: "SELECT COUNT(*) FROM curated.v_cm_elevate WHERE lgd_district = 'EAST GARO HILLS';"
+  expected: 607
+  note: District is stored UPPERCASE in dim_geography - emit the uppercase literal.
+
+- user: "how many in Ri-Bhoi"
+  resolve:
+  - { text: "Ri-Bhoi", type: district, canonical: "Ri Bhoi", lgd_code: 276, matched_by: 2_alias }
+  sql: "SELECT COUNT(*) FROM curated.v_cm_elevate WHERE lgd_district = 'RI BHOI';"
+  expected: 2592
+  note: >
+    Three spellings in play - the source's "Ri-Bhoi", the workbook's "Ri Bhoi", the
+    roster's "RI BHOI". All resolve to the stored form.
+
+- user: "how many applications are on hold"
+  resolve:
+  - { text: "on hold", type: data_verified, canonical: "On Hold", matched_by: 2_alias }
+  sql: "SELECT COUNT(*) FROM curated.v_cm_elevate WHERE data_verified = 'On Hold';"
+  expected: 1199
+  note:
+    critical: true
+    text: >
+      THE MOST IMPORTANT EXAMPLE IN THIS FILE. There is also a boolean column named
+      onhold and it is FALSE on every row. Resolving "on hold" to it returns 0 and looks
+      correct. Always route to data_verified.
+
+- user: "how many withdrew"
+  resolve:
+  - { text: withdrew, type: workflow_flag, canonical: is_withdraw }
+  sql: "SELECT COUNT(*) FILTER (WHERE is_withdraw IS TRUE) AS withdrawn, COUNT(*) AS total FROM curated.v_cm_elevate;"
+  expected: 0 withdrawn of ~8436
+  note: >
+    Answer zero AND say the flag is unpopulated on every record, so the zero reads as a
+    data gap rather than as applicant behaviour.
+
+- user: "gender split of applicants"
+  resolve:
+  - { text: gender, type: gender, canonical: "scheme_specific ->> 'gender_id'" }
+  sql: |
+    SELECT scheme_specific ->> 'gender_id' AS gender, COUNT(*) AS applications
+    FROM curated.v_cm_elevate GROUP BY 1 ORDER BY applications DESC;
+  expected: "Female 5178, Male 3250, Other 8"
+  note: >
+    gender is not a promoted column - it is read from JSONB. It is the one
+    scheme_specific key common to all 15 schemes, so this read needs no scheme scope.
+
+- user: "gender split for the tourism vehicle scheme"
+  resolve:
+  - { text: "tourism vehicle", type: cm_scheme, canonical: "PRIME Tourism Vehicle Scheme" }
+  - { text: gender, type: gender, canonical: "scheme_specific ->> 'gender_id'" }
+  sql: |
+    SELECT scheme_specific ->> 'gender_id' AS gender, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'PRIME Tourism Vehicle Scheme'
+    GROUP BY 1 ORDER BY applications DESC;
+  expected: about 19.9% female
+  note:
+    critical: true
+    text: >
+      NEVER quote the programme's 61% female for a single scheme. This one is 19.9% and
+      Green Taxi is 0%. The scheme-level figure is the answer; the programme figure is a
+      different question.
+
+- user: "how many villages does CM Elevate reach"
+  resolve:
+  - { text: villages, type: measure, canonical: "COUNT(DISTINCT village_code)" }
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate WHERE entity_type <> 'Unresolved';
+  expected: about 2038 codes in the source export, less any Unresolved placeholders
+  note: >
+    Two rules fire together - count by code because 36 names map to several codes, and
+    exclude Unresolved because it is not a village. The workbook's 1,153 is a different
+    extract.
+
+- user: "which scheme is biggest"
+  resolve:
+  - { text: biggest, type: overloaded, reading: most applications }
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate GROUP BY 1 ORDER BY applications DESC LIMIT 1;
+  expected: "PRIME Small Enterprise Empowerment and Development (SEED), 3621"
+  note: >
+    The requirement workbook offers a choice between "by beneficiaries" and "by rupees
+    disbursed". Only the first exists. Do not ask a question whose second option is
+    unanswerable.
+
+- user: "the vehicle scheme"
+  resolve:
+  - { text: "the vehicle scheme", type: cm_scheme, status: ambiguous,
+      candidates: ["PRIME Tourism Vehicle Scheme", "PRIME Agriculture Response Vehicle Scheme",
+                   "Chief Minister's Green Taxi Scheme", "Meghalaya Motorcaravan Scheme"] }
+  sql: null
+  note: >
+    Four schemes involve vehicles, ranging from 403 applications to 2. Ask. This is a
+    blocked_matches pair - never let fuzzy pick one.
+
+- user: "look up REQ/001/001/10102025/188877"
+  resolve:
+  - { text: "REQ/001/001/10102025/188877", type: application_number, canonical: "REQ/001/001/10102025/188877",
+      scheme_from_prefix: "Meghalaya Piggery Development Scheme" }
+  sql: |
+    SELECT request_id, scheme_name, lgd_district, lgd_block, lgd_village_name,
+           applicant_category, current_file_status, data_verified
+    FROM curated.v_cm_elevate WHERE request_id = 'REQ/001/001/10102025/188877' LIMIT 10;
+  note: >
+    Segment 1 = 001 identifies Piggery before the query runs. The LIMIT is 10, not 1 -
+    request_id is not unique.
+
+- user: "look up MPDSI018599"
+  resolve:
+  - { text: MPDSI018599, type: application_number, status: not_found,
+      reason: "format belongs to a different extract" }
+  sql: null
+  note: >
+    From requirement workbook UC-042. CM Elevate numbers in megh_db all begin "REQ/".
+    Say the format is not the one held here rather than returning a bare not-found.
+
+- user: "how much was disbursed under the warehouse scheme"
+  resolve:
+  - { text: warehouse, type: cm_scheme, canonical: "Meghalaya Warehouse Scheme" }
+  - { text: disbursed, type: measure, status: not_available, reason: no money column exists }
+  sql: null
+  note:
+    critical: true
+    text: >
+      Resolve the scheme, then REFUSE the measure. Do not answer with the application
+      count of 38 - that is a different question and must be offered as one, relabelled.
+      The workbook claims Rs 22.62 Cr for this scheme; no amount is held in this database.
+
+- user: "show the application trend by month"
+  resolve:
+  - { text: "by month", type: time, status: not_available, reason: no date column exists }
+  sql: null
+  note: >
+    Do not fall back to ingested_at and do not parse request_id. Offer a breakdown by
+    scheme or district instead.
+
+- user: "applications by scheme in Ri Bhoi"
+  resolve:
+  - { text: "Ri Bhoi", type: district, canonical: "Ri Bhoi" }
+  - { text: "by scheme", type: measure, canonical: "COUNT(*) GROUP BY scheme_name" }
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate WHERE lgd_district = 'RI BHOI'
+    GROUP BY 1 ORDER BY applications DESC;
+  expected: 13 schemes present in Ri Bhoi, led by Piggery with about 1,955
+  note: Two of the 15 schemes have no applications in Ri Bhoi - show them as zero or say so.
+
+- user: "how many registered bodies applied"
+  resolve:
+  - { text: "registered bodies", type: applicant_category, canonical: registered }
+  sql: |
+    SELECT COUNT(*) AS applications FROM curated.v_cm_elevate
+    WHERE applicant_category = 'registered';
+  expected: 83
+  note: >
+    n=83 across the whole programme, concentrated in Agriculture Response Vehicle (30)
+    and Warehouse (20). Show the count with any percentage.
+
+- user: "how many applied through connect centres"
+  resolve:
+  - { text: "connect centres", type: application_mode, canonical: cmconnectcenter, matched_by: 2_alias }
+  sql: |
+    SELECT COUNT(*) AS applications FROM curated.v_cm_elevate
+    WHERE application_mode = 'cmconnectcenter';
+  expected: 793
+  note: Emit the stored camelCase form. It is an assisted walk-in centre, not "offline".
+
+- user: "sericulture by district"
+  resolve:
+  - { text: sericulture, type: cm_scheme, canonical: "Meghalaya Sericulture & Weaving Scheme" }
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Sericulture & Weaving Scheme'
+    GROUP BY 1 ORDER BY applications DESC;
+  expected: one row - Ri Bhoi, 14
+  note: >
+    Single-district scheme. Say so rather than presenting one row as a geographic
+    comparison. It is also held as ONE scheme, not split into Spinning and Weaving.
+
+- user: "how many schemes are under CM Elevate"
+  resolve:
+  - { text: "how many schemes", type: measure, canonical: "COUNT(*) FROM dim_cm_elevate_scheme" }
+  sql: "SELECT COUNT(*) AS schemes FROM curated.dim_cm_elevate_scheme;"
+  expected: 15
+  note: >
+    Read the dimension, not a DISTINCT over the fact. If the user says 13, correct them -
+    that figure comes from the requirement workbook.
+
+- user: "common facility center applications"
+  resolve:
+  - { text: "common facility center", type: cm_scheme, status: not_found,
+      suggestions: ["Meghalaya Sports & Wellness Centre Scheme", "Meghalaya Warehouse Scheme",
+                    "PRIME Small Enterprise Empowerment and Development (SEED)"] }
+  sql: null
+  note:
+    critical: true
+    text: >
+      From workbook UC-083. This scheme does not exist in megh_db. Return not_found with
+      real scheme names as candidates - and do NOT let fuzzy resolve it to "Sports and
+      Wellness Centre", which is the nearest string and a completely different scheme.
+
+- user: "which villages have CM Elevate but no PMAY"
+  resolve:
+  - { text: "CM Elevate", type: cm_scheme, canonical: all }
+  - { text: PMAY, type: cross_scheme, canonical: v_cross_scheme_village_coverage }
+  sql: |
+    WITH cm AS (
+      SELECT village_code, COUNT(*) AS cm_applications
+      FROM curated.v_cm_elevate WHERE entity_type <> 'Unresolved' GROUP BY 1
+    )
+    SELECT cm.village_code, c.lgd_district, cm.cm_applications, c.pmay_houses
+    FROM cm LEFT JOIN curated.v_cross_scheme_village_coverage c USING (village_code)
+    WHERE COALESCE(c.pmay_houses, 0) = 0
+    ORDER BY cm.cm_applications DESC;
+  note: >
+    CM Elevate has no column in the coverage view, so aggregate first and join the
+    aggregate. The view COALESCEs to 0, so the test is = 0, never IS NULL.
+
+# ---------------------------------------------------------------------------
+maintenance:
+  source_files:
+  - datasets/Cmelevate/CM_Elevate_AllSchemes_20260818_122217.xlsx   # 15 sheets + Summary, 8436 rows
+  - datasets/Cmelevate/Megh One AI - CM Elevate NLP Use Cases.xlsx  # 89 use cases - DIFFERENT DATASET
+  schema_authority: SCHEMA_FOR_DEVELOPERS.md   # live database extract, 2026-09-04
+  row_counts_at_generation:
+    source_export: 8436
+    curated.v_cm_elevate: unverified_in_db   # ~8543 by reltuples estimate
+  data_span_in_source: none - CM Elevate carries no date
+  last_generated: '2026-09-04'
+
+  open_verification_tasks:
+    critical: true
+    note: >
+      This file was written from the source export plus the live schema. The VALUE
+      catalogues have not been read back from megh_db. Each item is a query to run
+      before any CM Elevate answer ships.
+    tasks:
+    - "Row count: SELECT COUNT(*) FROM curated.v_cm_elevate - reconcile 8,436 against ~8,543."
+    - "cm_scheme_key values: SELECT cm_scheme_key, scheme_name, endpoint FROM curated.dim_cm_elevate_scheme ORDER BY 1. This file lists scheme names only; the keys are unread."
+    - "BLOCK CANONICAL FORMS - the highest-risk item. SELECT DISTINCT lgd_block FROM curated.v_cm_elevate. The 58 canonical values here are the source forms with 'C & RD Block' stripped; the roster forms are expected to be uppercase and may differ further."
+    - "Geography casing: confirm lgd_district and lgd_block are stored UPPERCASE and lgd_village_name is not."
+    - "Unresolved placeholders: SELECT COUNT(*) FROM curated.v_cm_elevate WHERE entity_type = 'Unresolved', and how many distinct village_codes they carry."
+    - "request_id duplicates: confirm 36 duplicates survived the loader's full-row dedupe."
+    - "applicant_category: SELECT DISTINCT applicant_category - confirm the three values and that the loader derives them as this file assumes."
+    - "data_verified: SELECT data_verified, COUNT(*) - confirm the five states including NULL."
+    - "onhold and is_withdraw: confirm both are still FALSE on every row, and whether any NULLs exist."
+    - "scheme_specific keys: SELECT DISTINCT jsonb_object_keys(scheme_specific) per cm_scheme_key - build the key manifest this file does not have."
+    - "gender_id: confirm it is present in scheme_specific for all 15 schemes."
+    - "PII: confirm whether dob, email_id, address, member_id, family_id, pds_id, account_holder_name and ifsc_code really did survive into scheme_specific. If so, escalate - the strip list is incomplete."
+    - "request_id scheme prefix: confirm the 15 prefixes below are still 1:1 after any reload."
+
+  regeneration_rules:
+  - Re-profile the export AND re-query megh_db. Diff every count here. Explain each change.
+  - APPEND new canonical values and aliases. Never delete one - old questions must keep resolving.
+  - "Re-run the village ambiguity registry. If a name gains a code it must appear here."
+  - "Re-check the block canonical forms against dim_geography. This is the weakest part of the file."
+  - "Re-check the request_id scheme-prefix map. It is a measured regularity, not a documented contract, and the API could change it."
+  - "Watch applicant_types_seen on dim_cm_elevate_scheme - it is an observation dated 2026-09-03 and will drift."
+  - "If a disbursement dataset is ever loaded, absent_dimensions.money must be rewritten, not merely edited - most of this file's refusals depend on it."
+  - Bump resolver_version.
+
+  known_conflicts:
+    critical: true
+    text: >
+      The requirement workbook describes a different dataset - 2,847 applications, 13
+      schemes, 1,153 villages, 57 blocks, four rupee measures, Bank/LIFCOM channels,
+      subsidy tranches, desanctioned and refused flags, Month/Year columns, and
+      MPDSI/PTVSI identifiers. It also names a Common Facility Center scheme that does
+      not exist here and omits PRIME Small Enterprise Empowerment, the largest scheme in
+      the real data. 40 of its 89 use cases are unanswerable from megh_db. See
+      Annotations/CMElevate/README.md section 5.
+
+  companion_files:
+  - Annotations/CMElevate/cmelevate_schema_partitions.yaml
+  - Annotations/CMElevate/cmelevate_classification_rules.yaml
+  - Annotations/CMElevate/cmelevate_default_rules.yaml
+  - Annotations/CMElevate/README.md
+  - SCHEMA_FOR_DEVELOPERS.md

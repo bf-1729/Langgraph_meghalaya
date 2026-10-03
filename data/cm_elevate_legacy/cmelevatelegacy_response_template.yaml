@@ -1,0 +1,444 @@
+# cmelevatelegacy_response_template.yaml
+#
+# ===========================================================================
+# v1.0 - 2026-09-23 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Response templates for CM Elevate Legacy - node 5.15, the response composer.
+# Editable by analysts - no code change needed.
+# Numbers are locked from the result set; templates only shape the wording
+# around them.
+#
+# There is no flat-table ancestor, so nothing here is a rewrite.
+#
+# SEVEN CAVEATS MUST TRAVEL WITH THE NUMBERS THEY BELONG TO. They are not
+# optional decoration - each one exists because the figure is wrong or
+# misleading without it:
+#
+#   1. WHICH DISBURSEMENT. Subsidy, loan, or both - the three differ by up to 64%.
+#   2. SANCTIONED IS NOT DISBURSED. Rs 142.74 Cr against Rs 82.90 Cr.
+#   3. THE NO-FINANCIAL-YEAR BUCKET. 395 records, all of them Sericulture.
+#   4. UNRESOLVED VILLAGES. 404 records excluded from every village answer.
+#   5. WHICH REFUSAL FIELD. Three fields, three numbers, none authoritative.
+#   6. THE FIXED ENTITLEMENT. Six schemes pay a constant, so an average is not one.
+#   7. SUSPECT DATES. A 1985 loan and two payments after the file was produced.
+#
+# There is NO applicant name in any template. first_name, middle_name and
+# last_name are dropped by the view and excluded from the chatbot layer - a name
+# placeholder would render empty. Never reintroduce one.
+# ===========================================================================
+
+response_templates:
+
+  # ---- how the answer text is shaped ------------------------------------
+  formatting:
+    number_format: "indian"            # 2,823 not 2823; 1,25,000 not 125,000
+    currency_symbol: "₹"
+    decimal_places: 2
+    percent_decimal_places: 1
+    financial_year_format: "YYYY-YY"   # 2024-25; a STORED label, not derived from a date
+    date_format: "DD Month YYYY"
+    money_unit: "crore"                # the view stores RUPEES, reported in crore for totals
+    row_level_money_unit: "rupees"     # a single record is an entitlement, never 0.0125 crore
+    money_unit_warning:
+      critical: true
+      text: >
+        The view is RUPEES - divide by 1e7 for crore and state the unit on every figure.
+        MGNREGA expenditure is LAKH and PMAY's pre-aggregates are already CRORE, so never
+        add across schemes. The authority is curated.dim_scheme.money_unit, and it has
+        NOT been read for this scheme - rupees is inferred from magnitude.
+    show_unit_always: true
+    show_assumptions: true             # surface the defaults that fired
+    geography_display_case: "title"    # district and block are stored UPPERCASE in
+                                       # dim_geography - title-case them for display,
+                                       # but filter with the uppercase literal
+    scheme_name_display: "verbatim"    # never tidy the (spinning) / (weaving) spacing
+    null_display: "not recorded"
+    zero_display: "0"                  # a recorded zero is a real outcome here, not a blank
+    tie_behaviour: "show_all"
+    empty_result_message: "No CM Elevate Legacy records for that selection."
+    no_mandatory_exclusion: >
+      Unlike PMAY, this scheme has no placeholder rows and no blanket filter. Do not
+      write "placeholder records were excluded" - nothing was.
+    max_rows_inline: 20
+
+  # =======================================================================
+  templates:
+
+    # ---- result shapes --------------------------------------------------
+    single_value: "{metric} for {scope} in {period} is {value}."
+    multi_metric: "For {scope} in {period}: {metric_list}."
+    count: "{scope} has {value} {entity} in {period}."
+    record_count: "{scope} has {value} CM Elevate Legacy records in {period}."
+    scheme_count: "{value} of the 13 schemes are represented in {scope}."
+    average_value: "Average {metric} per {denominator} for {scope} in {period} is {value}."
+    ratio_value: "{metric} for {scope} in {period} works out to {value}."
+    share_percentage: "{metric} for {scope} in {period} is {value}%."
+    proportion_of_total: "{scope} accounts for {value}% of the CM Elevate Legacy total for {metric} in {period}."
+    disbursement_rate: "{scope} has disbursed {disbursed} of {sanctioned} sanctioned, {value}%."
+
+    ranked_list: "Top {n} {entity} by {metric} in {period}:"
+    bottom_list: "Bottom {n} {entity} by {metric} in {period}:"
+    extremes: "Highest is {top_entity} at {top_value}; lowest is {bottom_entity} at {bottom_value}."
+    rank_position: "{scope} ranks {rank} of {total} {entity} by {metric} in {period}."
+    tie_at_top: "{tied_entities} are level at {value}."
+
+    breakdown: "{metric} by {level} for {period}:"
+    scheme_breakdown: "CM Elevate Legacy records in {scope} by scheme:"
+    money_split: "{scope} received {subsidy} in subsidy and {loan} in loans, {total} in all."
+    outcome_breakdown: "Records in {scope} by recorded outcome:"
+    time_series: "{metric} by financial year, {start} to {end}:"
+    comparison: "{entity_a} {value_a} against {entity_b} {value_b} - a difference of {change}."
+    period_comparison: "{metric} for {scope}: {value_a} in {period_a} against {value_b} in {period_b}."
+
+    # No applicant-name placeholder anywhere. Records are identified by
+    # application number, scheme and geography.
+    entity_detail: "Application {application_number} under {scheme_name} sits in {village} village, {block} block, {district} district."
+    money_detail: "{sanctioned} was sanctioned; {subsidy} was paid as subsidy and {loan} as a loan, {total} in all."
+    outcome_detail: "The record is marked {desanctioned_reason}{reason_clause}."
+    name_not_held: "Applicant names are not held in the query surface, so records are identified by application number."
+    lookup_list: "Matches for '{value}':"
+    entity_list: "{entity} in {scope}:"
+    year_list: "Financial years available: 2024-25 and 2025-26."
+    coverage_statement: "{value} villages in {scope} have CM Elevate Legacy records."
+
+    # ---- situations that need specific wording ---------------------------
+    empty_result: "No {metric} recorded for {scope} in {period}."
+    all_zero_result: "{scope} recorded zero {metric} in {period}. The zero is a real recorded value - the money was sanctioned and not paid - not missing data."
+    no_data_in_source: "{scope} has {available} recorded but no {requested}, so there is nothing to report rather than a zero."
+    partial_coverage: "{covered} of {requested_total} {entity} have {metric} recorded; the rest are not reported rather than zero."
+    unavailable_in_source: "{requested} is not held in this data."
+
+    # ---- the seven caveats, as standalone lines --------------------------
+    disbursement_split_caveat: "Disbursement is recorded three ways here - {subsidy} as subsidy, {loan} as loans, {total} together. This figure is {which}."
+    sanctioned_not_disbursed: "{sanctioned} was sanctioned and {disbursed} disbursed, {pct}% of it."
+    unresolved_year_note: "{value} records carry no financial year and are reported separately rather than dropped."
+    sericulture_year_note:
+      text: "All {value} records with no financial year belong to the two Sericulture schemes, so a year-by-year view leaves those schemes out entirely."
+      critical: true
+    unresolved_village_note: "{value} records could not be matched to a village and are left out of the village figures. They remain in the district and statewide totals."
+    refusal_field_note: "Counted from {field}. The three refusal fields disagree - {desanctioned} records carry a desanction reason, {flagged} carry the refusal flag, and only {all_three} carry both with a written reason."
+    refused_with_money_note: "{value} of these records still received money, so excluding them would change the total."
+    fixed_entitlement_note: "{scheme} pays a fixed {amount} to every applicant, so this figure is the record count times that entitlement rather than a spread."
+    suspect_date_note: "Some dates in this data look wrong - one loan is dated {earliest} and {future_count} payments are dated after the file was produced. Treat the extremes with caution."
+    bank_sanctioned_caveat: "The bank-sanctioned figure has no confirmed meaning - it is zero on half the records and its ratio to the sanctioned amount varies within a single scheme. It is shown for reference only."
+    pending_derived_note: "Pending is calculated as sanctioned minus disbursed; there is no recorded pending column in this scheme."
+    derived_total_note: "The recorded totals match the sum of their instalments exactly on every record, so the stored figure is used."
+
+    # ---- the refusals ----------------------------------------------------
+    sanction_rate_unavailable:
+      superseded: "2026-09-25 - replaced by sanction_share_note"
+      text: "A sanction rate cannot be calculated - every record here is already a sanctioned case, and the number of applications sits in a separate CM Elevate dataset with no way to link the two."
+    sanction_share_note:
+      text: "This is the share of records in this sanction-and-disbursement dataset that carry a sanctioned amount; applications that never reached sanction sit in the separate CM Elevate applications dataset, which cannot be linked to this one."
+      critical: true
+    desanctioned_is_not_rejected:
+      text: "The {value} desanctioned records are sanctions later withdrawn, not applications that were refused at the outset. They are not the answer to how many were not sanctioned."
+      critical: true
+    wrong_cm_elevate: "That field belongs to the other CM Elevate dataset - the applications one - which has no amounts and no dates. This answer is from the disbursement records."
+    cross_scheme_unavailable: "CM Elevate Legacy is not included in the cross-scheme comparison views, which cover MGNREGA and PMAY only, so a like-for-like comparison cannot be produced."
+    constituency_source_note: "The constituency comes from the geography registry through each record's village; records with no village carry no constituency."
+    monthly_unavailable: "A monthly view is not available for this scheme - the source records only a batch label with four values across two years. The two financial years are available instead."
+    applicant_type_unavailable: "Individual and group applicants are not recorded as a field in this dataset."
+    repayment_unavailable: "Repayment is not recorded in this data - only whether a loan was disbursed."
+    programme_detail_unavailable: "This dataset holds sanction and disbursement records only; it has no description of the programme, its objectives or its eligibility rules."
+    district_code_unavailable: "District and block are held as names only - there is no LGD code for them in this data."
+
+    # ---- resolution and recovery -----------------------------------------
+    entity_not_found: "'{value}' is not in the CM Elevate Legacy data. Closest matches: {suggestions}."
+    ambiguous_entity_resolved: "Read '{value}' as {resolved} in {district}. There are {count} places with that name."
+    colliding_name_resolved: "Read '{value}' as a block. It is also the name of a village - say 'village {value}' for that reading."
+    sericulture_resolved: "Read '{value}' as the {which} scheme. Sericulture is recorded as two separate schemes, spinning and weaving."
+    scheme_resolved_note: "Read '{value}' as {scheme_name}."
+    prefix_not_a_scheme: "The letters at the start of an application number do not reliably identify a scheme - seven of the thirteen use more than one prefix. Filtered on the scheme name instead."
+    period_trimmed: "Only FY 2024-25 and FY 2025-26 are held, so the period was trimmed to {applied_range}."
+    outside_data_span: "No records are held for {period}. This scheme covers FY 2024-25 and FY 2025-26."
+    permission_denied: "That level of detail is above your access. The finest level available to you is {allowed_level}."
+    execution_failed: "The query could not be completed. Please try a narrower period or a smaller area."
+
+    # ---- lines that travel alongside the answer --------------------------
+    unit_statement: "Amounts are in {unit} rupees."
+    assumption_prefix: "Assumed: {assumptions}."
+    record_grain_note: "One row is one applicant's sanction and disbursement under one scheme. The same person can appear under two schemes without anything linking the records."
+    application_unique_note: "Application numbers are unique here, so a record count and a distinct application count are the same figure."
+    scheme_skew_note: "The Piggery scheme is {value} of the {total} records and pays a fixed ₹1,25,000, so it dominates any statewide average."
+    singleton_scheme_note: "{scheme} holds a single record, so a percentage for it is not meaningful."
+    small_scheme_note: "{scheme} holds only {value} records, so treat the percentage as indicative."
+    biggest_scheme_ambiguity: "Piggery is the largest by number of records and {money_scheme} by money, so 'biggest' depends on the measure."
+    financial_year_note: "Financial years are read from the recorded year label on each record, not calculated from the disbursement dates."
+    year_date_disagreement_note: "The recorded financial year and the year implied by the disbursement date disagree on {value} records, so a year figure and a date-range figure will not reconcile."
+    village_identity_note: "Villages are counted by LGD code, since {value} village names here are shared by more than one village."
+    municipal_block_note: "{value} records sit in Municipal Board areas rather than villages."
+    geo_conflict_note: "{value} of these records are in villages where sources disagree on the block or district; the official roster value is used."
+    loan_entity_null_note: "{value} records have no lender recorded and are shown separately; {with_money} of them carry loan money."
+    loan_status_derived_note: "The loan status simply restates whether a loan amount is present, so it is not independent confirmation."
+    zero_disbursement_note: "{value} records were sanctioned but received nothing."
+    nulls_excluded_note: "{excluded} records have no amount recorded and are left out of the average rather than counted as zero."
+    quarantine_note: "One source record was held back at load as a corrupted identity, so {value} of {source_total} are available."
+    sports_scheme_caveat: "The Sports & Wellness figures may be short one record - a source row was held back at load and its name looks like a real team name rather than corrupt data."
+    region_expansion_note: "{region} covers {districts}."
+    threshold_breach: "{scope} is below {threshold} at {value}."
+    threshold_pass: "{scope} is at or above {threshold} at {value}."
+    outlier_note: "{entity} is well clear of the rest and pulls the average up."
+    large_result: "Showing the first {shown} of {total} rows."
+    source_not_verified_note: "These figures are profiled from the source workbook and have not been re-measured against the database."
+
+  # =======================================================================
+  # WORKED ANSWERS
+  # The caveats above are easy to drop under pressure. These show them in
+  # place, so the composer has a target shape rather than a rule list.
+  # =======================================================================
+  worked_answers:
+
+  - question: "What is the total amount disbursed under CM Elevate Legacy?"
+    answer: >
+      CM Elevate Legacy has disbursed ₹82.90 crore against ₹142.74 crore sanctioned -
+      58.1% of it. That splits into ₹52.57 crore of subsidy and ₹30.33 crore of loans.
+      Figures cover all 2,822 records, including the 83 whose sanction was later
+      withdrawn.
+    why_this_shape: >
+      Names all three money readings rather than one, puts sanctioned beside disbursed so
+      the gap is visible, and states the desanctioned records are in rather than leaving
+      it to be discovered.
+
+  - question: "Which scheme is the biggest?"
+    answer: >
+      It depends on the measure. By number of records it is the Meghalaya Piggery
+      Development Scheme, with 1,353 of 2,823 - 48% of the whole dataset. By money it is
+      the Meghalaya Agriculture Warehouse Scheme, with ₹44.34 crore sanctioned from just
+      87 records.
+    why_this_shape: Refuses the false precision of a single winner instead of picking one silently.
+
+  - question: "How much did Sericulture spinning disburse?"
+    answer: >
+      Almost nothing. The scheme sanctioned ₹2.01 crore across 198 records and disbursed
+      ₹26,000 - and none of that was subsidy. No subsidy payment was made on any of the
+      198 records; the ₹26,000 is two loans. The scheme also carries no financial year on
+      any record, so it does not appear in year-by-year figures at all.
+    why_this_shape: >
+      "0.1%" would read as underperformance. The real finding is that nothing was paid
+      out, and the year caveat is attached because the user will meet it next.
+
+  - question: "How many records were refused?"
+    answer: >
+      52 records are marked 'Refused' in the desanction reason, and a further 31 are
+      marked 'Duplicate' - 83 in total. A separate refusal flag is set on only 8 records,
+      and only 4 carry both with a written reason, so the three fields disagree and none
+      of them is authoritative. Note that 32 of the 83 still received money.
+    why_this_shape: >
+      Names the field, gives the competing numbers rather than reconciling them, and
+      flags the payment overlap because it changes any money total that follows.
+
+  - question: "How many villages received support in West Khasi Hills?"
+    answer: >
+      80 villages in West Khasi Hills have CM Elevate Legacy records. A further 77 of the
+      district's 217 records could not be matched to a village - the highest share of any
+      district - and are excluded from that count, though they remain in the district's
+      record and money totals.
+    why_this_shape: >
+      The exclusion is stated with its size, and the reader is told the records were not
+      discarded, only set aside for the village count.
+
+  - question: "Show the disbursement trend by year."
+    answer: >
+      FY 2024-25 holds 2,291 records and FY 2025-26 holds 137 - only two years, so this
+      is a comparison rather than a trend. A further 395 records carry no financial year
+      at all, and they are exactly the two Sericulture schemes, which therefore do not
+      appear in either year. Only three schemes have records in both years.
+    why_this_shape: >
+      Declines to draw a trend line through two points, and explains the missing bucket by
+      naming the schemes rather than calling them unknown.
+
+  - question: "What is the average sanctioned amount for Piggery?"
+    answer: >
+      ₹1,25,000 - and it is the same on all 1,353 Piggery records, because the scheme pays
+      a fixed entitlement. The average carries no information beyond the entitlement
+      itself. What varies is how much of it was paid: 1,145 records received exactly
+      ₹62,500, two instalments of ₹31,250.
+    why_this_shape: >
+      Answers the question, says why the answer is uninformative, and redirects to the
+      measure that does vary.
+
+  - question: "What percentage of applications were sanctioned?"
+    answer: >
+      That cannot be calculated from this data. Every one of the 2,822 records here is
+      already a sanctioned case, so there is no unsanctioned population to compare
+      against - the applications themselves sit in a separate CM Elevate dataset with no
+      identifier linking the two. I can tell you how many sanctions were recorded, and
+      how much of the sanctioned money was actually disbursed.
+    why_this_shape:
+      critical: true
+      text: >
+        Refuses in the first sentence, explains why in the second, and offers the nearest
+        answerable question. It does NOT offer the 83 desanctioned records as the
+        complement, which is the substitution that would look helpful and be wrong.
+
+  # =======================================================================
+  caveat_routing:
+    note: >
+      Which caveat must fire for which result shape. The composer checks this table
+      before the answer is released; a result matching a trigger without its caveat is
+      incomplete, not merely terse.
+    rules:
+    - {trigger: any money figure,                          caveat: unit_statement}
+    - {trigger: the word "disbursed" in the answer,        caveat: disbursement_split_caveat}
+    - {trigger: a sanctioned figure without a disbursed one, caveat: sanctioned_not_disbursed}
+    - {trigger: GROUP BY or WHERE on financial year,       caveat: unresolved_year_note}
+    - {trigger: a financial-year answer naming Sericulture, caveat: sericulture_year_note}
+    - {trigger: COUNT(DISTINCT village_code) or a village list, caveat: unresolved_village_note}
+    - {trigger: any refusal count,                         caveat: refusal_field_note}
+    - {trigger: a money total that excludes desanctioned records, caveat: refused_with_money_note}
+    - {trigger: AVG or SUM of sanctioned_amount within one of the six fixed schemes, caveat: fixed_entitlement_note}
+    - {trigger: MIN or MAX on any date column,             caveat: suspect_date_note}
+    - {trigger: bank_sanctioned_amount appearing at all,   caveat: bank_sanctioned_caveat}
+    - {trigger: a pending or outstanding figure,           caveat: pending_derived_note}
+    - {trigger: a statewide average,                       caveat: scheme_skew_note}
+    - {trigger: a percentage over fewer than 30 records,   caveat: small_scheme_note}
+    - {trigger: any Sports & Wellness total,               caveat: sports_scheme_caveat}
+    - {trigger: GROUP BY loan_entity,                      caveat: loan_entity_null_note}
+    - {trigger: a superlative - biggest, largest, most,    caveat: biggest_scheme_ambiguity}
+    - {trigger: any figure quoted before the database has been re-measured, caveat: source_not_verified_note}
+
+  # =======================================================================
+  follow_up_rules:
+
+    # ---- move up or down the hierarchy ----------------------------------
+    - condition: "result_is_statewide"
+      suggestion: "Split this by district, or by scheme?"
+
+    - condition: "result_by_district"
+      suggestion: "Break this down by block?"
+
+    - condition: "result_by_block"
+      suggestion: "Break this down by village?"
+
+    - condition: "result_is_single_village"
+      suggestion: "Compare this against the rest of the block?"
+
+    - condition: "result_is_single_district"
+      suggestion: "See how this compares with the other districts?"
+
+    - condition: "result_is_region"
+      suggestion: "See the districts inside that region separately?"
+
+    # ---- move across schemes --------------------------------------------
+    - condition: "result_is_scheme_breakdown"
+      suggestion: "See how much of each scheme's sanction was actually disbursed?"
+
+    - condition: "result_is_single_scheme"
+      suggestion: "Compare this against the other twelve schemes?"
+
+    - condition: "result_is_statewide_average"
+      suggestion: "Break this down by scheme, since Piggery dominates the average?"
+
+    - condition: "result_is_sericulture"
+      suggestion: "See the other Sericulture scheme as well?"
+
+    # ---- move across measures -------------------------------------------
+    - condition: "result_is_record_count"
+      suggestion: "See the amount sanctioned and disbursed for the same scope?"
+
+    - condition: "result_is_total_disbursement"
+      suggestion: "See the subsidy and loan split behind that figure?"
+
+    - condition: "result_is_subsidy_only"
+      suggestion: "Include the loans as well?"
+
+    - condition: "result_is_loan_only"
+      suggestion: "See the subsidy alongside it?"
+
+    - condition: "result_is_sanctioned_amount"
+      suggestion: "See how much of that has actually been disbursed?"
+
+    - condition: "result_is_disbursement_rate"
+      suggestion: "See the records that received nothing at all?"
+
+    - condition: "result_is_money_by_district"
+      suggestion: "See which schemes drove that district's figure?"
+
+    # ---- follow the caveats ---------------------------------------------
+    - condition: "result_has_unresolved_years"
+      suggestion: "See the records that carry no financial year?"
+
+    - condition: "result_excludes_unresolved_villages"
+      suggestion: "See the records whose village could not be identified?"
+
+    - condition: "result_is_refusal_count"
+      suggestion: "See how the three refusal fields disagree?"
+
+    - condition: "result_includes_desanctioned"
+      suggestion: "See the same figure with the desanctioned records left out?"
+
+    - condition: "result_excludes_desanctioned"
+      suggestion: "See how much money those desanctioned records received?"
+
+    - condition: "result_is_fixed_entitlement_scheme"
+      suggestion: "See the schemes whose sanctioned amount actually varies?"
+
+    - condition: "result_is_date_extremum"
+      suggestion: "See the records with dates that look wrong?"
+
+    - condition: "result_is_zero_disbursement_list"
+      suggestion: "See which schemes those records belong to?"
+
+    # ---- move across time -----------------------------------------------
+    - condition: "result_has_single_year"
+      suggestion: "Compare this against the other financial year?"
+
+    - condition: "result_is_time_series"
+      suggestion: "See which schemes drove the change?"
+
+    - condition: "result_is_comparison"
+      suggestion: "See the same comparison by scheme?"
+
+    # ---- work with the list just returned --------------------------------
+    - condition: "result_is_ranked_list"
+      suggestion: "Would you like to see the lowest as well?"
+
+    - condition: "result_is_ranked_list_top_n"
+      suggestion: "See what share of the statewide total these account for?"
+
+    - condition: "result_has_tie"
+      suggestion: "Break the tie on a second measure?"
+
+    - condition: "result_has_outlier"
+      suggestion: "See the figures with that entry set aside?"
+
+    - condition: "result_row_count_exceeds_display"
+      suggestion: "Export the full list?"
+
+    - condition: "result_is_record_listing"
+      suggestion: "Summarise these records by scheme instead?"
+
+    # ---- recover from a thin or failed answer ----------------------------
+    - condition: "result_is_empty"
+      suggestion: "Try a wider period, or the block this village sits in?"
+
+    - condition: "result_is_all_zero"
+      suggestion: "See what was sanctioned for that scope, since nothing was disbursed?"
+
+    - condition: "entity_not_found"
+      suggestion: "List the schemes, or the villages in that district?"
+
+    - condition: "entity_resolved_by_assumption"
+      suggestion: "Did you mean the village of that name rather than the block?"
+
+    - condition: "result_has_partial_coverage"
+      suggestion: "See which of them have nothing recorded?"
+
+    - condition: "measure_unavailable_in_source"
+      suggestion: "See what is recorded for that scope instead?"
+
+    - condition: "sanction_rate_refused"
+      suggestion: "See the number of sanctioned records and the amounts behind them?"
+
+    - condition: "cross_scheme_refused"
+      suggestion: "See the CM Elevate Legacy figures on their own?"
+
+    - condition: "constituency_refused"
+      suggestion: "See the same figures by district or block?"
+
+    - condition: "monthly_refused"
+      suggestion: "See the two financial years instead?"
+
+    - condition: "name_lookup_refused"
+      suggestion: "Search by application number, scheme or village instead?"

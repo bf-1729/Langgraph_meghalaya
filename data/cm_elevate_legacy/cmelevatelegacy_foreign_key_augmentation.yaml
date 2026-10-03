@@ -1,0 +1,707 @@
+# cmelevatelegacy_foreign_key_augmentation.yaml
+#
+# Join edges and the materialised join graph for CM Elevate Legacy - node 5.9.
+#
+#   nodes       what each object is, its grain, and whether it may be aggregated
+#   edges       every join, with the exact ON clause the generator must emit
+#   join_graph  adjacency list, listed from the many side, traversed undirected
+#
+# declared: true      the edge is a real constraint in information_schema
+# declared: false     the edge exists only here
+# is_prohibited: true the generator must refuse this join and use `use_instead`
+#
+# ===========================================================================
+# v1.0 - 2026-09-23 - WRITTEN AGAINST THE LIVE DATABASE
+#
+# There is no flat-table ancestor for this scheme, so there are no retired
+# edges and no reversed prohibitions - every edge below is described against
+# megh_db as it stands.
+#
+# Authority: SCHEMA_FOR_DEVELOPERS.md, generated from the live database
+# 2026-09-22 11:35 UTC.
+#
+# THE PROHIBITION THAT MATTERS MOST IN THIS FILE
+#   curated.fact_cm_elevate_disbursement must never be joined to
+#   curated.fact_cm_elevate_application. They carry almost the same name and
+#   they are DIFFERENT SCHEMES - no shared identifier exists between the two
+#   source files, confirmed separate by the client. This is the one prohibited
+#   edge a generator is most likely to try, because the names invite it.
+#
+# TWO STRUCTURAL DIFFERENCES FROM PMAY'S GRAPH
+#   1. This fact has FIVE declared foreign keys, one more than PMAY's four
+#      traversable ones, because the scheme carries its own sub-scheme
+#      dimension (dim_cm_elevate_disb_scheme) as well as dim_scheme.
+#   2. There is NO cross-scheme view for this scheme and therefore NO
+#      use_instead for a cross-scheme question. Where PMAY redirects, this
+#      partition refuses.
+# ===========================================================================
+
+foreign_key_augmentation:
+
+  version: '1.0'
+  database: megh_db
+  schema: curated
+  read_role: megh_readonly
+  structure_verified: '2026-09-22'
+  primary_query_surface: curated.v_cm_elevate_disbursement
+
+  # =======================================================================
+  nodes:
+
+    curated.v_cm_elevate_disbursement:
+      role: fact_view
+      object_type: view
+      over: curated.fact_cm_elevate_disbursement
+      primary_key: cm_elevate_disb_fact_id
+      natural_key: application_number
+      grain: one row per applicant's sanction-and-disbursement record
+      column_count: 38
+      aggregate_before_reporting: false
+      unit: rupees
+      row_count: unverified_in_db
+      note: >
+        THE DEFAULT FROM CLAUSE FOR EVERY CM ELEVATE LEGACY QUESTION. Pre-joins
+        dim_cm_elevate_disb_scheme, dim_geography and dim_year, so the generator emits
+        WHERE and GROUP BY only. COUNT(*) is a record count and needs no mandatory
+        predicate - unlike PMAY, this scheme has no is_placeholder flag. It also DROPS
+        the three applicant-name columns, which is the second reason to prefer it over
+        the fact.
+
+    curated.fact_cm_elevate_disbursement:
+      role: fact
+      object_type: table
+      primary_key: cm_elevate_disb_fact_id
+      natural_key: application_number
+      grain: one row per applicant's sanction-and-disbursement record
+      column_count: 38
+      aggregate_before_reporting: false
+      unit: rupees
+      row_count: unverified_in_db
+      contains_pii: true
+      note: >
+        The underlying fact. It carries first_name, middle_name and last_name, which the
+        view removes and which semantic.v_embedding_documents excludes. The generator
+        should not reach for this table at all - there is no column on it that a chatbot
+        answer needs and the view does not already expose, except the audit columns.
+
+    curated.dim_cm_elevate_disb_scheme:
+      role: dimension
+      object_type: table
+      primary_key: disb_scheme_key
+      row_count: 13
+      grain: one row per scheme in the CM Elevate Disbursement file
+      scheme_scoped: true
+      safe_to_aggregate: false
+      note: >
+        The sub-scheme dimension, pre-joined into the view as scheme_name. DISTINCT FROM
+        curated.dim_cm_elevate_scheme (15 rows), which belongs to the other CM Elevate
+        scheme - see the prohibited edge below. Its application_id_prefixes column is
+        observational and must never be used to derive a scheme from an application
+        number.
+
+    curated.dim_scheme:
+      role: dimension
+      object_type: table
+      primary_key: scheme_key
+      row_count: 6
+      grain: one row per scheme in the warehouse
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        Authority on money_unit, grain_note and time_semantics. Constant within this
+        partition, so never a grouping key for a CM Elevate Legacy question. Read it on
+        its own when an answer needs the unit - and it has NOT been read yet, so every
+        rupee assumption in this folder is inferred from magnitude.
+
+    curated.dim_year:
+      role: dimension
+      object_type: table
+      primary_key: year_key
+      row_count: 9
+      grain: one row per financial year
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        The dimension holds 9 years; this scheme uses TWO. year_key is NULLABLE on the
+        fact and 395 records carry no year at all, so this is an OUTER relationship in
+        practice - the view uses LEFT JOIN precisely so those records survive.
+
+    curated.dim_geography:
+      role: dimension
+      object_type: table
+      primary_key: geography_key
+      natural_key: village_code
+      row_count: 7377
+      grain: one row per LGD village, ward or Unresolved placeholder
+      shared_across_schemes: true
+      safe_to_aggregate: false
+      note: >
+        The conformed dimension, NOT NULL on the fact side, so an inner join loses
+        nothing. 404 records resolve to a synthetic Unresolved placeholder rather than a
+        real village. District and block are NAMES here - there is no district or block
+        code column. It also carries ac_name and ac_number, which this scheme's view does
+        NOT expose; that is why constituency questions are refused.
+
+    curated.dim_geography_alias:
+      role: dimension
+      object_type: table
+      primary_key: alias_key
+      row_count: 34450
+      grain: one row per source spelling of a village
+      reachable: true
+      used_by_this_scheme: false
+      note: >
+        REACHABLE BUT NOT PART OF THIS GRAPH. fact_cm_elevate_disbursement has NO
+        alias_key - geography was resolved at ingest. Only the two MGNREGA facts
+        reference this table. Do not join it from this scheme.
+
+    curated.fact_cm_elevate_application:
+      role: fact
+      object_type: table
+      primary_key: cm_elevate_fact_id
+      grain: one row per application (request_id)
+      row_count: 8627
+      aggregate_before_reporting: false
+      note:
+        critical: true
+        text: >
+          A DIFFERENT SCHEME WITH A CONFUSINGLY SIMILAR NAME. Declared here only as the
+          far end of the most important prohibited edge in this file. It has no money
+          column and no time column, and no identifier it shares with this fact.
+
+    curated.dim_cm_elevate_scheme:
+      role: dimension
+      object_type: table
+      primary_key: cm_scheme_key
+      row_count: 15
+      grain: one row per scheme under the CM Elevate application umbrella
+      used_by_this_scheme: false
+      note: >
+        The OTHER scheme dimension. 15 rows against this scheme's 13, with overlapping
+        names - Piggery, Poultry and Dairy appear in both. Declared here only so a
+        generator that retrieves it recognises it as out of partition.
+
+    curated.fact_pmay_house:
+      role: fact
+      object_type: table
+      primary_key: pmay_fact_id
+      grain: one row per sanctioned PMAY-G house
+      note: >
+        PMAY partition. Declared here only as the far end of a prohibited edge - no CM
+        Elevate Legacy query may reference it directly, and no cross-scheme view carries
+        this scheme.
+
+    curated.fact_mgnrega_employment:
+      role: fact
+      object_type: table
+      primary_key: employment_fact_id
+      grain: one row per source row of the employment workbook
+      aggregate_before_reporting: true
+      note: MGNREGA partition. Far end of a prohibited edge.
+
+    curated.fact_mgnrega_expenditure:
+      role: fact
+      object_type: table
+      primary_key: expenditure_fact_id
+      grain: one row per source row of the expenditure workbook
+      aggregate_before_reporting: true
+      unit: lakh_rupees
+      note: >
+        MGNREGA partition, and in a different money unit - lakh against this scheme's
+        rupees. Far end of a prohibited edge.
+
+    curated.v_cross_scheme_money_district_year:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per scheme x district x financial year
+      unit: crore_rupees
+      includes_this_scheme: false
+      note:
+        critical: true
+        text: >
+          BUILT FROM MGNREGA AND PMAY ONLY. CM Elevate Legacy does not appear in it, so
+          it is NOT a use_instead for this partition's cross-scheme questions. Reading it
+          and presenting the result as a CM Elevate comparison would answer with two
+          other schemes' money.
+
+    curated.v_cross_scheme_village_coverage:
+      role: cross_scheme_view
+      object_type: view
+      grain: one row per village
+      includes_this_scheme: false
+      note: >
+        Also MGNREGA and PMAY only - its two measures are pmay_houses and
+        mgnrega_person_days. No CM Elevate column exists.
+
+    raw.source_rows:
+      role: lineage
+      object_type: table
+      primary_key: raw_id
+      readable_by_read_role: false
+      note: >
+        fact_cm_elevate_disbursement.raw_id is a real declared FK to this table, but
+        `raw` is outside the megh_readonly boundary. The edge exists and the application
+        cannot traverse it. Lineage queries are a DBA task.
+
+    staging.quarantine:
+      role: quarantine
+      object_type: table
+      readable_by_read_role: false
+      note: >
+        Holds the one record the loader rejected (source_row_id 2392, corrupted_identity).
+        Outside the read boundary. A completeness question is answered from
+        meta.v_reconciliation_cm_elevate_disbursement by a DBA, not by a join.
+
+  # =======================================================================
+  edges:
+
+    # ---- REAL DECLARED FOREIGN KEYS -------------------------------------
+    # All five are constraints in information_schema as of 2026-09-22.
+    # The first four are already resolved inside the view, so the generator
+    # should emit them ONLY when querying the fact directly - which it should
+    # not need to do at all.
+
+    - from_table: curated.fact_cm_elevate_disbursement
+      from_column: disb_scheme_key
+      to_table: curated.dim_cm_elevate_disb_scheme
+      to_column: disb_scheme_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      on_clause: "curated.fact_cm_elevate_disbursement.disb_scheme_key = curated.dim_cm_elevate_disb_scheme.disb_scheme_key"
+      prefer_instead: curated.v_cm_elevate_disbursement
+      reason: >
+        The sub-scheme join. NOT NULL on the fact side, so an inner join loses nothing.
+        The view already carries scheme_name, so emit this only against the raw fact.
+        Never point this key at dim_cm_elevate_scheme instead - that is the other
+        scheme's dimension and the key values do not correspond.
+
+    - from_table: curated.fact_cm_elevate_disbursement
+      from_column: geography_key
+      to_table: curated.dim_geography
+      to_column: geography_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      on_clause: "curated.fact_cm_elevate_disbursement.geography_key = curated.dim_geography.geography_key"
+      prefer_instead: curated.v_cm_elevate_disbursement
+      reason: >
+        The conformed geography join, and the only reason this scheme can be placed on a
+        map at all. NOT NULL - records with no village still resolve, to an Unresolved
+        placeholder, so nothing is dropped. The view already carries village_code,
+        lgd_village_name, lgd_block, lgd_district, entity_type, on_roster and
+        has_geo_conflict.
+
+    - from_table: curated.fact_cm_elevate_disbursement
+      from_column: year_key
+      to_table: curated.dim_year
+      to_column: year_key
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      join_type: LEFT
+      on_clause: "curated.fact_cm_elevate_disbursement.year_key = curated.dim_year.year_key"
+      prefer_instead: curated.v_cm_elevate_disbursement
+      reason:
+        critical: true
+        text: >
+          NULLABLE ON THE FACT SIDE, AND HEAVILY SO - 395 of 2,823 records (14%) carry no
+          financial year, and they are exactly the two Sericulture schemes. An INNER join
+          silently deletes both schemes from the result. Use LEFT, as the view does, or
+          accept the loss and state it. MGNREGA's equivalent is NOT NULL and does not
+          have this problem.
+
+    - from_table: curated.fact_cm_elevate_disbursement
+      from_column: scheme_key
+      to_table: curated.dim_scheme
+      to_column: scheme_key
+      cardinality: many_to_one
+      declared: true
+      nullable: false
+      on_clause: "curated.fact_cm_elevate_disbursement.scheme_key = curated.dim_scheme.scheme_key"
+      prefer_instead: read dim_scheme on its own
+      reason: >
+        Constant within this partition, so joining it per row buys nothing. Read
+        dim_scheme separately when the answer needs money_unit or time_semantics - and
+        it does need money_unit, which has not yet been read for this scheme.
+
+    - from_table: curated.fact_cm_elevate_disbursement
+      from_column: raw_id
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: true
+      nullable: true
+      traversable_by_read_role: false
+      on_clause: "curated.fact_cm_elevate_disbursement.raw_id = raw.source_rows.raw_id"
+      reason: >
+        Real constraint, unreachable in practice. `raw` is outside the megh_readonly
+        boundary, so the generator must never emit this join. Lineage is a DBA task.
+
+    # ---- THE JOINS THAT MUST NEVER BE MADE -------------------------------
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: any
+      to_table: curated.fact_cm_elevate_application
+      to_column: any
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason:
+        critical: true
+        text: >
+          THE EDGE THIS FILE EXISTS TO FORBID. The two facts are DIFFERENT SCHEMES that
+          share a name. There is NO shared identifier between the two source files -
+          confirmed separate by the client and recorded in the database's own table
+          comment - so there is no column pair to join on, not a weak one. A generator
+          may be tempted by application_number against request_id: they are different
+          identifier spaces and matching them produces garbage. A name match is not an
+          alternative - the names are not in either query surface.
+          There is no use_instead. A question that needs both is REFUSED, including
+          "what proportion of applications were sanctioned", which is the most common
+          way this edge gets requested.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: scheme_name
+      to_table: curated.dim_cm_elevate_scheme
+      to_column: scheme_name
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.dim_cm_elevate_disb_scheme
+      on_clause: null
+      reason: >
+        A name-to-name join across the two scheme dimensions. Piggery, Poultry and Dairy
+        appear in both catalogues, so this join WOULD return rows - which is exactly what
+        makes it dangerous. It would attach the other scheme's 15-scheme keys to this
+        scheme's records and invite the prohibited fact-to-fact join above. The 13-row
+        dimension is the only scheme catalogue for this partition.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: [village_code, year_key]
+      to_table: curated.fact_pmay_house
+      to_column: [village_code, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        CROSS-SCHEME ROW-LEVEL JOIN. One row per applicant record against one row per
+        house - the join multiplies both sides, and there is no foreign key between them.
+        Unlike PMAY, this scheme has NO cross-scheme view to redirect to, so the question
+        is refused rather than rerouted. Do not hand-roll a substitute by aggregating
+        both sides and joining the results: that pattern is sanctioned only where a
+        reviewed cross-scheme view exists.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_employment
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        Same grain mismatch, and the columns do not even mean the same thing - this
+        scheme's village_code is an LGD code while MGNREGA's geography_key is an unstable
+        surrogate. No cross-scheme surface carries this scheme.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: [village_code, year_key]
+      to_table: curated.fact_mgnrega_expenditure
+      to_column: [geography_key, year_key]
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        Grain mismatch plus a unit mismatch - this scheme's money is RUPEES and MGNREGA
+        expenditure is LAKH, so any combined figure is meaningless as well as inflated.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: village_code
+      to_table: curated.dim_geography_alias
+      to_column: geography_key
+      cardinality: many_to_many
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cm_elevate_disbursement
+      on_clause: null
+      reason: >
+        THIS SCHEME HAS NO alias_key. The alias table holds MGNREGA source spellings and
+        it fans out - 34,450 aliases over 7,377 villages - so joining it multiplies rows
+        by the alias count. Geography was resolved at ingest; the names on the view are
+        already canonical.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: application_number
+      to_table: curated.v_cm_elevate_disbursement
+      to_column: application_number
+      cardinality: one_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cm_elevate_disbursement
+      on_clause: null
+      reason: >
+        Self-join on the application number. It is UNIQUE, so this returns each row
+        joined to itself - no fan-out, but no information either, and it invites the
+        mistake of treating a duplicate-marked record as a joinable pair. The 31
+        'Duplicate' records are a recorded outcome, not duplicate rows; to look for
+        repeats use GROUP BY on the fields you suspect, not a self-join.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: source_row_id
+      to_table: staging.quarantine
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: meta.v_reconciliation_cm_elevate_disbursement
+      on_clause: null
+      reason: >
+        The quarantine table is outside the read boundary, and the one held-back record
+        is by definition absent from the fact, so there is nothing to join to. A
+        completeness question is answered from the reconciliation view by a DBA.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: any
+      to_table: raw.source_rows
+      to_column: raw_id
+      cardinality: many_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: none
+      on_clause: null
+      reason: >
+        The view does not expose raw_id, and `raw` is outside the read boundary in any
+        case. A lineage request is answered by telling the user it is a DBA task.
+
+    - from_table: curated.v_cm_elevate_disbursement
+      from_column: any
+      to_table: curated.fact_cm_elevate_disbursement
+      to_column: cm_elevate_disb_fact_id
+      cardinality: one_to_one
+      declared: false
+      is_prohibited: true
+      use_instead: curated.v_cm_elevate_disbursement
+      on_clause: null
+      reason:
+        critical: true
+        text: >
+          Joining the view back to its own fact to recover a dropped column. The only
+          columns the view drops that a question might ask for are the three APPLICANT
+          NAMES, and they are withheld deliberately - PII, excluded from the chatbot
+          layer by is_chatbot_visible = false. This edge exists here so that the attempt
+          is recognised and refused rather than treated as a clever workaround.
+
+  # =======================================================================
+  # SANCTIONED PATTERNS
+  # =======================================================================
+  sanctioned_patterns:
+
+    single_table:
+      pattern: SELECT ... FROM curated.v_cm_elevate_disbursement WHERE ... GROUP BY ...
+      applies_to: every ordinary question about this scheme
+      note: >
+        The view pre-joins all three dimensions, so the correct join count for a normal
+        question is ZERO. If the generator is emitting a JOIN for a CM Elevate Legacy
+        question, it has almost certainly gone wrong.
+
+    unit_lookup:
+      pattern: SELECT money_unit, grain_note, time_semantics FROM curated.dim_scheme WHERE scheme_code = '<this scheme>'
+      applies_to: establishing the money unit before a converted figure is published
+      note: >
+        Read on its own, never joined per row. The scheme_code for this partition has not
+        yet been read - see the README's open items.
+
+    reconciliation:
+      pattern: SELECT * FROM meta.v_reconciliation_cm_elevate_disbursement
+      applies_to: "did every source row load?"
+      note: >
+        raw_rows must equal curated_rows + quarantined exactly. Expected: 2,823 = 2,822 +
+        1, the one quarantine being corrupted_identity. Requires meta access.
+
+    cross_scheme:
+      pattern: none
+      applies_to: any comparison with another scheme
+      note:
+        critical: true
+        text: >
+          THERE IS NO SANCTIONED CROSS-SCHEME PATTERN FOR THIS SCHEME. PMAY and MGNREGA
+          have two reviewed views; CM Elevate Legacy is in neither. Aggregating this
+          scheme and another independently and presenting the pair as a comparison is NOT
+          a substitute - the reviewed views exist because the two sides' measures mean
+          different things, and no such review has been done here. Refuse.
+
+  # =======================================================================
+  # HOW A GENERATOR GETS THIS WRONG
+  # Each scenario is a plausible chain of reasoning that ends in a prohibited
+  # join. They are written out so the refusal is recognisable before the SQL
+  # is composed rather than after.
+  # =======================================================================
+  failure_scenarios:
+
+  - scenario: the sanction-rate chain
+    critical: true
+    trigger: '"What percentage of CM Elevate applications were sanctioned?"'
+    wrong_reasoning: >
+      The generator has a numerator (records in this fact) and needs a denominator. It
+      finds curated.fact_cm_elevate_application with a similar name and 8,627 rows, sees
+      application_number here and request_id there, and joins or ratios them.
+    why_it_is_wrong: >
+      Two different schemes. The 8,627 applications are not the population these 2,822
+      sanctions were drawn from, and the two identifier spaces do not correspond. The
+      resulting percentage would be arithmetic over unrelated numbers.
+    correct_behaviour: >
+      Refuse. Say every record here is already a sanction and the application population
+      is a separate dataset with no linkage.
+
+  - scenario: the shared-scheme-name bridge
+    trigger: '"Compare Piggery applications with Piggery disbursements."'
+    wrong_reasoning: >
+      Piggery, Poultry and Dairy appear in BOTH scheme dimensions, so a name join returns
+      rows and looks successful.
+    why_it_is_wrong: >
+      Returning rows is exactly the danger. A scheme name is not an identifier, the two
+      schemes' records do not correspond one to one, and a count on each side answers two
+      different questions.
+    correct_behaviour: Answer from one partition and say the other is a separate dataset.
+
+  - scenario: the name-match fallback
+    trigger: '"Find this applicant''s application record."'
+    wrong_reasoning: >
+      No shared key exists, so the generator reaches for first_name / last_name on the
+      fact table as a join key.
+    why_it_is_wrong: >
+      The names are PII, excluded from the view and the embedding layer, and they are not
+      unique - 45 records share a name with another record. A name join would both leak
+      and mismatch.
+    correct_behaviour: Refuse the lookup, and do not fall back to the fact table.
+
+  - scenario: the hand-rolled cross-scheme comparison
+    critical: true
+    trigger: '"How does CM Elevate Legacy spending compare with PMAY?"'
+    wrong_reasoning: >
+      The generator knows fact-to-fact joins are prohibited, so it aggregates each side
+      independently and joins the two summaries on district - the pattern that IS
+      sanctioned for MGNREGA and PMAY.
+    why_it_is_wrong: >
+      That pattern is sanctioned only where a reviewed cross-scheme view exists, because
+      the review is what establishes that the two measures can sit side by side.
+      v_cross_scheme_money_district_year carries a measure_semantics column for exactly
+      this reason. No such review has been done for this scheme, and its money is a
+      sanction-and-disbursement event, not an annual flow.
+    correct_behaviour: >
+      Refuse. Offer the CM Elevate Legacy figures alone. Adding this scheme to a
+      cross-scheme view is a modelling task, not a query.
+
+  - scenario: the view-to-fact recovery
+    trigger: '"The view does not have constituency - get it from the fact table."'
+    wrong_reasoning: The view is a projection, so the fact must have more columns.
+    why_it_is_wrong: >
+      The fact does not carry constituency either - it was never loaded. The only columns
+      the view drops are the three applicant names, and those are withheld deliberately.
+      Reaching for the fact table gains nothing and risks the PII.
+    correct_behaviour: >
+      Say constituency is not exposed on this scheme's query surface, and note that
+      dim_geography.ac_name could supply it if the view were extended.
+
+  - scenario: the alias-table detour
+    trigger: '"The village name did not match - try the alias table."'
+    wrong_reasoning: >
+      dim_geography_alias exists and holds 34,450 spellings, so it looks like the place to
+      resolve an unmatched name.
+    why_it_is_wrong: >
+      This scheme has no alias_key. The alias rows belong to MGNREGA's source spellings,
+      and joining on geography_key fans out by the alias count.
+    correct_behaviour: >
+      Resolve names through the resolver's catalogue and dim_geography, and return
+      not_found with suggestions if nothing matches.
+
+  - scenario: the duplicate self-join
+    trigger: '"Show me the duplicate records."'
+    wrong_reasoning: >
+      31 records are marked Duplicate, so the generator self-joins to pair each with its
+      twin.
+    why_it_is_wrong: >
+      application_number is unique - there are no duplicate ROWS. The marking is an
+      outcome recorded against a record, and only 6 of the 31 even have an observable
+      same-name-same-scheme twin.
+    correct_behaviour: >
+      List the 31 marked records, and say the marking is weakly evidenced rather than
+      presenting them as confirmed duplicates.
+
+  # =======================================================================
+  traversal_rules:
+    max_joins_for_ordinary_question: 0
+    note: >
+      The view pre-joins all three dimensions. A CM Elevate Legacy question that produces
+      a JOIN keyword has almost certainly gone wrong - check it against the failure
+      scenarios above before executing.
+    permitted_join_count_by_from_clause:
+      curated.v_cm_elevate_disbursement: 0
+      curated.fact_cm_elevate_disbursement: up to 4, all of them declared FKs
+    fan_out_risk:
+      from_the_view: none - it is one row per record and every dimension is many-to-one
+      from_the_fact: none for the four declared edges
+      from_any_prohibited_edge: >
+        High. The fact-to-fact edges multiply rows by the far side's match count, and the
+        alias edge multiplies by roughly 4.7 (34,450 aliases over 7,377 villages).
+    nullable_edges_requiring_LEFT:
+    - curated.fact_cm_elevate_disbursement.year_key -> curated.dim_year
+    not_null_edges_safe_as_INNER:
+    - curated.fact_cm_elevate_disbursement.disb_scheme_key -> curated.dim_cm_elevate_disb_scheme
+    - curated.fact_cm_elevate_disbursement.geography_key   -> curated.dim_geography
+    - curated.fact_cm_elevate_disbursement.scheme_key      -> curated.dim_scheme
+
+  # =======================================================================
+  comparison_with_other_partitions:
+    note: >
+      What a reviewer familiar with another folder's join graph should expect to be
+      different here.
+    versus_pmay:
+    - "PMAY has four traversable declared FKs; this scheme has four plus its own sub-scheme dimension."
+    - "PMAY redirects cross-scheme questions to two reviewed views. This scheme has none, so it refuses."
+    - "PMAY prohibits a self-join on reg_no because it REPEATS. Here the equivalent key is UNIQUE, so the self-join is prohibited for the opposite reason - it is pointless rather than explosive."
+    - "PMAY's pre-aggregate view (v_pmay_monthly_sanctions) must never be joined to its detail. This scheme has no pre-aggregate at all."
+    versus_focus_legacy:
+    - "Focus Legacy is the only snowflake in megh_db - its dimensions are not terminal. Here every dimension is terminal, as in PMAY."
+    versus_cm_elevate_application:
+    - "The other CM Elevate fact has a JSONB extension column and no money or time dimension. Its join graph and this one share no edge at all, and the two facts must never meet."
+
+  # =======================================================================
+  join_graph:
+
+    # The view pre-joins every dimension, so its outbound list is empty and
+    # ordinary questions emit WHERE and GROUP BY only.
+    curated.v_cm_elevate_disbursement: []
+
+    # the raw fact is the only node in this partition with real outbound edges
+    curated.fact_cm_elevate_disbursement:
+    - {to: curated.dim_cm_elevate_disb_scheme, on: disb_scheme_key, join_type: INNER}
+    - {to: curated.dim_geography,              on: geography_key,   join_type: INNER}
+    - {to: curated.dim_year,                   on: year_key,        join_type: LEFT}
+    - {to: curated.dim_scheme,                 on: scheme_key,      join_type: INNER}
+
+    # dimensions are terminal
+    curated.dim_cm_elevate_disb_scheme: []
+    curated.dim_geography: []
+    curated.dim_year: []
+    curated.dim_scheme: []
+
+    # reachable in megh_db but closed to this scheme - see the prohibited edges
+    curated.fact_cm_elevate_application: []
+    curated.dim_cm_elevate_scheme: []
+    curated.fact_pmay_house: []
+    curated.fact_mgnrega_employment: []
+    curated.fact_mgnrega_expenditure: []
+    curated.dim_geography_alias: []
+    curated.v_cross_scheme_money_district_year: []
+    curated.v_cross_scheme_village_coverage: []
+    raw.source_rows: []
+    staging.quarantine: []

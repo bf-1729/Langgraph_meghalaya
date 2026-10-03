@@ -1,0 +1,871 @@
+# cmelevate_default_rules.yaml
+#
+# Default rules for CM Elevate - node 5.5. Runs after the clarification gate.
+# Each rule fills a missing detail silently and hands the response composer an
+# assumption line, so the user can correct it without being interrupted first.
+# Editable by analysts - no code change needed.
+#
+# A condition must live in EITHER cmelevate_classification_rules.yaml OR this file.
+# The gate runs first, so any condition present in both will always ask and never
+# default. {placeholders} are filled from the resolved query at runtime.
+#
+# ===========================================================================
+# v1.0 - 2026-09-04 - FIRST VERSION, WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# WHY THIS FILE IS LONGER THAN PMAY'S (196 rules against 96)
+#
+#   CM Elevate is not one scheme. It is 15, under one scheme_code, with wildly
+#   different sizes, geographies and applicant profiles. A default that is right
+#   for Piggery (2,982 applications, 12 districts, 74% female) is wrong for
+#   Sericulture (14 applications, ONE district, 100% female) and meaningless for
+#   Motorcaravan (2 applications). Section 2 therefore carries a default per
+#   scheme, so an answer scoped to one scheme states that scheme's own shape
+#   instead of inheriting the programme's.
+#
+#   The other reason is subtraction. CM Elevate has NO money column and NO date
+#   column, so PMAY's whole "which measure" and "which time period" default
+#   families collapse. What replaces them is a set of defaults whose job is to
+#   stop a missing measure being invented - see section 5.
+#
+# WHAT HAS NO PMAY COUNTERPART
+#   * a default per sub-scheme (section 2) - 15 rules plus 12 shape rules
+#   * defaults that refuse to fill rather than filling wrongly (section 5)
+#   * a JSONB section (section 8) - scheme_specific has no PMAY equivalent
+#   * geography defaults that exclude the Unresolved placeholder (section 4)
+#
+# EVERY NUMBER IN AN assumption_text BELOW IS A SOURCE-EXPORT FIGURE
+# (CM_Elevate_AllSchemes_20260818_122217.xlsx, 8,436 rows, profiled 2026-09-04)
+# AND HAS NOT BEEN RE-MEASURED AGAINST megh_db, which reports ~8,543 rows. They
+# are kept because a stated assumption with an unverified number is still better
+# than a silent one, but re-verify before these reach a user.
+# ===========================================================================
+#
+# Reserved for cmelevate_classification_rules.yaml, not defaulted here: anything
+# involving money (there is no amount column), anything involving a date or a
+# trend (there is no date column), the on-hold routing trap, applicant names and
+# personal fields, the requirement-workbook figures, and any scheme name that
+# does not resolve against the 15 held.
+
+default_rules:
+
+  # =========================================================================
+  # 1. DATA QUALITY - fires before everything else
+  # =========================================================================
+
+  - condition: "unresolved_geography_in_village_count"
+    default_value: "exclude_unresolved"
+    assumption_text: "Applications whose village could not be matched to the official roster are left out of village counts; they remain in every other total."
+    sql_effect: "WHERE entity_type <> 'Unresolved'"
+    note:
+      critical: true
+      text: >
+        The CM Elevate equivalent of PMAY's placeholder default, but narrower.
+        'Unresolved' rows are kept in district, block and scheme totals on purpose,
+        so those reconcile to the source. They are excluded ONLY from village
+        counts and village lists.
+
+  - condition: "duplicate_request_ids_in_count"
+    default_value: "count_rows"
+    assumption_text: "Counting application records; about 36 application numbers appear more than once, so a distinct-number count would be slightly lower."
+    sql_effect: "COUNT(*)"
+    note: >
+      request_id has no unique constraint - 8,400 distinct across 8,436 source
+      rows, all duplicates inside Piggery. State the caveat rather than silently
+      choosing.
+
+  - condition: "verification_status_null_in_totals"
+    default_value: "include_in_totals"
+    assumption_text: "About 389 applications have no verification outcome recorded; they are counted in totals and shown separately in status breakdowns."
+
+  - condition: "verification_status_null_in_breakdown"
+    default_value: "show_as_not_recorded"
+    assumption_text: "Applications with no verification outcome are shown as 'not recorded' rather than folded into Valid."
+    note: >
+      NULL is a missing verdict, never a positive one. This is the CM Elevate
+      analogue of PMAY's null_house_status rule.
+
+  - condition: "geo_conflict_rows_in_totals"
+    default_value: "include_with_roster_value"
+    assumption_text: "Villages where sources disagree on block or district are counted using the official roster values."
+
+  - condition: "missing_village_code_rows"
+    default_value: "answer_at_block_level"
+    assumption_text: "A few applications carry no village code; they are reported at block level and noted."
+
+  - condition: "dead_flag_in_status_breakdown"
+    default_value: "omit_dead_flags"
+    assumption_text: "The on-hold and withdrawn flags are unpopulated in this data, so the status breakdown uses the verification outcome instead."
+    note:
+      critical: true
+      text: >
+        onhold and is_withdraw are FALSE on all 8,436 source rows. Never include
+        them in a status chart - a bar that is always zero reads as a finding.
+
+  - condition: "case_variant_values_in_grouping"
+    default_value: "case_fold"
+    assumption_text: "Workflow levels and file statuses are combined across capitalisation variants."
+    sql_effect: "GROUP BY LOWER(current_level)"
+    note: >
+      'level1' (8,273) and 'Level1' (45) are the same level. Without folding, the
+      same level appears twice in the answer.
+
+  - condition: "sendback_variants_in_grouping"
+    default_value: "combine_sendback"
+    assumption_text: "'sendback' and 'sendback to vdv/citizen' are combined as sent-back."
+
+  - condition: "row_count_not_reconciled"
+    default_value: "report_with_unverified_note"
+    assumption_text: "Application totals are as held in the database and have not yet been reconciled against the source export."
+
+  # =========================================================================
+  # 2. SUB-SCHEME DEFAULTS
+  # CM Elevate is 15 schemes. When one is named, its own shape is stated rather
+  # than the programme's. Every figure here is from the source export.
+  # =========================================================================
+
+  - condition: "missing_scheme"
+    default_value: "all_fifteen_schemes"
+    assumption_text: "Covering all 15 CM Elevate schemes."
+    note: >
+      PMAY's equivalent defaults to a single scheme. Here the default is the whole
+      programme, and the breakdown is offered because a programme total mixes 15
+      unrelated schemes.
+
+  - condition: "programme_total_without_breakdown"
+    default_value: "offer_scheme_breakdown"
+    assumption_text: "This is the CM Elevate total across all 15 schemes; two schemes account for about 78% of it."
+    note: >
+      PRIME Small Enterprise Empowerment (3,621) and Piggery (2,982) together are
+      6,603 of 8,436. A programme figure without that context is misleading.
+
+  # ---- one default per scheme -------------------------------------------
+  - condition: "scheme_scope_prime_small_enterprise"
+    default_value: "prime_small_enterprise_scope"
+    assumption_text: "PRIME Small Enterprise Empowerment and Development (SEED) is the largest CM Elevate scheme - about 3,621 applications, 43% of the programme, across all 12 districts."
+    note: >
+      Almost entirely individual applicants (3,613), with 8 unregistered and no
+      registered bodies. 99.2% applied online - the most online-heavy scheme.
+      Not present in the requirement workbook's scheme list at all.
+
+  - condition: "scheme_scope_piggery"
+    default_value: "piggery_scope"
+    assumption_text: "Piggery Development holds about 2,982 applications across all 12 districts, concentrated in Ri Bhoi with about 1,955."
+    note: >
+      Ri Bhoi alone is 66% of this scheme. 74.3% of applicants are female - well
+      above the programme's 61%. All 36 duplicate application numbers fall here.
+      The requirement workbook's figure of 1,357 describes a different extract.
+
+  - condition: "scheme_scope_poultry"
+    default_value: "poultry_scope"
+    assumption_text: "Poultry Farming holds about 488 applications across all 12 districts, led by Ri Bhoi with about 229."
+    note: The only scheme showing all three applicant categories in meaningful numbers is Poultry (485/2/1) and Dairy - both are still overwhelmingly individual.
+
+  - condition: "scheme_scope_prime_tourism_vehicle"
+    default_value: "prime_tourism_vehicle_scope"
+    assumption_text: "PRIME Tourism Vehicle holds about 403 applications across all 12 districts, led by East Khasi Hills with about 190."
+    note:
+      critical: true
+      text: >
+        THE MOST MALE-SKEWED LARGE SCHEME - about 19.9% female against the
+        programme's 61%. Also the only scheme other than Piggery with meaningful
+        non-Forward file statuses (89 sent back, 43 resubmitted). Never let the
+        programme-level gender figure stand in for this scheme's.
+
+  - condition: "scheme_scope_prime_agriculture_response_vehicle"
+    default_value: "prime_agri_response_vehicle_scope"
+    assumption_text: "PRIME Agriculture Response Vehicle holds about 339 applications across all 12 districts, led by West Garo Hills with about 82."
+    note: >
+      About 14.7% female - the lowest of any scheme with more than 10
+      applications. Also the highest share of registered bodies among the large
+      schemes (30 of 339). Carries the most scheme-specific fields of any scheme
+      (81 source columns).
+
+  - condition: "scheme_scope_dairy"
+    default_value: "dairy_scope"
+    assumption_text: "Dairy Development holds about 294 applications across 11 districts - not all 12 - led by South West Khasi Hills with about 135."
+    note:
+      critical: true
+      text: >
+        TWO OUTLIERS, BOTH WORTH STATING. Only 39.8% applied online, against 70-100%
+        everywhere else. And only 52.7% are verified Valid, against 75-100%
+        elsewhere. Neither is explained by the data; report them as observed rather
+        than interpreting them.
+
+  - condition: "scheme_scope_any_business_venture"
+    default_value: "any_business_venture_scope"
+    assumption_text: "Any Business Venture holds about 136 applications across all 12 districts, led by East Khasi Hills with about 34."
+    note: The stored applicant label carries a source typo, 'Any Bussiness Venture'. Never surface type_raw for this scheme.
+
+  - condition: "scheme_scope_goat_farming"
+    default_value: "goat_farming_scope"
+    assumption_text: "Goat Farming holds about 98 applications across all 12 districts, led by South West Khasi Hills with about 33."
+    note: Every applicant is an individual. Fewest scheme-specific fields of any scheme (41 source columns).
+
+  - condition: "scheme_scope_warehouse"
+    default_value: "warehouse_scope"
+    assumption_text: "The Warehouse scheme holds about 38 applications across 9 districts - it does not reach all 12."
+    note:
+      critical: true
+      text: >
+        THE ONLY SCHEME WHERE REGISTERED BODIES OUTNUMBER INDIVIDUALS - about 20
+        registered against 18 individual. Every default that assumes an individual
+        applicant is wrong here. Also note the requirement workbook calls this the
+        highest-value scheme at Rs 22.62 Cr; no amount is held in this database.
+
+  - condition: "scheme_scope_sericulture"
+    default_value: "sericulture_scope"
+    assumption_text: "Sericulture and Weaving holds about 14 applications, all in Ri Bhoi - a single district, a single block and about 4 villages."
+    note:
+      critical: true
+      text: >
+        SINGLE-DISTRICT SCHEME. A district breakdown returns one row and a
+        geography comparison is meaningless. 100% of applicants are female. It is
+        held as ONE scheme here, not split into Spinning and Weaving as the
+        requirement workbook assumes.
+
+  - condition: "scheme_scope_green_taxi"
+    default_value: "green_taxi_scope"
+    assumption_text: "Chief Ministers Green Taxi holds about 10 applications across 7 districts."
+    note: >
+      100% male applicants and 100% verified Valid. With n=10 neither is a finding
+      - state the denominator on any percentage.
+
+  - condition: "scheme_scope_sports_wellness"
+    default_value: "sports_wellness_scope"
+    assumption_text: "Sports and Wellness Centre holds about 6 applications across 3 districts."
+    note: n=6. Report counts, never percentages, unless the user insists and the denominator is shown.
+
+  - condition: "scheme_scope_agro_tourism_villa"
+    default_value: "agro_tourism_villa_scope"
+    assumption_text: "Agro Tourism Villa holds about 3 applications across 2 districts."
+    note: n=3. Counts only.
+
+  - condition: "scheme_scope_motorcaravan"
+    default_value: "motorcaravan_scope"
+    assumption_text: "Motorcaravan holds about 2 applications, both in East Khasi Hills."
+    note: >
+      n=2, single district. Any breakdown of this scheme is a listing, not an
+      analysis. The requirement workbook's 'Motorcaravan Rs 0.50 Cr across 1
+      beneficiary' is from a different extract.
+
+  - condition: "scheme_scope_cinema_theatre"
+    default_value: "cinema_theatre_scope"
+    assumption_text: "Cinema Theatre holds about 2 applications across 2 districts."
+    note: n=2. Counts only.
+
+  # ---- cross-scheme shape defaults --------------------------------------
+  - condition: "small_scheme_in_percentage_answer"
+    default_value: "show_denominator"
+    assumption_text: "{scheme} holds only {count} applications, so the percentage is shown with its count."
+    note:
+      critical: true
+      text: >
+        Applies to the six schemes under 15 applications - Motorcaravan 2, Cinema
+        Theatre 2, Agro Tourism Villa 3, Sports and Wellness 6, Green Taxi 10 and
+        Sericulture 14. One record moves these by 7 to 50 percentage points.
+
+  - condition: "single_district_scheme_breakdown"
+    default_value: "state_single_district"
+    assumption_text: "{scheme} operates in one district only, so a district breakdown returns a single row."
+    note: Sericulture (Ri Bhoi) and Motorcaravan (East Khasi Hills).
+
+  - condition: "scheme_district_coverage_assumed_complete"
+    default_value: "state_actual_coverage"
+    assumption_text: "{scheme} reaches {district_count} of Meghalaya's 12 districts."
+    note: >
+      Do not assume every scheme is statewide. Dairy reaches 11, Warehouse 9,
+      Green Taxi 7, Sports and Wellness 3, Agro Tourism Villa 2, Cinema Theatre 2,
+      Sericulture 1 and Motorcaravan 1.
+
+  - condition: "scheme_comparison_without_normalisation"
+    default_value: "compare_counts_with_sizes"
+    assumption_text: "Schemes are compared on application counts, with each scheme's total shown so the sizes are visible."
+    note: >
+      The largest scheme is 1,800 times the smallest. A bare side-by-side bar
+      chart is unreadable - see chart defaults in section 10.
+
+  - condition: "scheme_ranking_ties_at_bottom"
+    default_value: "group_smallest"
+    assumption_text: "The smallest schemes are grouped rather than ranked individually, as several hold only two or three applications."
+
+  - condition: "gender_by_scheme_requested"
+    default_value: "per_scheme_not_programme"
+    assumption_text: "Gender is reported per scheme; the split varies widely, from about 100% female in Sericulture to 0% in Green Taxi."
+    note:
+      critical: true
+      text: >
+        THE PROGRAMME AVERAGE HIDES THE FINDING. About 61% female overall, but
+        Piggery 74.3%, Poultry 66.0%, Dairy 57.8%, Any Business Venture 37.5%,
+        Tourism Vehicle 19.9%, Agriculture Response Vehicle 14.7%, Green Taxi 0%.
+        Never quote the programme figure for a single scheme.
+
+  - condition: "online_share_by_scheme_requested"
+    default_value: "per_scheme_not_programme"
+    assumption_text: "Application mode is reported per scheme; online share ranges from about 39.8% in Dairy to 100% in several small schemes."
+    note: Programme-level online share is about 90.6%. Dairy is the clear outlier and worth naming.
+
+  - condition: "verification_rate_by_scheme_requested"
+    default_value: "per_scheme_not_programme"
+    assumption_text: "Verification outcomes are reported per scheme; the Valid share ranges from about 52.7% in Dairy to 100% in the smallest schemes."
+
+  - condition: "applicant_category_by_scheme_requested"
+    default_value: "per_scheme_not_programme"
+    assumption_text: "Applicant type is reported per scheme; every scheme except Warehouse is dominated by individual applicants."
+
+  - condition: "scheme_named_by_sector"
+    default_value: "expand_to_member_schemes"
+    assumption_text: "{sector} covers {schemes}; this grouping is applied here, not stored in the data."
+    note:
+      critical: true
+      text: >
+        There is NO sector or scheme-family column. Livestock (Piggery, Poultry,
+        Goat, Dairy), vehicles (Tourism Vehicle, Agriculture Response Vehicle,
+        Green Taxi, Motorcaravan), tourism (Tourism Vehicle, Agro Tourism Villa)
+        and the PRIME family are groupings the resolver applies. Declare them in
+        the answer as a grouping, never as a stored attribute.
+
+  - condition: "prime_family_named"
+    default_value: "three_prime_schemes"
+    assumption_text: "The PRIME schemes are Small Enterprise Empowerment, Tourism Vehicle and Agriculture Response Vehicle - about 4,363 applications together."
+
+  - condition: "scheme_specific_field_count_varies"
+    default_value: "state_per_scheme"
+    assumption_text: "Each scheme records its own additional fields - from about 41 for Goat Farming to about 81 for Agriculture Response Vehicle."
+
+  # =========================================================================
+  # 3. TIME - there is none. These defaults keep it that way.
+  # PMAY had 14 time defaults choosing between years. CM Elevate has no date,
+  # so these exist to stop one being manufactured.
+  # =========================================================================
+
+  - condition: "time_dimension_unspecified"
+    default_value: "no_time_dimension"
+    assumption_text: "CM Elevate applications carry no date, so figures cover every application held, with no time filter."
+    note:
+      critical: true
+      text: >
+        THE OPPOSITE OF PMAY'S RULE OF THE SAME NAME, which defaults to
+        sanction_date. There is no date column here at all. Never emit a date
+        filter, a date GROUP BY or a date_trunc.
+
+  - condition: "all_time_scope_assumed"
+    default_value: "all_applications_held"
+    assumption_text: "Covering all CM Elevate applications held in the database."
+
+  - condition: "ingested_at_offered_as_date"
+    default_value: "reject_ingested_at"
+    assumption_text: "The only timestamp on these records is when they were loaded into the database, which is not the application date, so it is not used."
+    note:
+      critical: true
+      text: >
+        ingested_at exists on the fact and WILL look like a usable date to a
+        generator. It describes the load. Using it would produce a chart of ETL
+        activity presented as applicant behaviour.
+
+  - condition: "request_id_date_segment_offered"
+    default_value: "reject_parse"
+    assumption_text: "The application number contains a date-like segment, but it is unpadded and ambiguous, so it is not used as a date."
+    note: >
+      A naive parse resolved only 3,038 of 8,436 source rows and produced dates
+      after the export date. See cmelevate_schema_partitions.yaml.
+
+  - condition: "ordering_without_time"
+    default_value: "order_by_count"
+    assumption_text: "Results are ordered by application count, since there is no date to order by."
+
+  - condition: "latest_or_newest_requested_shape"
+    default_value: "no_recency_available"
+    assumption_text: "Newest and oldest cannot be distinguished - CM Elevate applications carry no date."
+
+  # =========================================================================
+  # 4. GEOGRAPHY
+  # =========================================================================
+
+  - condition: "missing_geography"
+    default_value: "all_districts"
+    assumption_text: "Covering all 12 districts of Meghalaya."
+
+  - condition: "whole_state_reference"
+    default_value: "no_district_filter"
+    assumption_text: "Figures are statewide."
+
+  - condition: "missing_breakdown_level"
+    default_value: "district"
+    assumption_text: "Broken down by district."
+
+  - condition: "geography_filter_form_unspecified"
+    default_value: "lgd_name_uppercase"
+    assumption_text: "Filtered on the LGD district name."
+    note: >
+      dim_geography stores district and block UPPERCASE, and there is no usable
+      district or block code - the source's block_lgd_code is never trusted.
+      Emit the uppercase literal.
+
+  - condition: "district_name_hyphen_variant"
+    default_value: "resolve_to_stored_form"
+    assumption_text: "Reading '{value}' as {canonical}, the form held in the database."
+    note: >
+      The source export writes 'Ri-Bhoi'; dim_geography stores 'RI BHOI'. The
+      requirement workbook writes 'Ri Bhoi'. All three resolve to the stored form.
+
+  - condition: "region_group_named"
+    default_value: "expand_to_member_districts"
+    assumption_text: "{region} covers {districts}; this grouping is applied here, not stored in the data."
+    note:
+      critical: true
+      text: >
+        NO REGION COLUMN EXISTS in dim_geography. Garo, Khasi and Jaintia Hills
+        groupings are the resolver's construction and must be declared as such.
+
+  - condition: "ri_bhoi_as_region"
+    default_value: "single_district"
+    assumption_text: "Ri Bhoi is its own district and is not counted under Khasi Hills."
+
+  - condition: "colliding_name_without_level"
+    default_value: "block"
+    assumption_text: "Reading {value} as a block, which is the level users usually mean; some block names are also village names."
+
+  - condition: "village_count_scope"
+    default_value: "count_distinct_village_code"
+    assumption_text: "Villages are counted by LGD code, excluding unmatched placeholders - 345 village names in Meghalaya are shared by more than one village."
+    sql_effect: "COUNT(DISTINCT village_code) FILTER (WHERE entity_type <> 'Unresolved')"
+
+  - condition: "block_count_scope"
+    default_value: "count_distinct_block_name"
+    assumption_text: "Blocks are counted by name; about 58 blocks appear in the CM Elevate data."
+    note: The requirement workbook says 57. That figure describes a different extract.
+
+  - condition: "district_concentration_note"
+    default_value: "state_skew"
+    assumption_text: "The programme is concentrated - Ri Bhoi holds about 2,592 applications and East Jaintia Hills about 154."
+
+  - condition: "village_breakdown_default_size"
+    default_value: 10
+    assumption_text: "Showing the top 10 villages; about 2,038 villages appear in the data."
+
+  - condition: "geography_answer_for_single_district_scheme"
+    default_value: "state_single_district"
+    assumption_text: "{scheme} operates in one district only, so this is not a geographic comparison."
+
+  - condition: "on_roster_filter_unspecified"
+    default_value: "no_roster_filter"
+    assumption_text: "All applications are counted regardless of whether their village is on the official roster."
+    note: >
+      Off-roster villages that are not Unresolved are real places. Only the
+      Unresolved placeholder is excluded, and only from village answers.
+
+  # =========================================================================
+  # 5. WHICH MEASURE - there is only one, and these defaults protect it
+  # =========================================================================
+
+  - condition: "missing_aggregation_function"
+    default_value: "count_applications"
+    assumption_text: "Figures are counts of applications."
+    sql_effect: "COUNT(*)"
+
+  - condition: "bare_beneficiary_term"
+    default_value: "count_applications"
+    assumption_text: "Counted as applications - one row is one application, and the data does not record whether anyone received anything."
+    note:
+      critical: true
+      text: >
+        The grain is a REQUEST, not an award. Say 'applications', never
+        'beneficiaries who received'.
+
+  - condition: "bare_farmer_or_applicant_term"
+    default_value: "count_applications"
+    assumption_text: "Counted as applications; there is no person identifier, so distinct people cannot be counted."
+
+  - condition: "application_uniqueness_unspecified"
+    default_value: "count_all_rows"
+    assumption_text: "Counting application records rather than distinct application numbers; about 36 numbers repeat."
+
+  - condition: "measure_unspecified_for_ranking"
+    default_value: "application_count"
+    assumption_text: "Ranked by application count, the only measure held for CM Elevate."
+
+  - condition: "measure_unspecified_for_comparison"
+    default_value: "application_count"
+    assumption_text: "Compared on application count."
+
+  - condition: "biggest_or_largest_term"
+    default_value: "most_applications"
+    assumption_text: "'Largest' is taken as most applications; there is no monetary measure to rank by."
+
+  - condition: "performance_or_success_term"
+    default_value: "no_outcome_measure"
+    assumption_text: "The data records applications and their verification status only, so performance is shown as application volume and verification outcome, not as an outcome or a payout."
+    note:
+      critical: true
+      text: >
+        Do NOT construct a performance metric from current_file_status - 'forward'
+        is 98.4% of rows and means the file moved on, not that it succeeded.
+
+  - condition: "progress_term"
+    default_value: "verification_status"
+    assumption_text: "Progress is shown as the verification outcome, since the workflow level does not assert an ordering."
+
+  - condition: "pending_term"
+    default_value: "data_verified_on_hold"
+    assumption_text: "Pending is taken as applications with a verification outcome of 'On Hold' - about 1,199."
+    sql_effect: "WHERE data_verified = 'On Hold'"
+    note:
+      critical: true
+      text: >
+        NOT the onhold boolean, which is FALSE on every row and would return zero.
+        This is the most important routing default in the file. PMAY's
+        pending_amount_term has no analogue here - there is no amount to be
+        pending.
+
+  - condition: "approved_or_sanctioned_term"
+    default_value: "no_approval_field"
+    assumption_text: "No approval or sanction decision is recorded for CM Elevate; the figure shown is applications received."
+    note: >
+      Neither current_file_status nor data_verified is an approval. Say what is
+      shown rather than approximating an approval count.
+
+  - condition: "rejected_term"
+    default_value: "data_verified_invalid_or_wrong"
+    assumption_text: "There is no rejection field; the nearest recorded outcomes are 'Invalid' (about 67) and 'Wrong' (about 81), which describe the application's data, not a funding decision."
+
+  - condition: "active_or_live_term"
+    default_value: "all_applications"
+    assumption_text: "All applications are counted; the data holds no lifecycle state that would mark one inactive."
+
+  - condition: "completion_term"
+    default_value: "no_completion_measure"
+    assumption_text: "CM Elevate records no completion status - that concept belongs to PMAY housing, not to this scheme."
+    note: PMAY's is_completed default has no CM Elevate counterpart. Do not borrow it.
+
+  - condition: "average_without_measure"
+    default_value: "applications_per_group"
+    assumption_text: "The average is applications per {group}; there is no amount to average."
+
+  - condition: "share_denominator_unspecified"
+    default_value: "programme_total"
+    assumption_text: "Shares are against the CM Elevate total of about 8,436 applications."
+
+  - condition: "rate_term_without_numerator"
+    default_value: "share_of_applications"
+    assumption_text: "Expressed as a share of applications; there is no disbursement or approval rate held."
+
+  # =========================================================================
+  # 6. APPLICANT AND STATUS
+  # =========================================================================
+
+  - condition: "applicant_type_grouping_column"
+    default_value: "applicant_category"
+    assumption_text: "Applicant type uses the standard categories - individual, registered and unregistered."
+    sql_effect: "GROUP BY applicant_category"
+    note:
+      critical: true
+      text: >
+        NEVER type_raw across schemes. Each scheme spells its own label
+        differently and the strings carry source typos preserved verbatim.
+
+  - condition: "applicant_category_scope_unspecified"
+    default_value: "all_categories"
+    assumption_text: "Covering all applicant types; about 8,342 are individual, 83 registered and 11 unregistered."
+
+  - condition: "individual_applicant_assumed"
+    default_value: "state_dominance"
+    assumption_text: "Almost all CM Elevate applicants are individuals - about 98.9% of applications."
+
+  - condition: "registered_body_scope"
+    default_value: "warn_small_n"
+    assumption_text: "About 83 applications come from registered bodies, most of them under Agriculture Response Vehicle (30) and Warehouse (20)."
+
+  - condition: "applicant_category_null"
+    default_value: "show_as_not_recorded"
+    assumption_text: "Applications with no applicant type recorded are shown separately rather than assumed individual."
+
+  - condition: "status_field_unspecified"
+    default_value: "data_verified"
+    assumption_text: "Status is taken as the verification outcome - Valid, On Hold, Wrong or Invalid - which is the only status field with meaningful variation."
+    note:
+      critical: true
+      text: >
+        Three status-shaped columns exist: data_verified, current_file_status and
+        current_level. data_verified is the only one that varies usefully.
+        current_file_status is 98.4% one value; current_level is 98.6% one value.
+
+  - condition: "verification_status_ordering"
+    default_value: "valid_onhold_wrong_invalid"
+    assumption_text: "Verification outcomes are listed as Valid, On Hold, Wrong, Invalid, then not recorded."
+
+  - condition: "workflow_status_requested_shape"
+    default_value: "state_near_constant"
+    assumption_text: "About 98% of applications sit at 'forward', so the file-status breakdown is close to a single value."
+
+  - condition: "workflow_level_ordering"
+    default_value: "no_assumed_order"
+    assumption_text: "Workflow levels are listed by frequency, not as a progression - the data does not assert that one level follows another."
+
+  - condition: "application_mode_scope"
+    default_value: "both_modes"
+    assumption_text: "Covering both application modes - about 90.6% online and 9.4% through a CM Connect Centre."
+
+  - condition: "cmconnectcentre_label"
+    default_value: "keep_stored_form"
+    assumption_text: "'cmconnectcenter' is an assisted walk-in centre; the stored label is used rather than relabelling it offline."
+
+  - condition: "gender_source_column"
+    default_value: "scheme_specific_gender_id"
+    assumption_text: "Gender is read from the scheme-specific details, where it is recorded for every application."
+    sql_effect: "scheme_specific ->> 'gender_id'"
+    note: >
+      gender_id holds Female / Male / Other as text despite the _id suffix. It is
+      the one demographic populated on every row and is not a promoted column.
+
+  - condition: "gender_scope_unspecified"
+    default_value: "all_genders"
+    assumption_text: "Covering all applicants - about 61% female, 39% male, and 8 recorded as other."
+
+  # =========================================================================
+  # 7. WHICH TABLE
+  # =========================================================================
+
+  - condition: "table_choice_unspecified"
+    default_value: "curated.v_cm_elevate"
+    assumption_text: "Answered from the CM Elevate application records."
+
+  - condition: "scheme_level_question"
+    default_value: "curated.v_cm_elevate"
+    assumption_text: "Answered from the application records, grouped on the scheme name, which is pre-joined."
+    note: >
+      dim_cm_elevate_scheme does not need joining - v_cm_elevate already carries
+      scheme_name and endpoint.
+
+  - condition: "scheme_list_question"
+    default_value: "curated.dim_cm_elevate_scheme"
+    assumption_text: "The list of schemes is read from the scheme dimension, which holds all 15 whether or not they have applications."
+    note: >
+      Use the dimension, not a DISTINCT over the fact - a scheme with zero
+      applications would be invisible in the fact.
+
+  - condition: "jsonb_containment_question"
+    default_value: "curated.fact_cm_elevate_application"
+    assumption_text: "Answered from the underlying application table so the scheme-specific index can be used."
+    note: >
+      The GIN index idx_cm_elevate_specific_gin applies to the FACT, not the view.
+      This is the only routine reason to bypass v_cm_elevate.
+
+  - condition: "reconciliation_question"
+    default_value: "meta.v_reconciliation_cm_elevate"
+    assumption_text: "Load completeness is read from the CM Elevate reconciliation view, which reports one row per scheme."
+    note: >
+      raw = curated + quarantined must hold for EACH of the 15 endpoints
+      independently, not merely in aggregate. Not readable by megh_readonly.
+
+  - condition: "cross_scheme_coverage_question"
+    default_value: "aggregate_then_join"
+    assumption_text: "CM Elevate is aggregated by village first, then compared against the coverage view; the two are never joined row by row."
+    note:
+      critical: true
+      text: >
+        CM Elevate has NO column in v_cross_scheme_village_coverage. The view's
+        measures are COALESCEd to 0, so absence tests as = 0, never IS NULL.
+        PMAY's cross_scheme_money_question has no analogue - there is no amount.
+
+  - condition: "geography_detail_question"
+    default_value: "curated.v_cm_elevate"
+    assumption_text: "Village, block and district names are read from the application records, where the geography is already resolved."
+    note: dim_geography is pre-joined. Do not join it again.
+
+  # =========================================================================
+  # 8. SCHEME-SPECIFIC JSONB - no PMAY counterpart
+  # =========================================================================
+
+  - condition: "scheme_specific_read_without_scheme_filter"
+    default_value: "require_scheme_scope"
+    assumption_text: "Scheme-specific fields are read for one scheme at a time, since each scheme records different fields."
+    sql_effect: "WHERE cm_scheme_key = {key}"
+    note:
+      critical: true
+      text: >
+        THE MAIN CORRECTNESS TRAP IN THIS COLUMN. 25 fields are common to all 15
+        schemes; 125 appear in exactly one. A ->> read returns NULL for a missing
+        key rather than erroring, so an absent field is indistinguishable from an
+        empty one. Never read scheme_specific across schemes.
+
+  - condition: "scheme_specific_key_discovery"
+    default_value: "list_keys_first"
+    assumption_text: "The fields recorded by {scheme} are listed before any of them is read."
+    sql_effect: "SELECT DISTINCT jsonb_object_keys(scheme_specific)"
+
+  - condition: "scheme_specific_value_type"
+    default_value: "text"
+    assumption_text: "Scheme-specific values are read as text; they are stored without a declared type."
+
+  - condition: "scheme_specific_null_meaning"
+    default_value: "distinguish_absent_from_empty"
+    assumption_text: "A blank scheme-specific value is reported as 'not recorded', since an absent field and an empty one look the same."
+
+  - condition: "scheme_specific_in_breakdown"
+    default_value: "single_scheme_only"
+    assumption_text: "The breakdown covers {scheme} only, because this field is not recorded by every CM Elevate scheme."
+
+  - condition: "id_suffixed_field_assumed_numeric"
+    default_value: "treat_as_text"
+    assumption_text: "Fields ending in _id in the scheme-specific details hold text labels, not numeric identifiers."
+    note:
+      critical: true
+      text: >
+        gender_id holds 'Female' / 'Male' / 'Other'. Other _id fields in the source
+        (occupation_id, bank_id, designation_id, sector_id, type_of_land_id,
+        farming_experience_id, loan_defaulter_id) have NO lookup table anywhere in
+        megh_db, so a code cannot be resolved to a label. Report the stored value
+        or say it is uncoded.
+
+  - condition: "unresolvable_code_field_requested"
+    default_value: "report_raw_with_caveat"
+    assumption_text: "This field holds a code with no lookup table in the database, so the stored value is shown as-is."
+
+  - condition: "pii_field_in_scheme_specific"
+    default_value: "aggregate_only"
+    assumption_text: "Personal details are not shown for individual applicants; the answer is given as a group total."
+    note:
+      critical: true
+      text: >
+        dob, email_id, address, member_id, family_id, pds_id, account_holder_name
+        and ifsc_code survive into scheme_specific because the loader's strip list
+        does not cover them. They must never be surfaced, exported or embedded,
+        and a group must never be small enough to expose one person.
+
+  # =========================================================================
+  # 9. UNITS
+  # =========================================================================
+
+  - condition: "money_unit_unspecified"
+    default_value: "not_applicable"
+    assumption_text: "CM Elevate holds no monetary values, so no currency unit applies."
+    note:
+      critical: true
+      text: >
+        THE OPPOSITE OF PMAY'S RULE OF THE SAME NAME, which defaults to crore.
+        dim_scheme.money_unit carries a value for the CM_ELEVATE row only because
+        the column is NOT NULL. There is no amount for it to describe. Never
+        format, convert or emit a rupee figure for this scheme.
+
+  - condition: "percentage_precision_unspecified"
+    default_value: 1
+    assumption_text: "Percentages are rounded to one decimal place."
+    note: >
+      One place, not PMAY's two. With six schemes under 15 applications, two
+      decimals imply a precision the denominators do not support.
+
+  - condition: "count_formatting"
+    default_value: "thousands_separator"
+    assumption_text: "Counts are shown with thousands separators."
+
+  - condition: "percentage_on_small_denominator"
+    default_value: "show_count_instead"
+    assumption_text: "With only {count} applications the percentage is not meaningful, so the count is shown."
+    note: Applies below about 15 applications - six of the 15 schemes.
+
+  # =========================================================================
+  # 10. SHAPE OF THE ANSWER
+  # =========================================================================
+
+  - condition: "missing_top_n"
+    default_value: 5
+    assumption_text: "Showing the top 5."
+
+  - condition: "singular_superlative_without_n"
+    default_value: 1
+    assumption_text: "Showing the single highest."
+
+  - condition: "ranking_direction_unspecified"
+    default_value: "descending"
+    assumption_text: "Ranked highest first."
+
+  - condition: "missing_sort_column"
+    default_value: "application_count"
+    assumption_text: "Sorted by application count."
+
+  - condition: "missing_result_limit"
+    default_value: 10
+    assumption_text: "Showing the first 10 rows."
+
+  - condition: "application_row_listing_limit"
+    default_value: 100
+    assumption_text: "Showing the first 100 matching applications."
+
+  - condition: "record_listing_columns"
+    default_value: "application_scheme_geography_status"
+    assumption_text: "Listing application number, scheme, district, block, village, applicant type and verification status."
+    note: Never names, dates of birth, addresses, contact details or bank fields.
+
+  - condition: "scheme_listing_order"
+    default_value: "by_application_count_desc"
+    assumption_text: "Schemes are listed by application count, largest first."
+
+  - condition: "district_listing_order"
+    default_value: "by_application_count_desc"
+    assumption_text: "Districts are listed by application count, largest first."
+
+  - condition: "chart_type_unspecified"
+    default_value: "auto_by_result_shape"
+    assumption_text: "Chart type chosen to suit the shape of the result."
+
+  - condition: "scheme_chart_scale"
+    default_value: "top_5_plus_other"
+    assumption_text: "Showing the top 5 schemes with the remainder grouped, since the largest scheme is over 1,800 times the smallest."
+    note:
+      critical: true
+      text: >
+        A linear bar chart of all 15 schemes renders nine of them as invisible
+        slivers. Either group the tail or use a log scale, and say which.
+
+  - condition: "cross_tab_size"
+    default_value: "limit_to_larger_schemes"
+    assumption_text: "The district-by-scheme table is restricted to the larger schemes; the full grid is 12 by 15 and mostly empty."
+
+  - condition: "single_row_result"
+    default_value: "state_as_sentence"
+    assumption_text: "Reported as a sentence rather than a one-row table."
+
+  - condition: "empty_result"
+    default_value: "state_zero_with_scope"
+    assumption_text: "No CM Elevate applications match {scope}."
+
+  - condition: "count_vs_distinct_reporting"
+    default_value: "report_both_when_differing"
+    assumption_text: "Both the record count and the distinct application-number count are shown, as they differ."
+
+  # =========================================================================
+  # 11. NULLS AND ZEROS
+  # =========================================================================
+
+  - condition: "null_categorical_values"
+    default_value: "show_as_not_recorded"
+    assumption_text: "Missing values are shown as 'not recorded' rather than dropped or read as a negative."
+
+  - condition: "null_in_status_breakdown"
+    default_value: "separate_bucket"
+    assumption_text: "Applications with no verification outcome are shown as their own group of about 389."
+
+  - condition: "zero_count_scheme_in_breakdown"
+    default_value: "include_with_zero"
+    assumption_text: "Schemes with no applications in the selected scope are shown with a zero rather than omitted."
+    note: >
+      Read the scheme list from dim_cm_elevate_scheme so a scheme with no matching
+      applications still appears. A missing row and a zero row read very
+      differently.
+
+  - condition: "zero_district_in_scheme_breakdown"
+    default_value: "include_with_zero"
+    assumption_text: "Districts where {scheme} has no applications are shown with a zero; several schemes do not reach all 12 districts."
+
+  - condition: "false_boolean_read_as_finding"
+    default_value: "state_flag_unpopulated"
+    assumption_text: "The on-hold and withdrawn flags read false on every record, so a zero here reflects an unpopulated field rather than applicant behaviour."
+    note:
+      critical: true
+      text: >
+        Without this the bot reports 'no applications were withdrawn' as though it
+        had measured applicant behaviour. It has measured an empty column.
+
+  - condition: "null_gender_in_breakdown"
+    default_value: "include_if_present"
+    assumption_text: "Gender is recorded on every application in the source, so a missing value would indicate a load problem and is reported as such."

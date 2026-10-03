@@ -1,0 +1,1621 @@
+resolver_version: '1.0'
+resolver_name: focusplus_entity_resolver
+display_name: Focus Plus Entity Resolver (Meghalaya) - curated star schema
+generated_from:
+- datasets/Focus+/Focus Plus Master.csv
+- datasets/Focus+/Copy of Megh One AI - FOCUS+ NLP Use Cases.xlsx
+- SCHEMA_FOR_DEVELOPERS.md (live information_schema extract, 2026-09-02)
+generated_on: '2026-09-03'
+companion_schema: focusplus_schema_partitions.yaml
+
+# ===========================================================================
+# v1.0 - 2026-09-03 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Plus was loaded straight into curated on 2026-09-02. There is no
+# flat-table ancestor and no migration to record.
+#
+# THE CATALOGUES BELOW RESOLVE TO dim_geography VALUES, NOT TO THE RAW CSV.
+# That distinction matters more here than it did for PMAY, because the source
+# is dirty in ways the ingest is expected to have cleaned:
+#   - 26 of 77 raw block strings carry a TRAILING SPACE, always on the 12.5K
+#     batch. Folded, there are 51 distinct blocks, of which 50 are real.
+#   - The literal string 'Nan' appears as a block (4 rows) and as a village
+#     name (636 rows). It is a null written out as text, not a place.
+#   - 103 rows carry an empty village name and 4 carry no district.
+# The canonical forms below are the FOLDED, cleaned values. If a query against
+# megh_db returns a trailing-space or 'Nan' value, the ingest did not clean it
+# and this file must be revised.
+#
+# All record counts, distinct counts and value distributions are from the
+# source CSV (2026-09-03) and have NOT been verified against megh_db.
+# ===========================================================================
+
+description: >
+  Value-level entity resolution for the Focus Plus NLP-to-SQL bot. This file answers
+  exactly one question: the user typed some text - which stored database value did they
+  mean? It does NOT define column meanings or aggregation; that is the companion stage2
+  semantic schema. Resolve entities with this file FIRST, then hand the resolved
+  canonical values to schema linking and SQL generation.
+
+scheme:
+  id: focus_plus
+  display_name: Focus Plus
+  full_name: Focus Plus
+  state: Meghalaya
+  aliases: ["Focus Plus", "Focus+", "FOCUS+", "FocusPlus", "Focus-Plus", "focus plus",
+            "focusplus", "Focus Plus scheme", "FOCUS PLUS",
+            "focus plus payment", "focus plus DBT", "farmer support scheme"]
+  bare_focus_note: >
+    The bare word "focus" is a scheme alias but is also ordinary English. Treat it as the
+    scheme only when it appears alongside scheme vocabulary - payment, disbursement,
+    tranche, batch, member, beneficiary - or when Focus Plus is already the active scheme.
+  not_aliases: ["Ginger Mission", "FOCUS scheme of another state", "PG-FOCUS"]
+  not_aliases_note: >
+    PG-FOCUS appears in the use-case workbook glossary as a producer-group type prefix.
+    Producer groups do not exist in this data - do not resolve it as a scheme alias or as
+    anything else. Ginger Mission is a different dataset and is not in megh_db.
+
+tables:
+  payments: curated.v_focus_plus                  # primary query surface, 23 columns
+  fact: curated.fact_focus_plus_disbursement      # underlying fact, 22 columns - DO NOT QUERY
+  scheme_dim: curated.dim_scheme                  # authority on the money unit
+  cross_scheme_money: curated.v_cross_scheme_money_district_year
+  cross_scheme_coverage: curated.v_cross_scheme_village_coverage
+
+dataset_shape:
+  grain: one row per disbursement - one payment, to one member, in one tranche
+  row_count: unverified_in_db
+  row_count_note: The source CSV held 385671 rows. The curated count is unmeasured.
+  single_table: false
+  person_level: true
+  emits_no_joins: >
+    curated.v_focus_plus already pre-joins dim_year and dim_geography, so the generator
+    emits WHERE and GROUP BY only. dim_scheme is read separately for the money unit -
+    v_focus_plus does not expose scheme_key. See focusplus_foreign_key_augmentation.yaml.
+  two_cohorts:
+    critical: true
+    text: >
+      THE SINGLE MOST IMPORTANT FACT ABOUT THIS DATASET, AND IT IS INVISIBLE IN THE DDL.
+      batch_label splits the fact into two cohorts of different grain and different column
+      coverage. Resolving an entity is not enough - the cohort has to be resolved too.
+      See dimensions.batch_label.
+
+# ---------------------------------------------------------------------------
+# HOW TO USE THIS FILE
+# ---------------------------------------------------------------------------
+how_to_use:
+  step_1_classify: >
+    Decide the entity type of each span of user text. Order matters because block and
+    village names collide - see cross_dimension_collisions. Try: financial_year ->
+    batch_label -> tranche_label -> district -> block -> village -> gender ->
+    occupation -> focus_status -> verification_status -> identifier -> measure.
+  step_2_normalise: Apply normalisation.fold to the user text and to candidate values.
+  step_3_match: Walk matching_pipeline in order; stop at the first stage that hits.
+  step_4_cohort: >
+    Decide which cohort the question is about BEFORE emitting SQL. If the resolved
+    entities include any person attribute, the answer is the 12.5K cohort only.
+  step_5_emit: Return an output_contract shape. Never put raw user text into SQL.
+  step_6_predicate: Build WHERE using the dimension's sql_predicate template.
+
+  hard_rules:
+  - "lgd_district and lgd_block are stored UPPERCASE in dim_geography.
+    lgd_village_name keeps its stored mixed case. Always compare case-folded, and emit
+    the form the column actually stores."
+  - Villages are resolved by village_code, never by name alone. 186 village names in
+    this scheme are shared by two or more different villages.
+  - "District and block have NO CODE COLUMN in the curated layer. A user who supplies an
+    LGD district code can be resolved to the NAME using the catalogue below, but the code
+    itself can never appear in a WHERE clause."
+  - "PERSON IDENTIFIERS ARE NOT RESOLVABLE. member_id and pincode are PII, and
+    beneficiary_name, epic_id and mobile_number were dropped at ingest. A person lookup
+    returns not-held or refused - never a guess, and never a partial match."
+  - "THERE IS NO MANDATORY PREDICATE. Do not carry PMAY's WHERE NOT is_placeholder into
+    a Focus Plus query - the column does not exist and the query will fail."
+  - "batch_label is a cohort, not a size. Six columns are populated on the 12.5K cohort
+    only - 3.2% of rows. Resolve the cohort before answering anything that touches them."
+  - "tranche_label is NOT time. The month words inside the labels are label text. Never
+    order by it as a series, and never resolve a month name to a tranche."
+  - The word amount is single-valued here but its UNIT is unverified. Read
+    curated.dim_scheme.money_unit before formatting. See measure_vocabulary.
+  - "Paid versus unpaid is encoded in NO column. batch_label is the only available
+    reading and it is an inference. See overloaded_terms.paid."
+  - NULL is missing, never zero, and on the person columns it means "not collected for
+    this cohort" rather than "unknown individual".
+  - If more than one candidate survives, return ambiguous and ask. Never pick the first row.
+  - If nothing matches above the fuzzy floor, return not_found with suggestions. Never
+    invent a district, block, village, occupation or status.
+
+# ---------------------------------------------------------------------------
+normalisation:
+  fold:
+  - trim and collapse internal whitespace to single spaces
+  - uppercase
+  - strip trailing qualifier words: BLOCK, DISTRICT, VILLAGE, C&RD, MUNICIPAL BOARD, MB
+  - map & to AND
+  - treat - / ( ) and . as a single space, then re-collapse whitespace
+  squash: remove every non-alphanumeric character from the folded form
+  trailing_space_rule:
+    critical: true
+    text: >
+      TRIM IS NOT OPTIONAL FOR THIS SCHEME. 26 of the 77 raw block strings in the source
+      differ from another only by a trailing space, and the spaced variant is always the
+      12.5K cohort. Folding without a trim splits every one of those blocks in two and
+      silently halves the answer.
+  null_text_rule: >
+    The literal strings 'Nan', 'nan', 'NaN', 'NULL' and the empty string are NOT values.
+    They are nulls written out as text by the source export. Never resolve them, never
+    offer them as a suggestion, and never present them as a place.
+  numeric_ids: >
+    village_code is an integer. Cast user-typed codes with int() and strip any trailing
+    .0 before comparing.
+  village_prefix_rule: >
+    137 village names in the source begin with a digit - "10 Adugre", "1-Williamnagar
+    (Mb) - Ward No.1". These are names, not codes. A village code in this dataset is an
+    integer with no letters, spaces or hyphens.
+
+matching_pipeline:
+- { stage: 1_exact,     test: folded user text == folded canonical, confidence: 1.0 }
+- { stage: 2_alias,     test: folded user text in the value's aliases, confidence: 0.98 }
+- { stage: 3_squash,    test: squashed user text == squashed canonical or alias, confidence: 0.95 }
+- { stage: 4_acronym,   test: district acronym table only, confidence: 0.95,
+    note: acronyms are defined for districts only - do not invent them for blocks }
+- stage: 5_contains
+  test: folded canonical is a whole-word substring of the user text or vice versa
+  confidence: 0.85
+- stage: 6_fuzzy
+  test: RapidFuzz token_set_ratio over the dimension catalogue
+  accept_at: ">= 90 and runner-up at least 5 points lower"
+  ask_between: 80 - 89, or any score where the runner-up is within 5 points
+  reject_below: 80
+- stage: 7_embedding
+  test: BGE-small nearest neighbour over the dimension catalogue
+  use_when: fuzzy returned nothing at or above 80
+  accept_at: cosine >= 0.88 AND unique within its dimension
+- { stage: 8_fail, action: emit not_found with up to 5 suggestions }
+
+pipeline_exclusions:
+  critical: true
+  never_fuzzy_match:
+  - member_id
+  - pincode
+  reason: >
+    These are person identifiers. A fuzzy match on an identifier returns the wrong human
+    being. They are resolved by exact match or not at all - and rule 7 forbids emitting
+    either into an answer regardless, so the only legitimate use is COUNT(DISTINCT).
+
+blocked_matches:
+  purpose: >
+    Pairs fuzzy matching gets wrong. Never let stage 6 or 7 resolve the left value to the
+    right one; require an exact or alias hit.
+  pairs:
+  - [Laskein, Thadlaskein]          # two different West Jaintia Hills blocks
+  - [Thadlaskein, Laskein]
+  - [Mawkynrew, Mawkyrwat]          # East Khasi Hills vs South West Khasi Hills
+  - [Mawkyrwat, Mawkynrew]
+  - [Mawsynram, Mawshynrut]         # East Khasi Hills vs West Khasi Hills
+  - [Mawshynrut, Mawsynram]
+  - [Mawpat, Mawphlang]             # two different East Khasi Hills blocks
+  - [Mawphlang, Mawpat]
+  - [Rongram, Rongara]              # West Garo Hills vs South Garo Hills
+  - [Rongara, Rongram]
+  - [Rerapara, Resubelpara]         # South West Garo Hills vs North Garo Hills
+  - [Umling, Umsning]               # two different Ri Bhoi blocks
+  - [Umsning, Umling]
+  - [Baghmara, "Baghmara-Municipal Board"]        # C&RD block vs municipal board
+  - [Resubelpara, "Resubelpara-Municipal Board"]
+  - [Approved, Pending]             # focus_status values
+  - [Male, Female]
+  - ["93K", "12.5K"]                # batch labels - never fuzzy, they are exact tokens
+  municipal_board_note: >
+    Five municipal boards share a stem with a C&RD block - Baghmara, Resubelpara, Tura,
+    Williamnagar and Shillong. They are DIFFERENT places at a different entity_type. A
+    bare stem resolves to the C&RD block; the municipal board requires the user to say
+    "municipal board", "MB", "town" or "ward".
+
+output_contract:
+  resolved:
+    status: resolved
+    entity_type: district | block | village | batch_label | tranche_label |
+                 financial_year | gender | occupation | focus_status |
+                 verification_status | measure
+    user_text: <verbatim span>
+    canonical: <exact stored value>
+    lgd_code: <code, geography only>
+    cohort_scope: <both | legacy | registration - set whenever the value implies one>
+    confidence: <0-1>
+    matched_by: <pipeline stage>
+  ambiguous:
+    status: ambiguous
+    entity_type: <type>
+    user_text: <verbatim span>
+    candidates: [ { canonical, lgd_code, district, block } ]
+    question: <one short question naming the distinguishing attribute>
+  not_found:
+    status: not_found
+    entity_type: <type or unknown>
+    user_text: <verbatim span>
+    suggestions: [ up to 5 nearest catalogue values ]
+    message: state plainly that the value is not in the Focus Plus data.
+  refused:
+    status: refused
+    entity_type: person_identifier | withheld_column
+    user_text: <verbatim span>
+    reason: privacy | not_held
+    message: >
+      A fourth shape PMAY does not have. Used when the span resolves to a real person
+      (member_id / pincode / a name) or to an account number / IFSC, none of which
+      exist as a queryable identifier here. bank_name_raw is NOT this case - it is a
+      bank name, not a person, and resolves normally. Say the data cannot be shown,
+      offer the aggregate, and do not list candidates - listing near-matches of a
+      person identifier is itself a leak.
+
+# ---------------------------------------------------------------------------
+overloaded_terms:
+  why: >
+    A handful of words map to more than one column, or to a cohort rather than a column.
+    Getting these wrong produces a confidently wrong answer, so they are listed explicitly.
+
+  beneficiaries:
+    critical: true
+    readings:
+    - { means: "COUNT(*)", when: "default - but it is a PAYMENT count, not a person count" }
+    - { means: "COUNT(DISTINCT member_id)", when: "the user means people AND the 12.5K cohort is in scope" }
+    - { means: "93,286 legacy paid members", when: "the user means the figure published in the use-case workbook" }
+    default: ask which. The three numbers differ by an order of magnitude.
+    note:
+      critical: true
+      text: >
+        The third reading IS NOT DERIVABLE FROM megh_db. It came from epic_id, which was
+        dropped at ingest, and member_id is NULL on all 373,144 legacy rows. Never present
+        COUNT(DISTINCT member_id) as the scheme beneficiary total - it silently answers
+        for 3.2% of the data. COUNT(DISTINCT source_sl_no) per batch is the closest proxy
+        and it is a file serial, not a person key. Say so when using it.
+
+  paid:
+    critical: true
+    readings:
+    - { means: "batch_label = '93K'", when: "the user means members who have received money" }
+    - { means: "focus_status = 'Approved'", when: "NEVER - this is the trap" }
+    default: batch_label, stated as an inference.
+    note: >
+      NO COLUMN ENCODES PAYMENT. `status` was the constant '106' and was dropped at
+      ingest. verification_status is 'Approved' on every populated row. focus_status
+      describes an APPLICATION and exists only on the 12.5K cohort - the cohort that has
+      NOT been paid. Reading 'Approved' as 'paid' inverts the answer.
+
+  unpaid:
+    readings:
+    - { means: "batch_label = '12.5K'", when: default }
+    note: >
+      An estimate, not a count. 111 epic_ids appear in BOTH cohorts in the source - people
+      already paid who registered again - so 12,527 overstates the backlog. epic_id is
+      gone, so the overlap cannot be detected in megh_db at all. Say so.
+
+  amount:
+    readings:
+    - { means: "SUM(amount_disbursed)", when: default - it is the only money column }
+    unit_warning:
+      critical: true
+      text: >
+        Unlike PMAY, WHICH column is never in doubt; the UNIT is. amount_disbursed is a
+        bare numeric with no documented unit and no known precision. Read
+        curated.dim_scheme.money_unit for the Focus Plus row before formatting. Source
+        values of 5000 and 2500 corroborate rupees but do not settle it.
+
+  approved:
+    readings:
+    - { means: "focus_status = 'Approved'", when: "the user is asking about applications" }
+    - { means: "verification_status = 'Approved'", when: "the user says verified or verification" }
+    default: focus_status, and say it means the registration was approved, not paid.
+    note: >
+      verification_status is 'Approved' on every one of the 12,527 populated rows, so
+      filtering on it changes nothing. Say it has one value rather than returning a
+      one-row breakdown that looks like an answer.
+
+  farmers:
+    readings:
+    - { means: "occupation = 'Farmer'", when: "the user means the recorded occupation" }
+    - { means: "COUNT(*) over the whole scheme", when: "the user is using it loosely for beneficiaries" }
+    default: ask. The two are far apart, and occupation covers 3.2% of rows.
+
+  batch:
+    readings:
+    - { means: "batch_label", when: "the user means the 93K or 12.5K cohort - almost always" }
+    - { means: "fact.batch_id", when: "NEVER for a user question - it is a load-audit uuid" }
+    default: batch_label. Do not expose batch_id.
+
+  tranche:
+    readings:
+    - { means: "tranche_label", when: always }
+    note: >
+      Stored as "Tranch", not "Tranche". Accept both spellings on input, emit the stored
+      form. The month words in the labels are not dates - see dimensions.tranche_label.
+
+# ---------------------------------------------------------------------------
+cross_dimension_collisions:
+  measured:
+    block_names_that_are_also_village_names: 19
+    district_collisions: 0
+    blocks_spanning_more_than_one_district: 0
+  colliding_names: [Baghmara, Bajengdoba, Betasing, Damalgre, Demdema, Gambegre,
+    Gasuapara, Mawkynrew, Mawkyrwat, Pynursla, Ranikor, Rerapara, Resubelpara, Rongara,
+    Rongram, Selsella, Tikrikilla, Umsning, Zikzak]
+  disambiguation_rules:
+  - If the user said "block" or "C&RD block", resolve as block.
+  - If the user said "village" or "gaon", resolve as village.
+  - With no qualifier, default to BLOCK - it is the administrative level users mean.
+  - State the assumption in the answer whenever the default fired on a colliding name.
+  - Districts never collide with anything; resolve them with no qualifier needed.
+  - "If the user said 'municipal board', 'MB', 'town' or 'ward', resolve to the municipal
+    board entry, not the C&RD block of the same stem."
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS
+# ---------------------------------------------------------------------------
+dimensions:
+
+  # ---- the cohort dimension - no PMAY counterpart -----------------------
+  batch_label:
+    column: batch_label
+    stored_case: exact - '93K' and '12.5K', do not re-case
+    distinct: 2
+    closed_set: true
+    nulls: 0
+    sql_predicate: "batch_label = '<canonical>'"
+    critical: true
+    why_it_matters: >
+      This is not an ordinary dimension. It separates two datasets with different grain
+      and different column coverage that happen to share a fact table. Resolve it before
+      almost any other entity.
+    never_parse_as_number: >
+      '93K' and '12.5K' are labels. Do not read them as 93000 and 12500, do not sort them
+      numerically, and do not present them as sizes.
+    values:
+    - canonical: "93K"
+      records: 373144
+      beneficiaries: 93286
+      grain: four rows per member, one per tranche
+      tranches: [Tranch 1, Tranch 2 - August, Tranch 3 - December, Tranch 4 - Feb-March]
+      financial_years: ['2022-23', '2025-26']
+      districts_reached: 12
+      person_columns_populated: false
+      aliases: [legacy, legacy batch, old batch, "93k", "93 K", "93,000", paid batch,
+                paid members, first batch, original batch, legacy paid]
+      note: >
+        The paid cohort. Every person-level column is NULL here - gender, occupation,
+        focus_status, verification_status, member_id and pincode. Its only identifier in
+        the source was epic_id, which was dropped at ingest.
+    - canonical: "12.5K"
+      records: 12527
+      beneficiaries: 12527
+      grain: one row per member
+      tranches: ['Tranch 4 - Feb-March']
+      financial_years: ['2025-26']
+      districts_reached: 6
+      person_columns_populated: true
+      aliases: [new, newer, new batch, newer batch, registration batch, registrations,
+                "12.5k", "12,500", unpaid, unpaid batch, pending members, second batch]
+      note: >
+        The registration cohort. Carries every person-level attribute, reaches only six
+        districts, and appears in Tranch 4 only. Treating it as "unpaid" is an inference -
+        see overloaded_terms.unpaid.
+    derived_groups:
+      both:
+        members: ["93K", "12.5K"]
+        records: 385671
+        aliases: [all, everyone, overall, whole scheme, total, all batches]
+        note: The default when the question is about payments, money or geography.
+
+  # ---- time -------------------------------------------------------------
+  financial_year:
+    column: financial_year_short
+    canonical_column: financial_year
+    stored_form: "char(7) short form '2025-26'; char(9) canonical form '2025-2026'"
+    distinct_in_scheme: 2
+    distinct_in_dim_year: 4
+    sql_predicate: "financial_year_short = '<canonical>'"
+    critical: true
+    sparsity_warning: >
+      Focus Plus occupies only TWO of dim_year's four rows. FY 2023-24 and FY 2024-25
+      hold NO Focus Plus data at all. A year-over-year trend is two points with a
+      three-year gap - never draw a line through it.
+    values:
+    - canonical: "2022-23"
+      canonical_long: "2022-2023"
+      year_key: 2022
+      records: 93286
+      tranches: ['Tranch 1']
+      amount_per_payment: 5000
+      aliases: ["FY 2022-23", "2022-2023", "2022 23", "FY23", "F.Y. 2022-23", "2022"]
+      note: The only year at the 5000 rate, and the only tranche outside FY 2025-26.
+    - canonical: "2025-26"
+      canonical_long: "2025-2026"
+      year_key: 2025
+      records: 292385
+      tranches: ['Tranch 2 - August', 'Tranch 3 - December', 'Tranch 4 - Feb-March']
+      amount_per_payment: 2500
+      aliases: ["FY 2025-26", "2025-2026", "2025 26", "FY26", "F.Y. 2025-26", "2025",
+                current year, this year, latest year]
+    absent_years:
+      values: ["2023-24", "2024-25"]
+      behaviour: >
+        These exist in dim_year but hold no Focus Plus rows. Resolve them, then return an
+        empty result with an explanation - do not return not_found, and do not silently
+        widen the filter.
+    no_calendar_year:
+      critical: true
+      text: >
+        UNLIKE PMAY, THERE IS NO CALENDAR-YEAR READING. Focus Plus has no date column at
+        all, so a bare year cannot be bucketed by calendar. A bare "2025" resolves to
+        FY 2025-26 with that stated. There is no year_disambiguation section in this file
+        because there is no second reading to disambiguate against.
+    year_note_warning: >
+      dim_year.data_quality_note is scheme-blind. Both current notes are MGNREGA facts,
+      and 2025-26 carries one. Do NOT surface it on a Focus Plus answer.
+
+  tranche_label:
+    column: tranche_label
+    stored_case: exact - "Tranch", not "Tranche". Do not correct the spelling.
+    distinct: 4
+    closed_set: true
+    nulls: 0
+    sql_predicate: "tranche_label = '<canonical>'"
+    critical: true
+    not_time:
+      critical: true
+      text: >
+        THE MOST INVITING WRONG READING IN THIS SCHEMA. The labels embed month words -
+        August, December, Feb-March - and look like a timeline. They are label text. The
+        extract cannot guarantee they sort chronologically and there is no date column to
+        check them against. NEVER order by tranche_label as a series, never build a
+        monthly view from it, and never resolve a bare month name to a tranche.
+    values:
+    - canonical: "Tranch 1"
+      records: 93286
+      financial_year: "2022-23"
+      amount: 5000
+      batches: ["93K"]
+      aliases: ["tranche 1", "tranch1", "T1", "first tranche", "1st tranche", "tranche one"]
+    - canonical: "Tranch 2 - August"
+      records: 93286
+      financial_year: "2025-26"
+      amount: 2500
+      batches: ["93K"]
+      aliases: ["tranche 2", "tranch2", "T2", "second tranche", "2nd tranche", "tranche two"]
+      month_word_warning: The word August is part of the label, not a date filter.
+    - canonical: "Tranch 3 - December"
+      records: 93286
+      financial_year: "2025-26"
+      amount: 2500
+      batches: ["93K"]
+      aliases: ["tranche 3", "tranch3", "T3", "third tranche", "3rd tranche", "tranche three"]
+      month_word_warning: The word December is part of the label, not a date filter.
+    - canonical: "Tranch 4 - Feb-March"
+      records: 105813
+      financial_year: "2025-26"
+      amount: 2500
+      batches: ["93K", "12.5K"]
+      aliases: ["tranche 4", "tranch4", "T4", "fourth tranche", "4th tranche", "tranche four"]
+      note:
+        critical: true
+        text: >
+          THE ONLY TRANCHE CONTAINING BOTH COHORTS - 93,286 legacy plus the whole 12,527
+          registration batch. A four-way tranche breakdown is therefore not a clean split,
+          and reading Tranch 4's larger count as growth is wrong. Split by batch_label
+          whenever a per-tranche comparison is made.
+      month_word_warning: Feb-March is part of the label, not a date range.
+
+  # ---- geography --------------------------------------------------------
+  district:
+    name_column: lgd_district
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    case_note: >
+      The canonical names below are kept in Title Case for display and matching - emit
+      the uppercase form in the predicate.
+    distinct: 12
+    complete: true
+    collisions: none
+    sql_predicate: "lgd_district = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    code_note: >
+      dim_geography carries village_code only. The lgd_code values below resolve a code
+      the user typed to a district name, but the code can never appear in a WHERE clause.
+      A question asking for a district's LGD code is unanswerable.
+    cohort_note:
+      critical: true
+      text: >
+        SIX DISTRICTS ARE LEGACY-ONLY. Eastern West Khasi Hills, East Jaintia Hills,
+        Ri Bhoi, South West Khasi Hills, West Jaintia Hills and West Khasi Hills have
+        records_registration = 0. A district breakdown filtered to the 12.5K cohort
+        returns SIX rows, not twelve, and that is correct - not missing data.
+    alias_provenance: >
+      canonical, lgd_code, acronym, region and the alias lists are the conformed
+      Meghalaya geography, shared with pmay_entity_resolver.yaml. The record counts are
+      Focus Plus figures from the source CSV.
+    beneficiaries_legacy_note: >
+      records_legacy divided by 4, since the legacy cohort carries one row per tranche.
+      This is the figure comparable to the use-case workbook - see workbook_conflict below.
+    workbook_conflict:
+      critical: true
+      text: >
+        Ten of the twelve district figures reproduce the use-case workbook exactly. TWO DO
+        NOT. The workbook gives West Garo Hills 34,720 and South West Garo Hills 8,502;
+        the data gives 30,400 and 12,822. The pair sums to 43,222 either way, so this is a
+        reallocation of 4,320 members between the two districts under a newer mapping, not
+        a data loss. Use the current figures and name the discrepancy if the user cites
+        the workbook.
+    values:
+    - canonical: "West Garo Hills"
+      lgd_code: 278
+      acronym: WGH
+      region: "Garo Hills"
+      records: 126259
+      records_legacy: 121600
+      records_registration: 4659
+      beneficiaries_legacy: 30400
+      block_count: 8
+      village_count: 799
+      aliases: ["WGH", "W.G.H.", "West Garo Hill", "West Garo", "W Garo Hills", "W Garo Hill", "W Garo", "WestGaroHills", "West Garo Hills District", "Tura district"]
+    - canonical: "South West Garo Hills"
+      lgd_code: 663
+      acronym: SWGH
+      region: "Garo Hills"
+      records: 53740
+      records_legacy: 51288
+      records_registration: 2452
+      beneficiaries_legacy: 12822
+      block_count: 4
+      village_count: 407
+      aliases: ["SWGH", "S.W.G.H.", "South West Garo Hill", "South West Garo", "S W Garo Hills", "S W Garo Hill", "S W Garo", "SouthWestGaroHills", "South West Garo Hills District", "Ampati district", "S West Garo Hills"]
+    - canonical: "East Khasi Hills"
+      lgd_code: 274
+      acronym: EKH
+      region: "Khasi Hills"
+      records: 50250
+      records_legacy: 48856
+      records_registration: 1394
+      beneficiaries_legacy: 12214
+      block_count: 12
+      village_count: 298
+      aliases: ["EKH", "E.K.H.", "East Khasi Hill", "East Khasi", "E Khasi Hills", "E Khasi Hill", "E Khasi", "EastKhasiHills", "East Khasi Hills District", "Shillong district"]
+    - canonical: "East Garo Hills"
+      lgd_code: 273
+      acronym: EGH
+      region: "Garo Hills"
+      records: 40704
+      records_legacy: 39100
+      records_registration: 1604
+      beneficiaries_legacy: 9775
+      block_count: 4
+      village_count: 384
+      aliases: ["EGH", "E.G.H.", "East Garo Hill", "East Garo", "E Garo Hills", "E Garo Hill", "E Garo", "EastGaroHills", "East Garo Hills District", "Williamnagar district"]
+    - canonical: "North Garo Hills"
+      lgd_code: 656
+      acronym: NGH
+      region: "Garo Hills"
+      records: 38286
+      records_legacy: 36372
+      records_registration: 1914
+      beneficiaries_legacy: 9093
+      block_count: 4
+      village_count: 419
+      aliases: ["NGH", "N.G.H.", "North Garo Hill", "North Garo", "N Garo Hills", "N Garo Hill", "N Garo", "NorthGaroHills", "North Garo Hills District", "Resubelpara district"]
+    - canonical: "South Garo Hills"
+      lgd_code: 277
+      acronym: SGH
+      region: "Garo Hills"
+      records: 32936
+      records_legacy: 32432
+      records_registration: 504
+      beneficiaries_legacy: 8108
+      block_count: 5
+      village_count: 452
+      aliases: ["SGH", "S.G.H.", "South Garo Hill", "South Garo", "S Garo Hills", "S Garo Hill", "S Garo", "SouthGaroHills", "South Garo Hills District", "Baghmara district"]
+    - canonical: "West Khasi Hills"
+      lgd_code: 279
+      acronym: WKH
+      region: "Khasi Hills"
+      records: 27016
+      records_legacy: 27016
+      records_registration: 0
+      beneficiaries_legacy: 6754
+      block_count: 2
+      village_count: 196
+      aliases: ["WKH", "W.K.H.", "West Khasi Hill", "West Khasi", "W Khasi Hills", "W Khasi Hill", "W Khasi", "WestKhasiHills", "West Khasi Hills District", "Nongstoin district"]
+    - canonical: "South West Khasi Hills"
+      lgd_code: 658
+      acronym: SWKH
+      region: "Khasi Hills"
+      records: 7168
+      records_legacy: 7168
+      records_registration: 0
+      beneficiaries_legacy: 1792
+      block_count: 2
+      village_count: 115
+      aliases: ["SWKH", "S.W.K.H.", "South West Khasi Hill", "South West Khasi", "S W Khasi Hills", "S W Khasi Hill", "S W Khasi", "SouthWestKhasiHills", "South West Khasi Hills District", "Mawkyrwat district", "S West Khasi Hills"]
+    - canonical: "Eastern West Khasi Hills"
+      lgd_code: 740
+      acronym: EWKH
+      region: "Khasi Hills"
+      records: 4884
+      records_legacy: 4884
+      records_registration: 0
+      beneficiaries_legacy: 1221
+      block_count: 2
+      village_count: 85
+      aliases: ["EWKH", "E.W.K.H.", "Eastern West Khasi Hill", "Eastern West Khasi", "Eastern W Khasi Hills", "Eastern W Khasi Hill", "Eastern W Khasi", "EasternWestKhasiHills", "Eastern West Khasi Hills District", "Mairang district", "E West Khasi Hills", "Eastern WKH"]
+    - canonical: "Ri Bhoi"
+      lgd_code: 276
+      acronym: RB
+      region: "Ri Bhoi"
+      records: 1676
+      records_legacy: 1676
+      records_registration: 0
+      beneficiaries_legacy: 419
+      block_count: 3
+      village_count: 32
+      aliases: ["RB", "R.B.", "Ribhoi", "Ri-Bhoi", "Nongpoh district"]
+    - canonical: "East Jaintia Hills"
+      lgd_code: 657
+      acronym: EJH
+      region: "Jaintia Hills"
+      records: 1616
+      records_legacy: 1616
+      records_registration: 0
+      beneficiaries_legacy: 404
+      block_count: 2
+      village_count: 13
+      aliases: ["EJH", "E.J.H.", "East Jaintia Hill", "East Jaintia", "E Jaintia Hills", "E Jaintia Hill", "E Jaintia", "EastJaintiaHills", "East Jaintia Hills District", "Khliehriat district"]
+    - canonical: "West Jaintia Hills"
+      lgd_code: 275
+      acronym: WJH
+      region: "Jaintia Hills"
+      records: 1132
+      records_legacy: 1132
+      records_registration: 0
+      beneficiaries_legacy: 283
+      block_count: 2
+      village_count: 25
+      aliases: ["WJH", "W.J.H.", "West Jaintia Hill", "West Jaintia", "W Jaintia Hills", "W Jaintia Hill", "W Jaintia", "WestJaintiaHills", "West Jaintia Hills District", "Jowai district"]
+
+  block:
+    name_column: lgd_block
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    case_note: >
+      Same as district - dim_geography stores block UPPERCASE. Canonical names below stay
+      Title Case for matching; emit the uppercase form.
+    distinct: 50
+    distinct_raw_in_source: 77
+    integrity: >
+      Verified in the source: no block appears in more than one district. The 77 raw
+      strings collapse to 51 on folding, of which one is the null-text 'Nan' - leaving 50
+      real blocks.
+    trailing_space_finding:
+      critical: true
+      text: >
+        26 OF THE 77 RAW BLOCK STRINGS DIFFER FROM ANOTHER ONLY BY A TRAILING SPACE, and
+        the spaced variant is always the 12.5K cohort - 'Tikrikilla' 28,504 rows against
+        'Tikrikilla ' 1,618. Folding without a trim splits the block in two and halves the
+        answer. This is a SOURCE artefact; dim_geography is expected to have cleaned it.
+        If a query against megh_db returns a trailing-space block, the ingest did not
+        clean it and this catalogue must be revised.
+    sql_predicate: "lgd_block = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    scope_by_district_when_given: true
+    disambiguation: >
+      19 of these names are also village names. Apply
+      cross_dimension_collisions.disambiguation_rules.
+    municipal_boards:
+      note: >
+        Five entries are municipal boards, not C&RD blocks - Baghmara-Municipal Board,
+        Resubelpara-Municipal Board, Tura Municipal Board-Municipal Board,
+        Williamnagar-Municipal Board and Shillong-Municipal Board. They carry
+        entity_type = 'Ward' in dim_geography. All five are 12.5K-cohort only. A bare stem
+        resolves to the C&RD block; the board requires "municipal board", "MB", "town" or
+        "ward".
+      doubled_suffix: >
+        "Tura Municipal Board-Municipal Board" is stored with the suffix twice. It is the
+        stored value - match it, do not tidy it.
+    excluded_values:
+      - value: "Nan"
+        records: 4
+        reason: >
+          Null written out as text by the source export, on the 4 rows that also carry no
+          district. Never resolve it, never suggest it, never present it as a block.
+    values:
+    - { canonical: "Tikrikilla", district: "West Garo Hills", records: 30122 }
+    - { canonical: "Selsella", district: "West Garo Hills", records: 29024 }
+    - { canonical: "Zikzak", district: "South West Garo Hills", records: 23208 }
+    - { canonical: "Nongstoin", district: "West Khasi Hills", records: 22000 }
+    - { canonical: "Rongram", district: "West Garo Hills", records: 20613 }
+    - { canonical: "Dalu", district: "West Garo Hills", records: 19826 }
+    - { canonical: "Dadenggiri", district: "West Garo Hills", records: 18213 }
+    - { canonical: "Kharkutta", district: "North Garo Hills", records: 17921 }
+    - { canonical: "Mylliem", district: "East Khasi Hills", records: 17509 }
+    - { canonical: "Rerapara", district: "South West Garo Hills", records: 17280 }
+    - { canonical: "Dambo Rongjeng", district: "East Garo Hills", records: 16723 }
+    - { canonical: "Betasing", district: "South West Garo Hills", records: 12548 }
+    - { canonical: "Songsak", district: "East Garo Hills", records: 12498 }
+    - { canonical: "Resubelpara", district: "North Garo Hills", records: 11477 }
+    - { canonical: "Samanda", district: "East Garo Hills", records: 11417 }
+    - { canonical: "Chokpot", district: "South Garo Hills", records: 10677 }
+    - { canonical: "Baghmara", district: "South Garo Hills", records: 9147 }
+    - { canonical: "Lawsohtun", district: "East Khasi Hills", records: 8692 }
+    - { canonical: "Bajengdoba", district: "North Garo Hills", records: 8590 }
+    - { canonical: "Mawryngkneng", district: "East Khasi Hills", records: 8372 }
+    - { canonical: "Gasuapara", district: "South Garo Hills", records: 7444 }
+    - { canonical: "Gambegre", district: "West Garo Hills", records: 6947 }
+    - { canonical: "Rongara", district: "South Garo Hills", records: 5499 }
+    - { canonical: "Ranikor", district: "South West Khasi Hills", records: 5432 }
+    - { canonical: "Mawkynrew", district: "East Khasi Hills", records: 5320 }
+    - { canonical: "Mawshynrut", district: "West Khasi Hills", records: 5016 }
+    - { canonical: "Mawpat", district: "East Khasi Hills", records: 4137 }
+    - { canonical: "Pynursla", district: "East Khasi Hills", records: 3778 }
+    - { canonical: "Mawthadraishan", district: "Eastern West Khasi Hills", records: 3276 }
+    - { canonical: "Mawsynram", district: "East Khasi Hills", records: 2229 }
+    - { canonical: "Mawkyrwat", district: "South West Khasi Hills", records: 1736 }
+    - { canonical: "Jirang", district: "Ri Bhoi", records: 1660 }
+    - { canonical: "Wapung", district: "East Jaintia Hills", records: 1612 }
+    - { canonical: "Mairang", district: "Eastern West Khasi Hills", records: 1608 }
+    - { canonical: "Demdema", district: "West Garo Hills", records: 1304 }
+    - { canonical: "Laskein", district: "West Jaintia Hills", records: 1080 }
+    - { canonical: "Damalgre", district: "South West Garo Hills", records: 704 }
+    - { canonical: "Resubelpara-Municipal Board", district: "North Garo Hills", records: 298 }
+    - { canonical: "Tura Municipal Board-Municipal Board", district: "West Garo Hills", records: 210 }
+    - { canonical: "Baghmara-Municipal Board", district: "South Garo Hills", records: 169 }
+    - { canonical: "Mawphlang", district: "East Khasi Hills", records: 94 }
+    - { canonical: "Williamnagar-Municipal Board", district: "East Garo Hills", records: 66 }
+    - { canonical: "Thadlaskein", district: "West Jaintia Hills", records: 52 }
+    - { canonical: "Shella Bholaganj", district: "East Khasi Hills", records: 42 }
+    - { canonical: "Shillong-Municipal Board", district: "East Khasi Hills", records: 34 }
+    - { canonical: "Khatarshnong Laitkroh", district: "East Khasi Hills", records: 27 }
+    - { canonical: "Sohiong", district: "East Khasi Hills", records: 16 }
+    - { canonical: "Umling", district: "Ri Bhoi", records: 8 }
+    - { canonical: "Umsning", district: "Ri Bhoi", records: 8 }
+    - { canonical: "Saipung", district: "East Jaintia Hills", records: 4 }
+
+  village:
+    name_column: lgd_village_name
+    code_column: village_code
+    stored_case: >
+      Title Case in dim_geography.lgd_village_name. UNLIKE district and block, the village
+      name is NOT uppercased in the curated layer.
+    distinct_names_in_scheme: 3659
+    distinct_codes_in_scheme: 3221
+    distinct_names_raw_in_source: 4574
+    name_count_note: >
+      The raw source carries 4,574 distinct village strings, but 1,353 of them appear on
+      rows with no village code and cannot be resolved to a geography at all. 3,659
+      distinct names map onto 3,221 codes - fewer codes than names, because the source
+      spells some villages more than one way.
+    integrity: >
+      The code is the reliable key; the NAME is not. 186 names are shared by two or more
+      different villages within this scheme.
+    sql_predicate_preferred: "village_code = <code>"
+    sql_predicate_fallback: "lgd_village_name = '<canonical>'"
+    counting_villages: >
+      Use COUNT(DISTINCT village_code), never COUNT(DISTINCT name). Across dim_geography
+      345 village names are shared; within Focus Plus 186 are.
+
+    resolution_strategy:
+    - 1. If the user gave a numeric code, resolve on village_code directly.
+    - 2. Fold the name and look it up scoped by any district or block also given.
+    - 3. If exactly one code survives, resolve and emit the CODE, not the name.
+    - 4. If more than one survives, return ambiguous with candidate codes plus their
+         district and block. Ask which one.
+    - 5. If none survive, run fuzzy then embedding, then not_found with 5 suggestions.
+
+    unmapped_rows:
+      critical: true
+      count: 102923
+      share: 26.7%
+      by_batch: { "93K": 102916, "12.5K": 7 }
+      text: >
+        102,923 SOURCE ROWS CARRY NO VILLAGE CODE, while fact.geography_key is NOT NULL.
+        How they resolved at ingest is UNKNOWN - quarantined, or mapped to a placeholder
+        geography. Establish this before publishing any village- or block-level figure.
+        Until it is settled, a village breakdown covers at most 73.3% of payments and the
+        answer must say so.
+
+    ward_names:
+      count_rows: 777
+      note: >
+        Some village strings are urban wards carrying a ward prefix and suffix, such as
+        "1-Williamnagar (Mb) - Ward No.1". dim_geography holds 164 wards alongside 7,200
+        villages and marks them entity_type = 'Ward'. Resolve them, but check entity_type
+        before describing a result as village-level, and never mix wards silently into a
+        "top villages" ranking.
+
+    numeric_prefix_names:
+      count: 137
+      examples: ["10 Adugre", "10 Ganchigre", "12 Rongrenggre", "1-Ward No. 1",
+                 "1-Laitumkhrah - Ward No.1", "5 Mile"]
+      rule: >
+        These are NAMES, not codes. A village code in this dataset is an integer with no
+        letters, spaces or hyphens. Never strip the leading digits to "correct" the name.
+
+    excluded_values:
+      - value: "Nan"
+        records: 636
+        reason: Null written out as text by the source export. Never resolve or suggest it.
+      - value: ""
+        records: 103
+        reason: Empty village name.
+      - value: "  "
+        records: 1
+        reason: Whitespace-only village name.
+
+    ambiguity:
+      shared_names: 186
+      detail: >
+        186 village names are used by two or more physically different villages within
+        Focus Plus. Village name alone is NEVER a key.
+      resolve_by_district: 121
+      resolve_by_block: 65
+      resolve_by_block_note: >
+        For these 65 the copies all sit in ONE district, so naming the district does not
+        narrow anything - ask for the block, or take the code.
+      registry_key: "NAME: { codes, districts, resolve_by }"
+      district_codes_used: >
+        EGH East Garo Hills, EJH East Jaintia Hills, EKH East Khasi Hills,
+        EWKH Eastern West Khasi Hills, NGH North Garo Hills, RB Ri Bhoi,
+        SGH South Garo Hills, SWGH South West Garo Hills, SWKH South West Khasi Hills,
+        WGH West Garo Hills, WJH West Jaintia Hills, WKH West Khasi Hills
+      registry:
+        ADINGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        ADUGRE: { codes: 4, districts: [SWGH, WGH], resolve_by: district }
+        AGALGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        AKINPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        ALLAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        AMBARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        AMONGGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        AMPANGDAMGRE: { codes: 3, districts: [EGH, SGH, WGH], resolve_by: district }
+        AMPANGGRE: { codes: 4, districts: [EGH, SGH, WGH], resolve_by: district }
+        AMPATI: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        AMTULI: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        ANANGPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        ANCHENGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        APALGRE: { codes: 4, districts: [SWGH, WGH], resolve_by: district }
+        ARAGITTIM: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        ARUAGRE: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        ASAKGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        ASIMGRE: { codes: 6, districts: [EGH, SGH, SWGH, WGH], resolve_by: district }
+        ASIRAGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        BABUPARA: { codes: 3, districts: [EGH, NGH, SWGH], resolve_by: district }
+        BAKSALPARA: { codes: 2, districts: [NGH], resolve_by: block }
+        BALADINGGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BALALGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BALSRIGITTIM: { codes: 3, districts: [EGH, NGH, SGH], resolve_by: district }
+        BALUPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        BANAJURI: { codes: 2, districts: [SGH], resolve_by: block }
+        BARMANPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BATABARI: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        BAWEGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        BELBARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BERUPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BHANGARPAR: { codes: 2, districts: [WGH], resolve_by: block }
+        BIBRAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        BILKONA: { codes: 2, districts: [SGH], resolve_by: block }
+        BOLBOKGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        BOLCHUGRE: { codes: 6, districts: [EGH, SGH, SWGH, WGH], resolve_by: district }
+        BOLDAMGIRI: { codes: 2, districts: [SWGH], resolve_by: block }
+        BOLDAMGRE: { codes: 8, districts: [SGH, SWGH, WGH], resolve_by: district }
+        BOLDORENGGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        BOLLONGGITOK: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BOLLONGGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        BOLMAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        BOLONGGRE: { codes: 2, districts: [EGH, NGH], resolve_by: district }
+        BOLSALGRE: { codes: 4, districts: [SGH, SWGH, WGH], resolve_by: district }
+        CHAMAGURI: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        CHAMBILDAM: { codes: 2, districts: [EGH, NGH], resolve_by: district }
+        CHANDIGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        CHENGKURIGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        CHERAN SONGGITCHAM: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        CHERAN SONGMAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        CHERANGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        CHIBOLGRE: { codes: 3, districts: [EGH, NGH, WGH], resolve_by: district }
+        CHIBONGAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        CHIBONGGA: { codes: 2, districts: [NGH, WGH], resolve_by: district }
+        CHIDEKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        CHIGITCHAKGRE: { codes: 8, districts: [SGH, SWGH, WGH], resolve_by: district }
+        CHIGRANGGRE: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        CHIMAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        CHIOKGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        CHISAKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        CHISIKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        CHISIM APAL: { codes: 2, districts: [NGH], resolve_by: block }
+        CHONGNAPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        DABIGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        DABONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DAGALGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DAKOPGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DALMAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DAMALGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DAME APAL: { codes: 2, districts: [NGH], resolve_by: block }
+        DAMJONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DANGSAPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DAPGIRI: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DAPGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DARECHIKGRE: { codes: 3, districts: [WGH], resolve_by: block }
+        DAREN AGAL: { codes: 2, districts: [WGH], resolve_by: block }
+        DARENGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DARUGRE: { codes: 3, districts: [EGH, SWGH], resolve_by: district }
+        DASPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DIGRANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DILNIGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DILSIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DIMAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DOBOKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DOLLONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DOMBAGRE: { codes: 2, districts: [SWGH], resolve_by: block }
+        DOPANANGGRE: { codes: 3, districts: [WGH], resolve_by: block }
+        DORENGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DURAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        EGOPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        GALWANGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        GANDHIPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        GENAPARA: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        GIMBILGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        GOLAGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        GONDENGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        HARIBHANGA: { codes: 2, districts: [WGH], resolve_by: block }
+        ICHAKURI: { codes: 2, districts: [SWGH], resolve_by: block }
+        JANGRAPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        JARANGPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        JENGGITCHAKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        JENGJALGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        KASHRA: { codes: 2, districts: [SWGH], resolve_by: block }
+        KATALBARI: { codes: 2, districts: [SWGH], resolve_by: block }
+        KATHALBARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        KIMDEGRE: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        KONAGITTIM: { codes: 2, districts: [SGH], resolve_by: block }
+        KONCHIKOL APAL: { codes: 2, districts: [NGH], resolve_by: block }
+        KORAITOLA: { codes: 2, districts: [SWGH], resolve_by: block }
+        KOSIGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        LAITKSEH: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        LINE ADING: { codes: 2, districts: [NGH], resolve_by: block }
+        LOWER KHARKUTTA: { codes: 2, districts: [NGH], resolve_by: block }
+        MALIKONA: { codes: 2, districts: [SGH], resolve_by: block }
+        MANDAGRE: { codes: 3, districts: [WGH], resolve_by: block }
+        MANDALGRE: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        MANDANGGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        MANGRUGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        MANGSANGGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        MARENGPARA: { codes: 2, districts: [SWGH], resolve_by: block }
+        MASSAR: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        MATCHOKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        MAWBRI: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        MAWDUMDUM: { codes: 2, districts: [EWKH, WKH], resolve_by: district }
+        MAWIONG: { codes: 2, districts: [EKH], resolve_by: block }
+        MAWLEIN: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        MAWRYNGKANG: { codes: 2, districts: [EKH], resolve_by: block }
+        MAWSMAI: { codes: 2, districts: [EWKH, WKH], resolve_by: district }
+        MEGONGGRE: { codes: 3, districts: [WGH], resolve_by: block }
+        MENGKAKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        MERENGGIPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        MIBONPARA: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        MOLMEGRE: { codes: 2, districts: [SGH, SWGH], resolve_by: district }
+        MRONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        MYNRIENG: { codes: 2, districts: [EKH], resolve_by: block }
+        NAWALGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        NAYAPARA: { codes: 4, districts: [EKH, SWGH, SWKH, WGH], resolve_by: district }
+        NEW RUKALGRE: { codes: 2, districts: [EGH], resolve_by: block }
+        NOGORPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        NOKATGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        NOLBARI: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        NONGDOM: { codes: 3, districts: [EWKH, WKH], resolve_by: district }
+        NONGLANG: { codes: 3, districts: [EWKH, SWKH, WKH], resolve_by: district }
+        NONGMAWLEIN: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        NONGSHILIANG: { codes: 2, districts: [EWKH, WKH], resolve_by: district }
+        NONGTHYMMAI: { codes: 3, districts: [EKH, EWKH, SWKH], resolve_by: district }
+        NOONMATI: { codes: 2, districts: [SWGH], resolve_by: block }
+        PAHAM TILAPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        RAMJONGGRE B: { codes: 2, districts: [WGH], resolve_by: block }
+        RANGMALGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        RANGSAGRE: { codes: 5, districts: [SWGH, WGH], resolve_by: district }
+        RANGSAKONA: { codes: 2, districts: [RB, SWGH], resolve_by: district }
+        RENCHIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RIMRANGPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        RINGGIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        ROMBAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        RONGALGRE: { codes: 3, districts: [EGH, WGH], resolve_by: district }
+        RONGBAKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        RONGBILBANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        RONGBOKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RONGCHIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RONGDENGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        RONGJIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RONGRAMGRE: { codes: 6, districts: [SWGH, WGH], resolve_by: district }
+        RONGSANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        SAMPALGRE: { codes: 4, districts: [EGH, WGH], resolve_by: district }
+        SANJANGPARA: { codes: 2, districts: [SWGH], resolve_by: block }
+        SARINGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        SASATGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        SELBALGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        SENTAPARA: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        SILBARIPARA: { codes: 2, districts: [SGH, SWGH], resolve_by: district }
+        SONGMAGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        TAKIMAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        TALLANGGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        TARAPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        TEKSRAGRE: { codes: 4, districts: [SGH, WGH], resolve_by: district }
+        TIEHBAH: { codes: 2, districts: [EWKH, WKH], resolve_by: district }
+        TONGAPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        UMKREM: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        UMSAW: { codes: 3, districts: [EKH, WKH], resolve_by: district }
+        WADAGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        WAGOPGRE: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        WAKANTAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        WARIMAGRE: { codes: 2, districts: [EGH, SGH], resolve_by: district }
+        WATREGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+
+  # ---- person attributes - 12.5K COHORT ONLY ----------------------------
+  # Every dimension below is NULL on all 373,144 legacy rows. A breakdown by
+  # any of them describes 3.2% of the scheme. State the cohort and the
+  # denominator, every time.
+  gender:
+    column: gender
+    stored_case: Title Case - stored exactly as shown
+    distinct: 2
+    closed_set: true
+    cohort_scope: registration
+    coverage:
+      critical: true
+      populated_rows: 12527
+      null_rows: 373144
+      share: 3.2%
+      text: >
+        NULL on every legacy row. A gender split is NOT a Focus Plus scheme figure and
+        must never be presented as one. NULL here means "not collected for this cohort",
+        not "unknown individual" - do not render it as an Other or Unspecified category.
+    sql_predicate: "gender = '<canonical>'"
+    scheme_note: >
+      Focus Plus is the ONLY scheme in megh_db with a real gender column. PMAY has
+      house_alloted_to, which is an allotment category, not gender. Never map one onto the
+      other, and never answer a Focus Plus gender question from PMAY vocabulary.
+    values:
+    - canonical: "Female"
+      records: 10263
+      aliases: [female, women, woman, girls, ladies, f, women members, female members]
+    - canonical: "Male"
+      records: 2264
+      aliases: [male, men, man, boys, m, male members]
+    derived_groups:
+      women:
+        members: [Female]
+        records: 10263
+        aliases: [women, woman, female, female beneficiaries, women beneficiaries]
+        note: >
+          Simpler than PMAY, where "women" spans four Woman-* categories. Here it is one
+          stored value. The complication is coverage, not category - 10,263 of 12,527
+          registrations, and nothing at all for the 373,144 legacy payments.
+
+  occupation:
+    column: occupation
+    stored_case: Title Case - stored exactly as shown
+    distinct: 7
+    closed_set: true
+    cohort_scope: registration
+    coverage:
+      critical: true
+      populated_rows: 12527
+      null_rows: 373144
+      share: 3.2%
+    sql_predicate: "occupation = '<canonical>'"
+    values:
+    - canonical: "Farmer"
+      records: 8533
+      aliases: [farmer, farmers, farming, cultivator, cultivators, agriculture,
+                agriculturist, krishak]
+      note: >
+        The plurality but NOT the whole - 68% of the covered rows. "How many farmers" must
+        not be silently answered as "how many beneficiaries". See overloaded_terms.farmers.
+    - canonical: "Unemployed"
+      records: 2494
+      aliases: [unemployed, jobless, no occupation, not employed, without work]
+    - canonical: "Others"
+      records: 904
+      aliases: [other, others, other occupation, miscellaneous]
+      note: A real stored category, not a null placeholder. Do not merge it with NULL.
+    - canonical: "Business"
+      records: 296
+      aliases: [business, businessman, businesswoman, trader, self employed,
+                self-employed, shopkeeper, entrepreneur]
+    - canonical: "Private Employee"
+      records: 194
+      aliases: [private employee, private sector, private job, private service, employee]
+    - canonical: "Student"
+      records: 83
+      aliases: [student, students, studying, scholar]
+    - canonical: "Government Employee"
+      records: 23
+      aliases: [government employee, govt employee, government service, govt service,
+                public servant, government job, sarkari]
+      note: n=23. Small enough that a percentage over it is thin - state the denominator.
+
+  focus_status:
+    column: focus_status
+    stored_case: Title Case - stored exactly as shown
+    distinct: 3
+    closed_set: observed - NOT a controlled list
+    cohort_scope: registration
+    coverage:
+      critical: true
+      populated_rows: 12527
+      null_rows: 373144
+      share: 3.2%
+    not_a_dimension:
+      critical: true
+      text: >
+        THERE IS NO dim_focus_plus_status AND NO ROLL-UP FLAG. Nothing here corresponds to
+        PMAY's is_completed or is_in_progress. This is an uncontrolled varchar on the
+        fact. ENUMERATE WITH SELECT DISTINCT BEFORE WRITING ANY FILTER - the three values
+        below are a source-file observation, not a constraint, and a fourth may exist in
+        megh_db.
+    not_a_payment_flag:
+      critical: true
+      text: >
+        'Approved' describes an APPLICATION, not a disbursement, and every row carrying it
+        is in the cohort that has NOT been paid. Reading it as "paid" inverts the answer.
+        See overloaded_terms.paid.
+    sql_predicate: "focus_status = '<canonical>'"
+    values:
+    - canonical: "Pending"
+      records: 11812
+      aliases: [pending, awaiting, in process, under process, not yet approved,
+                awaiting approval]
+    - canonical: "Approved"
+      records: 714
+      aliases: [approved, accepted, cleared, sanctioned]
+      note: >
+        The word "sanctioned" is a PMAY status vocabulary item. Accept it as an alias here
+        but never carry PMAY's sanctioned-amount or sanction-date readings across - Focus
+        Plus has neither column.
+    - canonical: "Rejected"
+      records: 1
+      singleton: true
+      aliases: [rejected, denied, refused, declined]
+      note: >
+        EXACTLY 1 RECORD. Include it in totals, but never present it as a meaningful
+        category, a percentage or a trend without saying n=1.
+
+  verification_status:
+    column: verification_status
+    stored_case: Title Case - stored exactly as shown
+    distinct: 1
+    cohort_scope: registration
+    coverage:
+      populated_rows: 12527
+      null_rows: 373144
+      share: 3.2%
+    zero_discriminating_power:
+      critical: true
+      text: >
+        EVERY POPULATED ROW READS 'Approved'. Filtering on this column changes nothing and
+        grouping by it returns one row. If the user asks to split or filter by
+        verification, say it has a single value rather than returning a one-row breakdown
+        that looks like an answer. Enumerate with SELECT DISTINCT before trusting even
+        this - it is a source-file observation.
+    sql_predicate: "verification_status = '<canonical>'"
+    values:
+    - canonical: "Approved"
+      records: 12527
+      aliases: [verified, approved, verification approved, checked]
+
+  # ---- identifiers - resolvable only in the narrowest sense -------------
+  identifiers:
+    critical: true
+    policy: >
+      Focus Plus is the only person-level fact in megh_db. Rule 7 of
+      SCHEMA_FOR_DEVELOPERS.md governs everything below. The resolver's job for these is
+      to RECOGNISE the entity type and hand back a `refused` or `not_found` contract - not
+      to find the person.
+    member_id:
+      column: member_id
+      pii: true
+      resolvable: false
+      output_contract: refused
+      reason: privacy
+      distinct_in_source: 12527
+      nulls: 373144
+      rules:
+      - Never fuzzy-match, never suggest near-matches - a near-match of a person id is
+        itself a leak.
+      - Never emit into a SELECT list, an export or a vector-store payload.
+      - The only permitted use is inside COUNT(DISTINCT member_id).
+      - "COUNT(DISTINCT member_id) covers the 12.5K cohort ONLY. It is not the scheme
+        beneficiary total. See overloaded_terms.beneficiaries."
+    pincode:
+      column: pincode
+      pii: true
+      resolvable: false
+      output_contract: refused
+      reason: privacy
+      populated_rows: 12520
+      rules:
+      - Person locality. Never emit into an answer or an export.
+      - Never SUM or AVG - a pincode is not a number in any arithmetic sense.
+      - Populated on 3.2% of rows. It is not a usable geography column - use village_code.
+    source_sl_no:
+      column: source_sl_no
+      pii: false
+      resolvable: true
+      distinct_by_batch: { "93K": 93286, "12.5K": 12527 }
+      cross_batch_overlap: 0
+      rules:
+      - "A FILE SERIAL, NOT A PERSON KEY. It is the closest available proxy for a legacy
+        beneficiary now that epic_id is gone, and it must be described as a serial
+        whenever it is used to count people."
+      - Unique per beneficiary WITHIN a batch; repeats once per tranche.
+      - The two batches do not overlap on it, so (batch_label, source_sl_no) is stable.
+      - Never SUM or AVG.
+    dropped_at_ingest:
+      critical: true
+      columns: [epic_id, beneficiary_name, mobile_number, status]
+      behaviour: >
+        These are not in the curated layer. A span that resolves to one of them returns
+        `not_found` with reason not_held - never a guess, never a partial match, and never
+        an offer to search a different column that does not exist either.
+      epic_id_note: >
+        THE CONSEQUENTIAL LOSS. 93,286 distinct EPIC ids in the source, and the only
+        identifier the legacy cohort had. Its format is three letters plus seven digits,
+        with the first three letters being the assembly constituency code - which is why
+        losing it also removes the AC-code route to constituency questions. 111 EPIC ids
+        appeared in BOTH cohorts, an overlap that can no longer be measured.
+
+# ---------------------------------------------------------------------------
+measure_vocabulary:
+  amount_disbursed:
+    column: amount_disbursed
+    aliases: [amount, amount disbursed, disbursement, disbursed amount, payment, paid,
+              money paid, money disbursed, DBT amount, funds, funds disbursed, spend,
+              total spend, expenditure, payout]
+    aggregate: SUM(amount_disbursed)
+    distinct_values: 2
+    values: { 5000: 93286, 2500: 292385 }
+    nulls: 0
+    zero_rows: 0
+    total_in_source: 1197392500
+    unit: unverified
+    unit_authority: curated.dim_scheme.money_unit
+    verified_in_db: false
+    critical:
+      text: >
+        THE UNIT IS UNVERIFIED AND THIS IS THE HIGHEST-PRIORITY UNKNOWN IN THE PARTITION.
+        Read curated.dim_scheme.money_unit for the Focus Plus row before formatting or
+        converting. Source values of 5000 and 2500 corroborate rupees but do not settle
+        it; three units are already live in megh_db. If dim_scheme does not answer, report
+        the figure as stored and say the unit is unconfirmed.
+    two_rate_finding:
+      critical: true
+      text: >
+        ONLY TWO VALUES EXIST, AND THEY BELONG TO DIFFERENT TRANCHES - 5000 in Tranch 1
+        (FY 2022-23) and 2500 in every later tranche. Consequences the generator must
+        respect:
+          - AVG(amount_disbursed) is a MIX RATIO between tranche types, not an
+            entitlement. Never present it as "the average payment".
+          - A per-member figure is the total divided by a member count, and which member
+            count is meant must be settled first.
+          - The use-case workbook assumes a flat 5000 throughout and is WRONG. A query
+            for "payments that are not 5000" returns 292,385 rows - three quarters of the
+            data - and that is correct, not an anomaly.
+          - Ranking districts by amount is nearly the same as ranking by payment count,
+            differing only through each district's tranche mix.
+    not_available:
+      columns: [sanctioned_amount, amount_released, amount_pending, target, budget,
+                allocation, administrative_expenditure]
+      note: >
+        Focus Plus holds ONE money column. Never borrow a money column from PMAY or
+        MGNREGA to fill a gap, and never derive a pending or sanctioned figure.
+
+  payment_count:
+    aliases: [payments, disbursements, transactions, how many payments, number of
+              payments, count of payments]
+    aggregate: COUNT(*)
+    default: true
+    mandatory_filter: none
+    critical: >
+      ONE ROW IS ONE PAYMENT, NOT ONE PERSON. A legacy member appears on four rows. Every
+      COUNT(*) answer must say it is a payment count. And note there is NO mandatory
+      filter on this partition - do not carry PMAY's WHERE NOT is_placeholder across.
+
+  member_count:
+    aliases: [members, people, persons, individuals, distinct members, unique members,
+              how many members]
+    aggregate: COUNT(DISTINCT member_id)
+    cohort_scope: registration
+    critical: >
+      COVERS THE 12.5K COHORT ONLY - member_id is NULL on all 373,144 legacy rows. This is
+      NOT the scheme beneficiary total, and presenting it as one is the most dangerous
+      single error available in this schema. For a legacy count use
+      COUNT(DISTINCT source_sl_no) with batch_label = '93K', and say it is a file serial.
+
+  village_count:
+    aliases: [villages, how many villages, number of villages, distinct villages]
+    aggregate: COUNT(DISTINCT village_code)
+    critical: >
+      Count by CODE, never by name. 186 village names in this scheme are shared by more
+      than one village, and 345 are shared across dim_geography.
+
+  district_count:
+    aliases: [districts, how many districts, number of districts, coverage]
+    aggregate: COUNT(DISTINCT lgd_district)
+    note: >
+      12 for the scheme, 6 for the 12.5K cohort. "Coverage" in the count sense is
+      answerable; coverage as a PERCENTAGE is not - no eligible-population denominator is
+      held anywhere in megh_db.
+
+  derived:
+    amount_per_member:
+      formula: "SUM(amount_disbursed) / COUNT(DISTINCT <the agreed member key>)"
+      note: >
+        Settle the member key first - see overloaded_terms.beneficiaries. Never compute it
+        as AVG(amount_disbursed).
+    payments_per_member:
+      formula: "COUNT(*) / COUNT(DISTINCT <the agreed member key>)"
+      note: >
+        Approximately 4 for the legacy cohort by construction and exactly 1 for the
+        registration cohort. Rarely an interesting number - it restates the grain.
+    not_derivable:
+      critical: true
+      items:
+      - { metric: coverage_rate, reason: no eligible-population denominator is held }
+      - { metric: beneficiary_density, reason: no population figures }
+      - { metric: account_ifsc_analysis, reason: no account number or IFSC column exists }
+      - { metric: monthly_trend, reason: no date column exists }
+      - { metric: unpaid_backlog_exact, reason: "the cross-cohort overlap needs epic_id, which was dropped" }
+
+# ---------------------------------------------------------------------------
+region_groupings:
+  note: >
+    Users group districts by hill range. These are NOT columns in megh_db -
+    SCHEMA_FOR_DEVELOPERS.md lists a sub-region lookup as an open roadmap item. Expand
+    into an IN list and state which districts were included.
+  groups:
+    "Garo Hills":
+      districts: [East Garo Hills, North Garo Hills, South Garo Hills,
+                  South West Garo Hills, West Garo Hills]
+      records: 291925
+      aliases: [Garo, Garo region, Garo Hills region, GH]
+      note: >
+        75.7% of all Focus Plus payments. A "Garo Hills versus Khasi Hills" comparison is
+        heavily lopsided - report the shares alongside the counts.
+    "Khasi Hills":
+      districts: [East Khasi Hills, Eastern West Khasi Hills, South West Khasi Hills,
+                  West Khasi Hills]
+      records: 89318
+      aliases: [Khasi, Khasi region, Khasi Hills region, KH]
+    "Jaintia Hills":
+      districts: [East Jaintia Hills, West Jaintia Hills]
+      records: 2748
+      aliases: [Jaintia, Jaintia region, Jaintia Hills region, JH]
+      note: 0.7% of payments, and legacy-cohort only.
+    "Ri Bhoi":
+      districts: [Ri Bhoi]
+      records: 1676
+      aliases: [Ri Bhoi region, Bhoi]
+      note: >
+        Ri Bhoi belongs to no hill range - it is its own district and its own group. Both
+        readings produce the same filter, so no clarification is needed. Do not fold it
+        into Khasi Hills.
+  unassigned:
+    records: 4
+    note: 4 rows carry no district and fall into no group. Exclude and state.
+  whole_state:
+    aliases: [Meghalaya, state, statewide, whole state, all districts, overall]
+    behaviour: no district filter at all.
+
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLES
+# ---------------------------------------------------------------------------
+worked_examples:
+
+- user: "how many focus plus payments in WGH"
+  resolve:
+  - { text: WGH, type: district, canonical: West Garo Hills, lgd_code: 278,
+      matched_by: 4_acronym }
+  - { text: "how many payments", type: measure, canonical: "COUNT(*)" }
+  sql: "SELECT COUNT(*) FROM curated.v_focus_plus WHERE lgd_district = 'WEST GARO HILLS';"
+  expected: 126259
+  note: District is stored UPPERCASE - emit the uppercase literal, not the Title Case form.
+
+- user: "how many beneficiaries are there in focus plus"
+  resolve:
+  - { text: beneficiaries, type: overloaded, reading: AMBIGUOUS }
+  action: ask
+  question: >
+    Payments made (385,671), members with an ID (12,527, the newer batch only), or the
+    93,286 legacy paid members - which the database can no longer count directly?
+  note: >
+    THE MOST IMPORTANT EXAMPLE IN THIS FILE. Do not answer with a single number. The three
+    readings differ by an order of magnitude and the third is not derivable at all.
+
+- user: "how many women got focus plus"
+  resolve:
+  - { text: women, type: gender, canonical: Female, cohort_scope: registration }
+  sql: "SELECT COUNT(*) FROM curated.v_focus_plus WHERE batch_label = '12.5K' AND gender = 'Female';"
+  expected: 10263
+  note: >
+    MUST be stated as covering the newer registration batch only - 12,527 of 385,671
+    records. The 373,144 legacy payments have no gender recorded at all.
+
+- user: "focus plus disbursement trend over time"
+  resolve:
+  - { text: "trend over time", type: measure, reading: TIME_SERIES }
+  action: ask
+  question: >
+    Focus Plus holds only two financial years, 2022-23 and 2025-26, with a three-year gap.
+    Shall I show the two side by side, or break it down by batch and tranche?
+  note: A line drawn through the gap would be a fabrication. There is no date column.
+
+- user: "show me tranche 2 in august"
+  resolve:
+  - { text: "tranche 2", type: tranche_label, canonical: "Tranch 2 - August",
+      matched_by: 2_alias }
+  - { text: august, type: none, action: absorbed_into_label }
+  sql: "SELECT COUNT(*) FROM curated.v_focus_plus WHERE tranche_label = 'Tranch 2 - August';"
+  expected: 93286
+  note: >
+    "August" is part of the stored label, not a date filter. Do not emit a month
+    predicate - there is no date column to filter.
+
+- user: "paid vs unpaid in East Garo Hills"
+  resolve:
+  - { text: "East Garo Hills", type: district, canonical: East Garo Hills, lgd_code: 273 }
+  - { text: "paid vs unpaid", type: overloaded, reading: batch_label, inference: true }
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE batch_label = '93K')   AS legacy_paid_payments,
+           COUNT(*) FILTER (WHERE batch_label = '12.5K') AS newer_registrations
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'EAST GARO HILLS';
+  expected: { legacy_paid_payments: 39100, newer_registrations: 1604 }
+  note: >
+    The answer MUST say the paid/unpaid split is inferred from the batch, not read from a
+    status column. No column encodes payment.
+
+- user: "which bank pays the most focus plus beneficiaries"
+  resolve:
+  - { text: bank, type: column, canonical: bank_name_raw }
+  sql: |
+    SELECT bank_name_raw,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY bank_name_raw
+    ORDER BY payments DESC
+    LIMIT 1;
+  expected: { bank_name_raw: State Bank of India, payments: 258744, amount_raw: 808575000 }
+  note: >
+    "Beneficiaries" is read as payments (rule 6) and labelled as such. bank_name_raw is
+    not withheld - it is on curated.v_focus_plus and is not an identifier. Only account
+    number / IFSC questions still refuse (not_held, no such column exists anywhere).
+
+- user: "is EPIC FTB0593681 a focus plus beneficiary"
+  resolve:
+  - { text: FTB0593681, type: dropped_column, canonical: epic_id }
+  action: refused
+  reason: not_held
+  message: >
+    EPIC ID is not held in the database - it was dropped at ingest. Separately, rule 7
+    forbids a person lookup against this fact. Do not offer member_id as a substitute and
+    do not list near-matches.
+
+- user: "top 5 blocks by focus plus payments"
+  resolve:
+  - { text: "top 5", type: measure, canonical: "ORDER BY ... DESC LIMIT 5" }
+  - { text: blocks, type: block, canonical: GROUP BY lgd_block }
+  sql: |
+    SELECT lgd_block, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE NOT has_geo_conflict
+    GROUP BY lgd_block
+    ORDER BY payments DESC
+    LIMIT 5;
+  expected: [Tikrikilla 30122, Selsella 29024, Zikzak 23208, Nongstoin 22000, Rongram 20613]
+  note: >
+    Source counts, folded. If a query returns 'Tikrikilla' and 'Tikrikilla ' as two rows,
+    the trailing-space artefact survived ingest - see dimensions.block.
+
+- user: "asimgre village payments"
+  resolve:
+  - { text: asimgre, type: village, status: ambiguous }
+  candidates: 6 codes across East Garo Hills, South Garo Hills, South West Garo Hills and West Garo Hills
+  action: ask
+  question: "There are 6 villages called Asimgre. Which district - East Garo Hills, South Garo Hills, South West Garo Hills or West Garo Hills?"
+  note: Resolve on village_code, never the name. See village.ambiguity.registry.
+
+- user: "average focus plus payment"
+  resolve:
+  - { text: "average payment", type: measure, reading: AVG_IS_MISLEADING }
+  action: ask
+  question: >
+    The payment is not one figure - Tranch 1 paid 5,000 and the later tranches 2,500. Did
+    you mean the total divided by the number of members, or the breakdown by tranche?
+  note: >
+    AVG(amount_disbursed) returns a mix ratio between two tranche rates, not an
+    entitlement. The use-case workbook's "5,000 (flat)" answer is wrong.
+
+- user: "how many members in the 12.5k batch are farmers"
+  resolve:
+  - { text: "12.5k", type: batch_label, canonical: "12.5K", matched_by: 2_alias }
+  - { text: farmers, type: occupation, canonical: Farmer }
+  sql: "SELECT COUNT(*) FROM curated.v_focus_plus WHERE batch_label = '12.5K' AND occupation = 'Farmer';"
+  expected: 8533
+  note: >
+    Cohort explicitly named by the user, so no assumption is needed - but the answer
+    should still note this is 68% of that batch and that the legacy batch has no
+    occupation recorded.
+
+# ---------------------------------------------------------------------------
+maintenance:
+  source_files:
+  - datasets/Focus+/Focus Plus Master.csv                              # 385671 x 21
+  - datasets/Focus+/Copy of Megh One AI - FOCUS+ NLP Use Cases.xlsx    # 8 sheets, 352 rows
+  schema_authority: SCHEMA_FOR_DEVELOPERS.md   # live information_schema extract, 2026-09-02
+  row_counts_at_generation:
+    source_csv: 385671
+    legacy_batch: 373144
+    registration_batch: 12527
+    curated.v_focus_plus: unverified_in_db
+  data_span_in_source:
+    financial_years: ['2022-23', '2025-26']
+    no_date_column: true
+    note: There is no first or last payment date to record - the scheme holds no date.
+  last_generated: '2026-09-03'
+
+  open_verification_tasks:
+    critical: true
+    note: >
+      THIS FILE WAS BUILT FROM THE SOURCE CSV AND FROM STRUCTURE. NOTHING BELOW HAS BEEN
+      MEASURED AGAINST megh_db. Each item is a query to run before any Focus Plus answer
+      ships.
+    tasks:
+    - "Money unit: SELECT money_unit, time_semantics FROM curated.dim_scheme - the highest
+       priority item in this folder. No Focus Plus money figure ships until this is read."
+    - "Row count: SELECT COUNT(*) FROM curated.v_focus_plus, and compare against
+       meta.v_reconciliation_focus_plus and staging.quarantine."
+    - "The 102,923 unmapped rows: geography_key is NOT NULL on the fact, yet 26.7% of
+       source rows carry no village code. Were they quarantined, or mapped to a
+       placeholder geography? This blocks every village- and block-level answer."
+    - "Block trailing spaces: SELECT DISTINCT lgd_block - confirm dim_geography holds 50
+       clean uppercase blocks and not 77 with trailing spaces."
+    - "Null text: confirm no lgd_block or lgd_village_name equals 'Nan' or ''."
+    - "focus_status and verification_status: SELECT DISTINCT on both. The values here are
+       a source observation and a fourth value may exist."
+    - "year_key IS NULL count. Both source years fall inside dim_year, so a non-zero
+       result is a LOAD DEFECT, not the expected case it is for PMAY."
+    - "Grant status: run meta.v_access_matrix. Both objects were created after the last
+       access review and may be invisible or over-granted to megh_readonly."
+    - "Cross-scheme presence: SELECT DISTINCT scheme_code FROM
+       curated.v_cross_scheme_money_district_year."
+    - "Confirm member_id and pincode are excluded from semantic.column_catalog.sample_values
+       and from the embedding set. bank_name_raw is not an identifier and is exempt."
+
+  regeneration_rules:
+  - Re-profile the CSV AND re-query megh_db. Diff every count here. Explain each change.
+  - "ALWAYS TRIM BEFORE FOLDING. 26 of 77 raw block strings differ only by a trailing
+    space; skipping the trim silently halves those blocks."
+  - "Never resolve the literal strings 'Nan', 'NULL' or '' as values. They are nulls
+    written out as text."
+  - APPEND new canonical values and aliases. Never delete one - old questions must keep
+    resolving.
+  - Re-run the village ambiguity registry. If a name gains a code it must appear here.
+  - "Re-check the two-rate finding. If a third amount appears, the AVG-is-a-mix-ratio
+    guidance and the workbook conflict both need revising."
+  - "Re-check the WGH / SWGH district reallocation against the use-case workbook. If a
+    figure that used to match stops matching, the mapping changed - do not absorb it
+    silently."
+  - "Never add a person-identifier catalogue. member_id and pincode are refused by design,
+    not unfinished."
+  - Bump resolver_version.
+
+  companion_files:
+  - Annotations/Focus+/focusplus_schema_partitions.yaml
+  - Annotations/Focus+/focusplus_classification_rules.yaml
+  - Annotations/Focus+/focusplus_default_rules.yaml
+  - Annotations/Focus+/focusplus_foreign_key_augmentation.yaml    # NOT BUILT
+  - Annotations/Focus+/README.md
+  - SCHEMA_FOR_DEVELOPERS.md
+  - Annotations/PMAY/pmay_entity_resolver.yaml    # the file format this one follows

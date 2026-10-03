@@ -1,0 +1,1105 @@
+# focusplus_few_shot.yaml
+#
+# Validated question-to-SQL pairs for Focus Plus - node 5.10.
+#
+# ===========================================================================
+# v1.0 - 2026-09-03 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Plus was loaded straight into curated on 2026-09-02, so there is no
+# flat-table ancestor and no retired v1 SQL to keep as a negative example.
+#
+# House rules encoded in every example below:
+#   FROM curated.v_focus_plus       never fact_focus_plus_disbursement
+#   NO placeholder predicate        Focus Plus has no is_placeholder column.
+#                                   Copying PMAY's WHERE NOT is_placeholder
+#                                   here does not just mislead - it ERRORS.
+#   COUNT(*) is aliased `payments`  one row is one payment, never one person
+#   COUNT(DISTINCT member_id)       the 12.5K cohort ONLY - never the scheme total
+#   batch_label = '12.5K'           on every gender / occupation / status question
+#   lgd_district / lgd_block        UPPERCASE literals - dim_geography stores them so
+#   village_code                    for counting villages, never a name
+#   amount_disbursed left AS STORED never /1e7 - the unit is unverified, read
+#                                   curated.dim_scheme.money_unit before formatting
+#   tranche_label                   grouped as a CATEGORY, never ordered as time
+#   'Tranch' not 'Tranche'          the stored spelling
+#   member_id / pincode             never in a SELECT list - rule 7. A null-test
+#                                   inside an aggregate is permitted; it returns a
+#                                   count, not an identifier.
+#
+# Questions that must be REFUSED live in focusplus_schema_partitions.yaml,
+# which carries 13 of them with sql: null. They are not repeated here, the same
+# way PMAY keeps its refusals in stage2.
+#
+# NOT ONE OF THESE QUERIES HAS BEEN EXECUTED against megh_db. They are correct
+# against the structure in SCHEMA_FOR_DEVELOPERS.md (2026-09-02) and unverified
+# against the data. Every expected figure quoted in a note is a source-CSV
+# observation (2026-09-03). Run meta.v_reconciliation_focus_plus first.
+# ===========================================================================
+
+sql_generation_examples:
+
+# ---- totals and the three beneficiary readings -------------------------
+- question: How many Focus Plus disbursements are there?
+  sql: |
+    SELECT COUNT(*) AS payments
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus beneficiaries are there?
+  sql: |
+    SELECT COUNT(*)                            AS payments,
+           COUNT(DISTINCT beneficiary_key)     AS beneficiaries
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+  note: 'beneficiary_key (batch_label || '':'' || source_sl_no, added 2026-09-13 - see
+    semantic.column_catalog) is THE correct unique-person count across both cohorts, no
+    batch_label or has_geo_conflict filter needed - it reproduces the use-case workbook''s
+    93,286 legacy-cohort figure exactly when scoped to batch_label = ''93K'' (see the
+    "legacy paid batch" example below), which was previously believed undeliverable once
+    epic_id was dropped at ingest. payments (COUNT(*)) is still a genuinely different
+    number - a legacy member appears on up to four payment rows - so both are returned,
+    labelled. Do NOT use COUNT(DISTINCT member_id) here: it only exists for the 12.5K
+    cohort (~3.2% of rows) and undercounts the true total by ~97% if treated as universal.'
+
+- question: How many members are in the legacy paid batch?
+  sql: |
+    SELECT COUNT(DISTINCT beneficiary_key) AS legacy_beneficiaries,
+           COUNT(*)                        AS legacy_payments
+    FROM curated.v_focus_plus
+    WHERE batch_label = '93K';
+  tables:
+  - curated.v_focus_plus
+  note: 'COUNT(DISTINCT beneficiary_key) scoped to batch_label = ''93K'' reproduces
+    93,286 exactly, the same figure the use-case workbook quotes from the now-dropped
+    epic_id column - beneficiary_key is that column''s replacement, not merely a proxy
+    for it. Expect roughly four payments per beneficiary in this cohort.'
+
+- question: How many payments are in each batch?
+  sql: |
+    SELECT batch_label,
+           COUNT(*)                        AS payments,
+           COUNT(DISTINCT beneficiary_key) AS beneficiaries_in_batch
+    FROM curated.v_focus_plus
+    GROUP BY batch_label
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: What is the total amount disbursed under Focus Plus?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+  note: 'Left in the stored unit deliberately - amount_disbursed has no documented unit.
+    Read curated.dim_scheme.money_unit before formatting. Never divide by 1e7 on an
+    assumption.'
+
+- question: What unit are Focus Plus amounts in?
+  sql: |
+    SELECT scheme_code, scheme_name, money_unit, time_semantics, grain_note
+    FROM curated.dim_scheme;
+  tables:
+  - curated.dim_scheme
+
+- question: What is the standard Focus Plus payment?
+  sql: |
+    SELECT amount_disbursed, batch_label, tranche_label,
+           COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY amount_disbursed, batch_label, tranche_label
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'There is no single flat rate. Tranch 1 paid 5,000 and the later tranches 2,500,
+    so the distribution is the answer. The use-case workbook''s flat-5,000 premise is wrong.'
+
+- question: How many payments were made at each rate?
+  sql: |
+    SELECT amount_disbursed, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY amount_disbursed
+    ORDER BY amount_disbursed DESC;
+  tables:
+  - curated.v_focus_plus
+
+# ---- geography ---------------------------------------------------------
+- question: How many Focus Plus payments are there in West Garo Hills?
+  sql: |
+    SELECT COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus payments are there in East Khasi Hills?
+  sql: |
+    SELECT COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'EAST KHASI HILLS';
+  tables:
+  - curated.v_focus_plus
+
+- question: Show Focus Plus payments by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                  AS payments,
+           COUNT(DISTINCT member_id) AS members_with_an_id,
+           SUM(amount_disbursed)     AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus beneficiaries are there in each district?
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                        AS payments,
+           COUNT(DISTINCT beneficiary_key) AS beneficiaries
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY beneficiaries DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'The per-district version of the statewide beneficiary count (rule 6) - same
+    two columns, GROUP BY lgd_district added. NO batch_label filter and NO has_geo_conflict
+    exclusion: beneficiary_key already spans both cohorts, and has_geo_conflict rows keep
+    the roster-resolved district regardless of the flag, so either filter would silently
+    drop real people from their correct district. Unlike a breakdown BY gender/occupation/
+    focus_status/verification_status (rule 4, which genuinely is 12.5K-cohort-only), a
+    beneficiary COUNT is read over the whole table regardless of batch - do not copy the
+    WHERE batch_label = ''12.5K'' clause from the person-attribute examples below onto
+    this shape of question.'
+
+- question: How many Focus Plus beneficiaries are there in West Garo Hills?
+  sql: |
+    SELECT COUNT(DISTINCT beneficiary_key) AS beneficiaries
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_focus_plus
+  note: 'ONE named district, no GROUP BY and no second district to compare against -
+    this is a request for a single figure, not the statewide breakdown (rule 6) or its
+    per-district / comparison variants above. Answer with one number,
+    COUNT(DISTINCT beneficiary_key), and NOTHING else - no batch_label filter (beneficiary_key
+    already spans both cohorts) and no has_geo_conflict exclusion (those rows keep the
+    roster-resolved district regardless of the flag - excluding them just drops real
+    people, confirmed live 2026-09-13: 4,670 twelve-point-five-K-cohort beneficiaries and
+    136 has_geo_conflict beneficiaries dropped in West Garo Hills alone by the old
+    source_sl_no/batch_label=''93K''/NOT has_geo_conflict template this replaces). Do not
+    also return payments or members_with_an_id for this shape of question - that is only
+    for the bare/"each district"/comparison forms.'
+
+- question: Compare the number of Focus Plus beneficiaries in West Garo Hills and East Khasi Hills
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)                        AS payments,
+           COUNT(DISTINCT beneficiary_key) AS beneficiaries
+    FROM curated.v_focus_plus
+    WHERE lgd_district IN ('WEST GARO HILLS', 'EAST KHASI HILLS')
+    GROUP BY lgd_district
+    ORDER BY beneficiaries DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'Same beneficiary-count shape as the per-district breakdown above, filtered with
+    IN to the two named districts so each gets its own row - never collapsed into one
+    WHERE = value.'
+
+- question: Which district has the most Focus Plus payments?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY payments DESC
+    LIMIT 1;
+  tables:
+  - curated.v_focus_plus
+
+- question: Which district received the highest total disbursement?
+  sql: |
+    SELECT lgd_district, SUM(amount_disbursed) AS total_disbursement
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY total_disbursement DESC
+    LIMIT 1;
+  tables:
+  - curated.v_focus_plus
+  note: 'The disbursement-ranking twin of "Which district has the most Focus Plus
+    payments?" above - same shape, SUM(amount_disbursed) instead of COUNT(*). No
+    has_geo_conflict filter, matching that sibling example, so the two "which
+    district is highest" questions (by payments, by disbursement) stay consistent
+    with each other.'
+
+- question: Which district has the fewest Focus Plus payments?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_district IS NOT NULL
+    GROUP BY lgd_district
+    ORDER BY payments ASC
+    LIMIT 1;
+  tables:
+  - curated.v_focus_plus
+
+- question: Top 5 districts by Focus Plus payments
+  sql: |
+    SELECT lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY payments DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_plus
+
+- question: Bottom 5 districts by Focus Plus payments
+  sql: |
+    SELECT lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_district IS NOT NULL
+    GROUP BY lgd_district
+    ORDER BY payments ASC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_plus
+
+- question: Top 5 districts by Focus Plus disbursement
+  sql: |
+    SELECT lgd_district,
+           SUM(amount_disbursed) AS amount_raw,
+           COUNT(*)              AS payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY amount_raw DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_plus
+
+- question: Which districts have more than 5000 Focus Plus payments?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    HAVING COUNT(*) > 5000
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: Which districts have fewer than 1000 Focus Plus payments?
+  sql: |
+    SELECT lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_district IS NOT NULL
+    GROUP BY lgd_district
+    HAVING COUNT(*) < 1000
+    ORDER BY payments ASC;
+  tables:
+  - curated.v_focus_plus
+
+- question: Compare West Garo Hills and East Khasi Hills on Focus Plus
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE lgd_district IN ('WEST GARO HILLS', 'EAST KHASI HILLS')
+    GROUP BY lgd_district
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: What percentage of Focus Plus payments are in West Garo Hills?
+  sql: |
+    SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE lgd_district = 'WEST GARO HILLS')
+                 / COUNT(*), 2) AS pct_west_garo_hills
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+
+- question: Rank all districts by Focus Plus disbursement and show their share
+  sql: |
+    SELECT lgd_district,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw,
+           ROUND(100.0 * SUM(amount_disbursed)
+                 / SUM(SUM(amount_disbursed)) OVER (), 2) AS pct_of_state
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY amount_raw DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: Top 5 blocks by Focus Plus payments
+  sql: |
+    SELECT lgd_block, lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_block, lgd_district
+    ORDER BY payments DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_plus
+  note: 'NO has_geo_conflict filter (rule 9, superseded 2026-09-13): the flag means the
+    source''s block name disagreed with the LGD roster, but the roster''s (authoritative)
+    block is what lgd_block actually stores either way - excluding those rows just drops
+    real payments from their correctly-resolved block.'
+
+- question: Top blocks in West Garo Hills by Focus Plus payments
+  sql: |
+    SELECT lgd_block, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'WEST GARO HILLS'
+    GROUP BY lgd_block
+    ORDER BY payments DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus payments are in Selsella block?
+  sql: |
+    SELECT lgd_block, lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_block = 'SELSELLA'
+    GROUP BY lgd_block, lgd_district;
+  tables:
+  - curated.v_focus_plus
+
+- question: Top 5 villages by Focus Plus payments
+  sql: |
+    SELECT village_code, lgd_village_name, lgd_block, lgd_district,
+           COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY village_code, lgd_village_name, lgd_block, lgd_district
+    ORDER BY payments DESC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many distinct villages have Focus Plus payments in South Garo Hills?
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'SOUTH GARO HILLS';
+  tables:
+  - curated.v_focus_plus
+
+- question: How many villages does Focus Plus reach in each district?
+  sql: |
+    SELECT lgd_district,
+           COUNT(DISTINCT village_code) AS villages,
+           COUNT(DISTINCT lgd_block)    AS blocks,
+           COUNT(*)                     AS payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY villages DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: Which villages have only one Focus Plus payment?
+  sql: |
+    SELECT village_code, lgd_village_name, lgd_district, entity_type,
+           COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY village_code, lgd_village_name, lgd_district, entity_type
+    HAVING COUNT(*) = 1
+    ORDER BY lgd_district, lgd_village_name;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus payments fall in wards rather than villages?
+  sql: |
+    SELECT entity_type, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY entity_type
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many districts does Focus Plus reach?
+  sql: |
+    SELECT COUNT(DISTINCT lgd_district) AS districts,
+           COUNT(DISTINCT lgd_block)    AS blocks,
+           COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus payments are in the Garo Hills region?
+  sql: |
+    SELECT COUNT(*) AS payments, SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE lgd_district IN ('EAST GARO HILLS', 'NORTH GARO HILLS', 'SOUTH GARO HILLS',
+                           'SOUTH WEST GARO HILLS', 'WEST GARO HILLS');
+  tables:
+  - curated.v_focus_plus
+  note: 'Hill-range groupings are NOT a column in megh_db - they expand to an IN list.
+    State which districts were included.'
+
+- question: Compare the Garo Hills and Khasi Hills regions on Focus Plus
+  sql: |
+    SELECT CASE
+             WHEN lgd_district IN ('EAST GARO HILLS', 'NORTH GARO HILLS',
+                                   'SOUTH GARO HILLS', 'SOUTH WEST GARO HILLS',
+                                   'WEST GARO HILLS')        THEN 'Garo Hills'
+             WHEN lgd_district IN ('EAST KHASI HILLS', 'EASTERN WEST KHASI HILLS',
+                                   'SOUTH WEST KHASI HILLS',
+                                   'WEST KHASI HILLS')       THEN 'Khasi Hills'
+             WHEN lgd_district IN ('EAST JAINTIA HILLS',
+                                   'WEST JAINTIA HILLS')     THEN 'Jaintia Hills'
+             WHEN lgd_district = 'RI BHOI'                   THEN 'Ri Bhoi'
+             ELSE 'Unassigned'
+           END                   AS region,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY region
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: Average Focus Plus payments per district
+  sql: |
+    SELECT ROUND(AVG(payments), 1) AS avg_payments_per_district
+    FROM (
+      SELECT lgd_district, COUNT(*) AS payments
+      FROM curated.v_focus_plus
+      GROUP BY lgd_district
+    ) d;
+  tables:
+  - curated.v_focus_plus
+
+- question: Average Focus Plus payments per village
+  sql: |
+    SELECT ROUND(AVG(payments), 2) AS avg_payments_per_village
+    FROM (
+      SELECT village_code, COUNT(*) AS payments
+      FROM curated.v_focus_plus
+      GROUP BY village_code
+    ) v;
+  tables:
+  - curated.v_focus_plus
+
+- question: Top 3 blocks in every district by Focus Plus payments
+  sql: |
+    SELECT lgd_district, lgd_block, payments, rn AS rank_in_district
+    FROM (
+      SELECT lgd_district, lgd_block, COUNT(*) AS payments,
+             ROW_NUMBER() OVER (PARTITION BY lgd_district
+                                ORDER BY COUNT(*) DESC) AS rn
+      FROM curated.v_focus_plus
+      GROUP BY lgd_district, lgd_block
+    ) r
+    WHERE rn <= 3
+    ORDER BY lgd_district, rn;
+  tables:
+  - curated.v_focus_plus
+
+- question: Which blocks have the fewest Focus Plus payments?
+  sql: |
+    SELECT lgd_block, lgd_district, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_block IS NOT NULL
+    GROUP BY lgd_block, lgd_district
+    ORDER BY payments ASC
+    LIMIT 5;
+  tables:
+  - curated.v_focus_plus
+
+# ---- batch and tranche -------------------------------------------------
+- question: Show Focus Plus disbursements by tranche
+  sql: |
+    SELECT batch_label, tranche_label,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY batch_label, tranche_label
+    ORDER BY batch_label, tranche_label;
+  tables:
+  - curated.v_focus_plus
+  note: 'Grouped by batch as well, because Tranch 4 contains BOTH cohorts. Ordering is
+    by label, not by time - the month words in the labels are not dates.'
+
+- question: Compare disbursements between Tranch 1 and Tranch 2
+  sql: |
+    SELECT tranche_label,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE tranche_label IN ('Tranch 1', 'Tranch 2 - August')
+    GROUP BY tranche_label
+    ORDER BY tranche_label;
+  tables:
+  - curated.v_focus_plus
+  note: 'A comparison names TWO OR MORE tranches - filter on all of them with IN and
+    GROUP BY tranche_label so each gets its own row. Never collapse a comparison to a
+    single WHERE tranche_label = value, and never sum the named tranches into one row.'
+
+- question: How many payments were made in Tranch 2?
+  sql: |
+    SELECT COUNT(*) AS payments, SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE tranche_label = 'Tranch 2 - August';
+  tables:
+  - curated.v_focus_plus
+
+- question: Split Tranch 4 by batch
+  sql: |
+    SELECT batch_label,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE tranche_label = 'Tranch 4 - Feb-March'
+    GROUP BY batch_label
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus payments were made in each financial year?
+  sql: |
+    SELECT financial_year_short,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY financial_year_short
+    ORDER BY financial_year_short;
+  tables:
+  - curated.v_focus_plus
+  note: 'Only two years hold data - 2022-23 and 2025-26 - with a three-year gap between
+    them. Present as two points, never as a trend line.'
+
+- question: Show Focus Plus payments by financial year and batch
+  sql: |
+    SELECT financial_year_short, batch_label,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY financial_year_short, batch_label
+    ORDER BY financial_year_short, batch_label;
+  tables:
+  - curated.v_focus_plus
+
+- question: How much was disbursed in FY 2025-26?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE financial_year_short = '2025-26';
+  tables:
+  - curated.v_focus_plus
+
+- question: Show Focus Plus payments by district and financial year
+  sql: |
+    SELECT lgd_district, financial_year_short, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district, financial_year_short
+    ORDER BY lgd_district, financial_year_short;
+  tables:
+  - curated.v_focus_plus
+
+# ---- person attributes - 12.5K cohort only -----------------------------
+- question: How many Focus Plus beneficiaries are women?
+  sql: |
+    SELECT gender,
+           COUNT(*) AS registrations,
+           ROUND(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (), 1) AS pct_of_cohort
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND gender IS NOT NULL
+    GROUP BY gender
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'Scoped to the 12.5K cohort because gender is NULL on all 373,144 legacy rows.
+    The answer MUST say it covers about 3% of the scheme, not the whole of it.'
+
+- question: How much was disbursed to female and male beneficiaries?
+  sql: |
+    SELECT gender, SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND gender IS NOT NULL
+    GROUP BY gender
+    ORDER BY amount_raw DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'Money-by-gender, scoped to the 12.5K cohort like every other gender
+    breakdown (rule 4). NO has_geo_conflict filter - this question does not select,
+    filter or group by district/block/village, so geography has nothing to do with
+    it (rule 9). State the ~3% cohort coverage caveat as usual.'
+
+- question: What is the gender split in Focus Plus by district?
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE gender = 'Female') AS female,
+           COUNT(*) FILTER (WHERE gender = 'Male')   AS male,
+           COUNT(*)                                  AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY lgd_district
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus members are farmers?
+  sql: |
+    SELECT occupation, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY occupation
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: Show the occupation breakdown of Focus Plus members by district
+  sql: |
+    SELECT lgd_district, occupation, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND occupation IS NOT NULL
+    GROUP BY lgd_district, occupation
+    ORDER BY lgd_district, registrations DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many women farmers are registered under Focus Plus?
+  sql: |
+    SELECT COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND gender = 'Female'
+      AND occupation = 'Farmer';
+  tables:
+  - curated.v_focus_plus
+
+- question: How many farmers received Focus Plus assistance during FY 2025-26?
+  sql: |
+    SELECT COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND occupation = 'Farmer'
+      AND year_key = 2025;
+  tables:
+  - curated.v_focus_plus
+  note: 'occupation + financial year together - both filters stack normally. The 12.5K
+    cohort only ever falls in FY 2025-26 (rule 8), so this is never empty by
+    construction; still name the year_key explicitly rather than dropping it.'
+
+- question: How many women received Focus Plus assistance during FY 2025-26?
+  sql: |
+    SELECT COUNT(*)              AS registrations,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND gender = 'Female'
+      AND year_key = 2025;
+  tables:
+  - curated.v_focus_plus
+  note: 'gender + financial year together, same pattern as the farmers/FY example above.'
+
+- question: Cross-tab Focus Plus registrations by gender and occupation
+  sql: |
+    SELECT occupation,
+           COUNT(*) FILTER (WHERE gender = 'Female') AS female,
+           COUNT(*) FILTER (WHERE gender = 'Male')   AS male,
+           COUNT(*)                                  AS total
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND occupation IS NOT NULL
+    GROUP BY occupation
+    ORDER BY total DESC;
+  tables:
+  - curated.v_focus_plus
+
+# ---- status ------------------------------------------------------------
+- question: What Focus Plus status values are recorded?
+  sql: |
+    SELECT focus_status, verification_status, COUNT(*) AS rows_
+    FROM curated.v_focus_plus
+    GROUP BY focus_status, verification_status
+    ORDER BY rows_ DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'ENUMERATE BEFORE FILTERING. Both columns are uncontrolled varchars - there is no
+    dim_focus_plus_status and no roll-up flag. Run this before writing any status filter.'
+
+- question: How many Focus Plus registrations are still pending?
+  sql: |
+    SELECT focus_status, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY focus_status
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'One value is a singleton - a single Rejected record. Never present it as a
+    percentage or a trend without saying n=1.'
+
+- question: How many Focus Plus beneficiaries have Pending Focus status?
+  sql: |
+    SELECT COUNT(*) AS pending_beneficiaries
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND focus_status = 'Pending';
+  tables:
+  - curated.v_focus_plus
+  note: '"Focus status" in the question is just the human-readable name of the
+    focus_status COLUMN (echoing the scheme name "Focus Plus") - it is not a second
+    dimension or a distinct concept from plain "status". Treat "Pending Focus status"
+    exactly the same as "Pending status": WHERE focus_status = ''Pending''. Do not go
+    looking for a separate "Focus" entity (a tranche, a batch, a scheme name) to
+    resolve out of that phrase.'
+
+- question: Show pending Focus Plus registrations by district
+  sql: |
+    SELECT lgd_district, COUNT(*) AS pending_registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND focus_status = 'Pending'
+    GROUP BY lgd_district
+    ORDER BY pending_registrations DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: How many Focus Plus registrations were approved?
+  sql: |
+    SELECT COUNT(*) AS approved_registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND focus_status = 'Approved';
+  tables:
+  - curated.v_focus_plus
+  note: 'Approved means the REGISTRATION was approved, not that a payment was made - and
+    these rows are in the cohort that has not been paid. Reading it as paid inverts the answer.'
+
+- question: How many Focus Plus beneficiaries were approved during FY 2025-26?
+  sql: |
+    SELECT COUNT(*) AS approved_registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+      AND focus_status = 'Approved'
+      AND year_key = 2025;
+  tables:
+  - curated.v_focus_plus
+  note: 'focus_status + financial year together - both filters stack normally, same
+    pattern as the occupation/FY and gender/FY examples elsewhere in this file. Do not
+    drop the year_key filter just because the 12.5K cohort happens to fall entirely in
+    FY 2025-26 (rule 8) - name it explicitly.'
+
+- question: Give me the status breakdown for Tranch 4
+  sql: |
+    SELECT focus_status, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE tranche_label = 'Tranch 4 - Feb-March'
+      AND batch_label = '12.5K'
+    GROUP BY focus_status
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'An unqualified "status breakdown" groups focus_status ONLY - never also
+    verification_status, which is a near-constant single value (Approved on every
+    12.5K row) and only clutters a status breakdown. Do not copy the two-column GROUP BY
+    from the "what status values are recorded" audit example above - that one enumerates
+    both columns deliberately, this one does not. Scoped to the 12.5K cohort (rule 4) -
+    the legacy 93K rows have no focus_status at all.'
+
+- question: Give me the status breakdown for the 12.5K batch
+  sql: |
+    SELECT focus_status, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY focus_status
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'Same as the Tranch 4 status-breakdown example - focus_status only, one column.'
+
+- question: Give me the status-wise breakdown of Focus Plus beneficiaries
+  sql: |
+    SELECT focus_status, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY focus_status
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'The bare, no-batch-named version of the same question - still scoped to
+    batch_label = ''12.5K'' (rule 4: focus_status is NULL on all 373,144 legacy rows,
+    so leaving the filter off buries the real 3-value breakdown under one giant NULL
+    bucket). focus_status only, never also verification_status (rule 13).'
+
+- question: Give me the verification status breakdown for Focus Plus
+  sql: |
+    SELECT verification_status, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY verification_status
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'The explicit "verification status" ask (rule 13) - verification_status
+    only, scoped to batch_label = ''12.5K'' (rule 4: verification_status is blank
+    on all 373,144 legacy 93K rows, so an unscoped GROUP BY buries the real
+    breakdown under one giant NULL bucket, exactly like the focus_status case
+    above). Do not add focus_status to this GROUP BY - that is the two-column
+    audit example ("What Focus Plus status values are recorded?") above, not this
+    shape of question.'
+
+- question: What is the verification status of Focus Plus registrations?
+  sql: |
+    SELECT verification_status, COUNT(*) AS registrations
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K'
+    GROUP BY verification_status
+    ORDER BY registrations DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'Same shape as the example above under different phrasing - "verification
+    status of" a registration set means the breakdown, not a single value.'
+
+# ---- paid versus unpaid ------------------------------------------------
+- question: Compare paid and unpaid Focus Plus members by district
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE batch_label = '93K')   AS legacy_paid_payments,
+           COUNT(*) FILTER (WHERE batch_label = '12.5K') AS newer_registrations
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY legacy_paid_payments DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'No column encodes payment. batch_label is the only available discriminator and
+    using it is an INFERENCE - the answer must say so.'
+
+- question: How many Focus Plus members are registered but not yet paid?
+  sql: |
+    SELECT COUNT(DISTINCT member_id) AS registered_members,
+           COUNT(*)                  AS registration_rows
+    FROM curated.v_focus_plus
+    WHERE batch_label = '12.5K';
+  tables:
+  - curated.v_focus_plus
+  note: 'An estimate, not a count. In the source 111 people appear in both cohorts, so
+    this overstates the backlog - and because epic_id was dropped, that overlap cannot be
+    detected in megh_db at all. Say both things.'
+
+- question: Which districts does the newer Focus Plus batch not reach?
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE batch_label = '12.5K') AS newer_registrations,
+           COUNT(*)                                      AS total_payments
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    HAVING COUNT(*) FILTER (WHERE batch_label = '12.5K') = 0
+    ORDER BY total_payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+# ---- money by dimension ------------------------------------------------
+- question: How much was disbursed in West Garo Hills?
+  sql: |
+    SELECT COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_focus_plus
+
+- question: What is the average Focus Plus payment per member?
+  sql: |
+    SELECT SUM(amount_disbursed)                            AS amount_raw,
+           COUNT(DISTINCT beneficiary_key)                  AS beneficiaries,
+           ROUND(SUM(amount_disbursed)::numeric
+                 / NULLIF(COUNT(DISTINCT beneficiary_key), 0), 2) AS amount_per_beneficiary
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+  note: 'Total over a beneficiary count, NOT AVG(amount_disbursed) - which would return a
+    mix ratio between the 5,000 and 2,500 rates rather than an entitlement.
+    COUNT(DISTINCT beneficiary_key) is already a correct cross-cohort denominator on its
+    own (rule 6) - no batch_label scope needed. NO leading "100.0 *" multiplier - this is
+    a plain ratio, not a percentage-of-total share.'
+
+- question: What is the average amount disbursed per beneficiary?
+  sql: |
+    SELECT SUM(amount_disbursed)                            AS amount_raw,
+           COUNT(DISTINCT beneficiary_key)                  AS beneficiaries,
+           ROUND(SUM(amount_disbursed)::numeric
+                 / NULLIF(COUNT(DISTINCT beneficiary_key), 0), 2) AS amount_per_beneficiary
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+  note: 'Same question, different wording - identical SQL to "What is the average Focus
+    Plus payment per member?" above. Superseded 2026-09-13: an earlier version of this
+    example required WHERE batch_label = ''93K'' with COUNT(DISTINCT source_sl_no),
+    because source_sl_no alone could not tell the two cohorts'' beneficiaries apart. Now
+    that beneficiary_key exists (rule 6), no batch_label scope is needed or wanted -
+    computed over the whole table this returns 11,316, not the old workaround''s 12,500
+    (which silently excluded the entire 12.5K cohort''s amounts and beneficiaries from
+    both the numerator and denominator).'
+
+- question: What is the average Focus Plus disbursement per beneficiary in West Garo Hills?
+  sql: |
+    SELECT SUM(amount_disbursed)                            AS amount_raw,
+           COUNT(DISTINCT beneficiary_key)                  AS beneficiaries,
+           ROUND(SUM(amount_disbursed)::numeric
+                 / NULLIF(COUNT(DISTINCT beneficiary_key), 0), 2) AS amount_per_beneficiary
+    FROM curated.v_focus_plus
+    WHERE lgd_district = 'WEST GARO HILLS';
+  tables:
+  - curated.v_focus_plus
+  note: 'Same shape as the statewide per-beneficiary average, with a district filter
+    added - no batch_label scope and no has_geo_conflict exclusion (rule 9: those rows
+    keep the roster-resolved district regardless of the flag). Still NO "100.0 *"
+    multiplier - that belongs only to a percentage-of-total ranking query (see "Rank all
+    districts by Focus Plus disbursement and show their share" above), never to a plain
+    average. Confirmed live 2026-09-12: copying that multiplier in here inflated the
+    answer 100x (1,250,000 instead of ~11,167).'
+
+- question: Show Focus Plus disbursement by block
+  sql: |
+    SELECT lgd_block, lgd_district,
+           COUNT(*)              AS payments,
+           SUM(amount_disbursed) AS amount_raw
+    FROM curated.v_focus_plus
+    GROUP BY lgd_block, lgd_district
+    ORDER BY amount_raw DESC;
+  tables:
+  - curated.v_focus_plus
+
+# ---- data quality ------------------------------------------------------
+- question: How many Focus Plus payments could not be matched to a financial year?
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE year_key IS NULL) AS unresolved_year,
+           COUNT(*)                                 AS total
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+  note: 'Both source financial years fall inside the dim_year window, so this should be
+    ZERO. Unlike PMAY, a non-zero result is a load defect to investigate, not a footnote.'
+
+- question: How many Focus Plus payments are on villages with conflicting geography?
+  sql: |
+    SELECT has_geo_conflict, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    GROUP BY has_geo_conflict;
+  tables:
+  - curated.v_focus_plus
+
+- question: Which Focus Plus villages have conflicting district or block records?
+  sql: |
+    SELECT village_code, lgd_village_name, lgd_block, lgd_district,
+           COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE has_geo_conflict
+    GROUP BY village_code, lgd_village_name, lgd_block, lgd_district
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+
+- question: Run a Focus Plus data-quality audit
+  sql: |
+    SELECT COUNT(*)                                          AS total_payments,
+           COUNT(*) FILTER (WHERE year_key IS NULL)          AS no_financial_year,
+           COUNT(*) FILTER (WHERE has_geo_conflict)          AS geo_conflict_rows,
+           COUNT(*) FILTER (WHERE lgd_district IS NULL)      AS no_district,
+           COUNT(*) FILTER (WHERE lgd_village_name IS NULL)  AS no_village_name,
+           COUNT(*) FILTER (WHERE NOT on_roster)             AS off_roster_geography,
+           COUNT(*) FILTER (WHERE batch_label = '93K')        AS legacy_rows_no_member_id
+    FROM curated.v_focus_plus;
+  tables:
+  - curated.v_focus_plus
+  note: 'legacy_rows_no_member_id is expected to be large - it is the whole legacy cohort by design,
+    not a defect. Missing mobile numbers and duplicate names cannot be audited: those
+    columns were dropped at ingest.'
+
+- question: Are Focus Plus block names stored cleanly?
+  sql: |
+    SELECT lgd_block, COUNT(*) AS payments
+    FROM curated.v_focus_plus
+    WHERE lgd_block <> TRIM(lgd_block)
+       OR lgd_block IN ('Nan', 'NaN', 'NULL', '')
+    GROUP BY lgd_block
+    ORDER BY payments DESC;
+  tables:
+  - curated.v_focus_plus
+  note: 'Should return zero rows. In the SOURCE, 26 of 77 block strings carry a trailing
+    space and one is the literal text "Nan". If this returns rows, the ingest did not
+    clean them and the resolver catalogue must be revised.'
+
+- question: Cross-tab Focus Plus payments by district and batch
+  sql: |
+    SELECT lgd_district,
+           COUNT(*) FILTER (WHERE batch_label = '93K')   AS legacy,
+           COUNT(*) FILTER (WHERE batch_label = '12.5K') AS registration,
+           COUNT(*)                                      AS total
+    FROM curated.v_focus_plus
+    GROUP BY lgd_district
+    ORDER BY total DESC;
+  tables:
+  - curated.v_focus_plus
+
+# ---- cross-scheme ------------------------------------------------------
+- question: Is Focus Plus included in the cross-scheme money comparison?
+  sql: |
+    SELECT DISTINCT scheme_code
+    FROM curated.v_cross_scheme_money_district_year;
+  tables:
+  - curated.v_cross_scheme_money_district_year
+  note: 'Structure cannot say which scheme codes that view holds. Run this before any
+    answer claims to cover all three schemes, and say so if Focus Plus is absent.'
+
+- question: Compare Focus Plus, PMAY and MGNREGA spending by district
+  sql: |
+    SELECT lgd_district, scheme_code, financial_year_short,
+           amount_crore, measure_semantics
+    FROM curated.v_cross_scheme_money_district_year
+    WHERE financial_year_short = '2025-26'
+    ORDER BY lgd_district, scheme_code;
+  tables:
+  - curated.v_cross_scheme_money_district_year
+  note: 'measure_semantics MUST travel into the answer - the three amounts mean different
+    things: money disbursed to individuals, money released against sanctions, and
+    expenditure incurred.'
+
+- question: Add Focus Plus to the cross-scheme village coverage view
+  sql: |
+    WITH fp AS (
+      SELECT village_code, COUNT(*) AS focus_plus_payments
+      FROM curated.v_focus_plus
+      GROUP BY village_code
+    )
+    SELECT c.village_code, c.lgd_district, c.pmay_houses,
+           c.mgnrega_person_days, fp.focus_plus_payments
+    FROM curated.v_cross_scheme_village_coverage c
+    FULL JOIN fp USING (village_code);
+  tables:
+  - curated.v_cross_scheme_village_coverage
+  - curated.v_focus_plus
+  note: 'That view has no Focus Plus column, so the fact is aggregated to village level
+    FIRST and the aggregate is joined. Never join the fact itself - all six fact pairs
+    are prohibited.'
+
+- question: Which villages get Focus Plus but no PMAY houses?
+  sql: |
+    WITH fp AS (
+      SELECT village_code, COUNT(*) AS focus_plus_payments
+      FROM curated.v_focus_plus
+      GROUP BY village_code
+    )
+    SELECT fp.village_code, c.lgd_district, fp.focus_plus_payments
+    FROM fp
+    LEFT JOIN curated.v_cross_scheme_village_coverage c USING (village_code)
+    WHERE c.pmay_houses IS NULL OR c.pmay_houses = 0
+    ORDER BY fp.focus_plus_payments DESC;
+  tables:
+  - curated.v_focus_plus
+  - curated.v_cross_scheme_village_coverage
+
+# ---- reconciliation ----------------------------------------------------
+- question: Have the Focus Plus totals been verified?
+  sql: |
+    SELECT * FROM meta.v_reconciliation_focus_plus;
+  tables:
+  - meta.v_reconciliation_focus_plus

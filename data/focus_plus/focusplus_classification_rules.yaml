@@ -1,0 +1,310 @@
+# focusplus_classification_rules.yaml
+#
+# ===========================================================================
+# v1.0 - 2026-09-03 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Plus was loaded straight into curated on 2026-09-02, so this file has no
+# flat-table ancestor and no migration to record. Structure from
+# SCHEMA_FOR_DEVELOPERS.md (2026-09-02 extract), semantics from
+# focusplus_schema_partitions.yaml v1.0, vocabulary from the FOCUS+ NLP Use Cases
+# workbook, values from Focus Plus Master.csv profiled 2026-09-03.
+#
+# EVERY COUNT IN A QUESTION BELOW IS A SOURCE-CSV FIGURE AND HAS NOT BEEN
+# MEASURED AGAINST megh_db. Run meta.v_reconciliation_focus_plus first.
+#
+# Three sections have no PMAY counterpart, for three reasons: batch_label splits
+# the fact into two cohorts of different grain; this is the only person-level
+# fact in megh_db, so some refusals are on privacy grounds; and several whole
+# blocks of use cases rest on columns that do not exist. The reasoning behind
+# each rule lives in focusplus_schema_partitions.yaml and is not repeated here.
+# ===========================================================================
+# Clarification rules for Focus Plus. First rule that fires wins; its question is
+# asked and the pipeline pauses. Editable by analysts - no code change needed.
+# {placeholders} are filled from the user's query at runtime.
+# Order matters: requests the source cannot answer are caught before missing detail
+# is asked for, so the bot never collects details for a question it cannot answer.
+# Privacy refusals sit second, because the answer is no even where a column exists.
+# Conditions already filled silently by focusplus_default_rules.yaml are absent
+# here: top-N omitted, no geography filter, no time period, sort direction, output
+# format, has_geo_conflict rows, and a bare "beneficiaries" inside an
+# already-scoped geography question.
+
+clarification_rules:
+
+  # ---- the source cannot answer this at all -----------------------------
+  - condition: "producer_group_requested"
+    question: "Producer groups are not held in this data - there is no PG id, PG type or PG membership anywhere in the Focus Plus records. Shall I answer by district, block or village instead?"
+
+  - condition: "epic_id_requested"
+    question: "EPIC / voter ID is not held in the database - it was dropped when the data was loaded. Shall I answer by district, block or village instead?"
+
+  - condition: "beneficiary_name_requested"
+    question: "Beneficiary names are not held in the database - they were dropped when the data was loaded. Shall I answer by district, block or village?"
+
+  - condition: "mobile_number_requested"
+    question: "Mobile numbers are not held in the database. Shall I answer on payments, geography or the registration details that are held?"
+
+  # NOTE: bank_name_raw was added to curated.v_focus_plus on 2026-09-09 - a bare
+  # "which bank" / "bank-wise" question is answerable and should NOT gate here.
+  # Only account number / IFSC (never held) still refuses, below.
+  - condition: "account_number_or_ifsc_requested"
+    question: "Account numbers and IFSC codes are not held in this data. Shall I answer on payments by district, block or village?"
+
+  - condition: "payment_date_requested"
+    question: "Focus Plus has no payment date - the finest time detail held is the financial year. Shall I answer by financial year, or by batch and tranche?"
+
+  - condition: "monthly_or_quarterly_analysis_requested"
+    question: "A monthly or quarterly view is not possible for Focus Plus - there is no date, only the financial year. Shall I show it by financial year, or by batch and tranche?"
+
+  - condition: "farmer_id_nic_requested"
+    question: "The Farmer ID / NIC field is not held in this data. Shall I answer on the registration details that are held - occupation, gender and geography?"
+
+  - condition: "eligible_population_or_coverage_rate_requested"
+    question: "Coverage as a percentage cannot be calculated - no eligible-population or household count is held. Would payments per village, or per block, work instead?"
+
+  - condition: "per_capita_requested"
+    question: "Population figures are not held, so per-capita cannot be calculated. Would payments per village work instead?"
+
+  - condition: "constituency_or_mla_requested"
+    question: "Assembly constituency is not available for Focus Plus through this view. Shall I answer by district or block instead?"
+
+  - condition: "budget_target_or_allocation_requested"
+    question: "Targets, allocations and budgets are not held - only payments actually made. Shall I report the amount disbursed instead?"
+
+  - condition: "forecast_or_projection_requested"
+    question: "A projection would rest on assumptions this data does not hold - no target, no eligible population and no payment schedule. Shall I report what has actually been disbursed, or state the assumptions and project anyway?"
+
+  - condition: "other_scheme_or_dataset_requested"
+    question: "Only MGNREGA, PMAY-G and Focus Plus are held in this database - the Ginger Mission and other datasets are not. Shall I answer for Focus Plus alone?"
+
+  - condition: "urban_or_other_state_requested"
+    question: "This data covers Meghalaya only. Shall I compare districts within Meghalaya instead?"
+
+  - condition: "caste_income_or_bpl_requested"
+    question: "Income, caste, SECC category and BPL status are not held. The only member attributes recorded are gender and occupation, and those cover the newer registration batch only. Shall I use them?"
+
+  - condition: "age_or_disability_requested"
+    question: "Age and disability status are not held. Shall I answer on gender or occupation instead, for the batch where those are recorded?"
+
+  - condition: "household_or_family_requested"
+    question: "Focus Plus records payments to individual members, not households - there is no family or household identifier. Shall I answer at member or payment level?"
+
+  # ---- what privacy forbids ---------------------------------------------
+  - condition: "member_level_listing_requested"
+    question: "Focus Plus records identify individual people, so I can report aggregates but not lists of members. Shall I give you the counts by district, block or village instead?"
+
+  - condition: "member_id_or_pincode_export_requested"
+    question: "Member IDs and pincodes identify individuals and cannot be listed or exported. I can tell you how many distinct members there are - shall I?"
+
+  - condition: "member_360_requested"
+    question: "A member profile cannot be produced - the identifying fields are either not held or not permitted for display. Shall I give you an aggregate view by geography, batch or tranche?"
+
+  - condition: "row_level_requested_but_aggregate_only_permitted"
+    question: "I can answer this at an aggregate level but not row by row for Focus Plus. Which level would you like - district, block or village?"
+
+  - condition: "fraud_or_duplicate_investigation_requested"
+    question: "I can show aggregate patterns - repeated payments to the same batch and tranche, for example - but not the individual records behind them. Shall I show the aggregate pattern?"
+
+  # ---- the batch duality ------------------------------------------------
+  - condition: "batch_scope_unclear"
+    question: "Focus Plus holds two groups - the legacy paid batch (93,286 members, four tranches each) and the newer registration batch (12,527 members, one tranche). Which should I use, or both?"
+
+  - condition: "person_attribute_requested_scheme_wide"
+    question: "Gender, occupation and status are recorded only for the newer registration batch - 12,527 of 385,671 records, about 3 percent. Shall I answer for that batch and say so, or would a different breakdown work better?"
+
+  - condition: "paid_unpaid_definition_requested"
+    question: "No field in this data records whether a member has been paid. The closest reading is the batch - the legacy batch was paid, the newer batch is registered and awaiting payment. Shall I use that, and state that it is inferred?"
+
+  - condition: "unpaid_backlog_requested"
+    question: "The unpaid backlog can only be estimated - 12,527 members are registered in the newer batch, but some of them were already paid in the legacy batch and that overlap can no longer be detected. Shall I report the 12,527 with that caveat?"
+
+  - condition: "tranche_comparison_crosses_batches"
+    question: "Tranch 4 contains both batches - the legacy batch's fourth payment and the whole newer registration batch. Shall I split the tranche by batch, or report it combined?"
+
+  # ---- terms that look answerable but mean several things ----------------
+  - condition: "beneficiary_reading_unclear"
+    question: "'Beneficiaries' can mean three different numbers here - payments made (385,671), members in the newer batch who carry an id (12,527), or the legacy paid members (93,286, which the database can no longer count directly). Which did you mean?"
+
+  - condition: "count_subject_unclear"
+    question: "A count of what - payments, members, villages, blocks or districts?"
+
+  - condition: "farmers_vs_beneficiaries"
+    question: "'Farmers' could mean everyone in Focus Plus, or only those whose recorded occupation is Farmer - and occupation is recorded for the newer batch only. Which did you mean?"
+
+  - condition: "amount_reading_unclear"
+    question: "Do you want the total amount disbursed, or the amount per member? There is only one money field in Focus Plus, so 'total spend' and 'amount paid out' are the same figure."
+
+  - condition: "vague_qualifier"
+    question: "What should '{value}' be measured by - number of payments, number of members, or amount disbursed?"
+
+  - condition: "performance_or_gap_term_unclear"
+    question: "What counts as a gap here - districts with few payments, villages with only one, or registered members not yet paid? There is no coverage percentage, because no eligible population is held."
+
+  - condition: "anomaly_or_outlier_definition_unclear"
+    question: "What should count as an outlier - members appearing in more than one batch, unusually high payment counts for a village, or something else? Focus Plus pays a fixed amount per tranche, so an unusual amount is not possible."
+
+  - condition: "duplicate_definition_unclear"
+    question: "What should count as a duplicate - the same member appearing in both batches, or repeated rows within one batch? The legacy batch has four rows per member by design, and those are tranches, not duplicates."
+
+  - condition: "concentration_threshold_missing"
+    question: "What share should count as concentrated - the top one, the top three, or a percentage threshold?"
+
+  - condition: "significance_or_comparability_unclear"
+    question: "Compared against what - the state average, the other batch, or the other financial year?"
+
+  # ---- money -------------------------------------------------------------
+  - condition: "money_unit_unconfirmed"
+    question: "The unit for Focus Plus amounts is not confirmed in the database yet. Shall I report the figure as stored and label the unit as unconfirmed?"
+
+  - condition: "standard_payment_reading_unclear"
+    question: "The payment is not a single flat figure - Tranch 1 paid 5,000 and the later tranches 2,500. Which rate did you mean, or shall I show the breakdown?"
+
+  - condition: "average_payment_requested"
+    question: "An average payment would just be a mix of the two tranche rates, 5,000 and 2,500, rather than an entitlement. Did you mean the total divided by the number of members, or the breakdown by tranche?"
+
+  - condition: "money_across_schemes_unit_mismatch"
+    question: "Focus Plus, PMAY and MGNREGA record money in different units and mean different things by it. Shall I use the cross-scheme comparison view, which normalises them and states what each amount means?"
+
+  # ---- time --------------------------------------------------------------
+  - condition: "trend_across_two_years_only"
+    question: "Focus Plus holds only two financial years - 2022-23 and 2025-26 - with a three-year gap between them. A trend would be two points. Shall I show the two years side by side, or break it down by batch and tranche instead?"
+
+  - condition: "calendar_year_requested"
+    question: "Focus Plus records the financial year only - there is no date to place a payment in a calendar year. Shall I use financial year 2022-23 or 2025-26?"
+
+  - condition: "vague_recency"
+    question: "'{value}' is not a fixed period, and Focus Plus holds only two financial years - 2022-23 and 2025-26. Which did you mean, or both?"
+
+  - condition: "tranche_treated_as_time"
+    question: "Tranche labels carry month names but are not dates, and their order is not guaranteed to be chronological. Shall I compare the tranches as categories?"
+
+  - condition: "growth_period_missing"
+    question: "Growth between which two points - the two financial years, or two tranches?"
+
+  - condition: "time_series_with_unresolved_years"
+    question: "Some payments could not be matched to a financial year and would drop out of a yearly breakdown. Shall I report them as a separate group?"
+
+  # ---- geography ---------------------------------------------------------
+  - condition: "missing_geography_level_for_breakdown"
+    question: "Broken down by which level - district, block, or village?"
+
+  - condition: "ambiguous_district_abbreviation"
+    question: "'{value}' could be {candidates}. Which district did you mean?"
+
+  - condition: "ambiguous_region_word"
+    question: "'{value}' covers several districts - {candidates}. Shall I include them all, or did you mean one in particular?"
+
+  - condition: "region_grouping_undefined"
+    question: "Which districts should '{value}' cover? The hill-range groupings are not stored in the database, so I need to confirm them before rolling up."
+
+  - condition: "ambiguous_geography_level"
+    question: "'{value}' is both a block and a village name. Which level did you mean?"
+
+  - condition: "ambiguous_village_needs_district"
+    question: "'{value}' exists in {districts}. Which district?"
+
+  - condition: "unmatched_geography_name"
+    question: "I could not match '{value}' to any district, block or village in the Focus Plus data. Did you mean {suggestions}?"
+
+  - condition: "district_absent_from_batch"
+    question: "The newer registration batch covers six districts only - West Garo Hills, South West Garo Hills, North Garo Hills, East Garo Hills, East Khasi Hills and South Garo Hills. {value} appears in the legacy batch only. Shall I answer for the legacy batch?"
+
+  - condition: "unmapped_village_rows_present"
+    question: "About a quarter of the source records carry no village code, so village and block figures may be incomplete. Shall I continue, or restrict the answer to district level?"
+
+  - condition: "geo_conflict_villages_in_scope"
+    question: "Sixteen villages have conflicting district or block records between sources. Shall I exclude them, since this answer depends on which block the payments fell in?"
+
+  - condition: "ward_versus_village_unclear"
+    question: "Some Focus Plus records fall in urban wards rather than villages - Williamnagar Municipal Board, for example. Shall I include wards in the village breakdown?"
+
+  - condition: "village_level_breakdown_size"
+    question: "A village-level breakdown returns around 3,200 rows. Shall I show the top 10, or restrict it to one district or block?"
+
+  - condition: "below_village_geography_requested"
+    question: "Geography runs down to village or ward only - there is no habitation or household location. Which village should I report on?"
+
+  - condition: "district_or_block_code_requested"
+    question: "The database holds district and block as names only - there is no district or block code. Shall I use the name, or the village LGD code?"
+
+  - condition: "mixed_geography_levels_compared"
+    question: "{value_a} is a {level_a} and {value_b} is a {level_b}, so comparing them is not like-for-like. Compare at {level_b} level instead?"
+
+  - condition: "workbook_district_figures_differ"
+    question: "The published Focus Plus figures for West Garo Hills and South West Garo Hills differ from the current data, because 4,320 members were reassigned between the two districts. Shall I use the current figures?"
+
+  # ---- status ------------------------------------------------------------
+  - condition: "status_reading_unclear"
+    question: "'Status' could mean the application status recorded at registration, or whether a member has been paid. Which did you mean? The two are different, and payment is not recorded as a status."
+
+  - condition: "status_values_not_enumerated"
+    question: "Shall I check which status values are actually recorded before filtering? focus_status and verification_status are free text in this scheme, not a controlled list."
+
+  - condition: "verification_status_has_one_value"
+    question: "Verification status reads 'Approved' on every record that has it, so it cannot split the results. Did you mean the application status - Pending, Approved or Rejected?"
+
+  - condition: "status_category_is_singleton"
+    question: "Only one record is recorded as Rejected, so a percentage or trend on it would not be meaningful. Shall I report the count as it stands?"
+
+  - condition: "approved_read_as_paid"
+    question: "'Approved' here means the registration was approved, not that a payment was made. Shall I answer on approvals, or on payments?"
+
+  # ---- cross-scheme ------------------------------------------------------
+  - condition: "cross_scheme_money_comparison"
+    question: "The three schemes measure different things - Focus Plus records money disbursed to individuals, PMAY money released against house sanctions, MGNREGA expenditure incurred. Compare them anyway, with that stated?"
+
+  - condition: "cross_scheme_focus_plus_presence_unconfirmed"
+    question: "Shall I check first whether Focus Plus is included in the cross-scheme comparison view? If it is not, the answer would cover MGNREGA and PMAY only."
+
+  - condition: "cross_scheme_coverage_requested"
+    question: "The village coverage view currently covers PMAY and MGNREGA only. Shall I aggregate Focus Plus separately and add it, or answer for the two schemes it holds?"
+
+  - condition: "cross_scheme_row_level_request"
+    question: "Focus Plus is recorded per payment and the other schemes per house or per village-year, so they cannot be listed side by side row by row. Shall I compare them by district and year, or by village coverage?"
+
+  # ---- data quality ------------------------------------------------------
+  - condition: "data_quality_audit_scope_unclear"
+    question: "Which checks should the audit cover - records with no village mapping, conflicting geography, or members appearing in both batches? Note that missing mobile numbers and duplicate names cannot be checked, as those columns are not held."
+
+  - condition: "unverified_totals_warning"
+    question: "No Focus Plus total has been verified against the database yet. Shall I report the figure with that caveat?"
+
+  # ---- shape of the answer -----------------------------------------------
+  - condition: "missing_aggregation_level"
+    question: "At what level - statewide, by district, by block, or by village?"
+
+  - condition: "missing_metric_for_ranking"
+    question: "Top by what - number of payments, number of members, or amount disbursed?"
+
+  - condition: "missing_comparison_target"
+    question: "Compare {value} with which other district, batch or financial year?"
+
+  - condition: "ambiguous_total_vs_average"
+    question: "Total across everything, or an average per district?"
+
+  - condition: "ambiguous_average_denominator"
+    question: "Average per what - per member, per village, per block, or per tranche?"
+
+  - condition: "share_denominator_missing"
+    question: "As a share of what - the district total, the batch total, or the state total?"
+
+  - condition: "percentage_vs_count"
+    question: "As percentages, or as counts?"
+
+  - condition: "list_vs_aggregate"
+    question: "Do you want a summary count, or a breakdown by district, block or village? Individual records cannot be listed for Focus Plus."
+
+  - condition: "cross_tab_too_large"
+    question: "That cross-tab would be too large to read - {rows} rows by {cols} columns. Shall I show the top {n} of each, or pick one dimension?"
+
+  - condition: "topn_exceeds_available_rows"
+    question: "Only {available} {dimension} have Focus Plus records, fewer than the {requested} you asked for. Shall I show all {available}?"
+
+  - condition: "pivot_axis_has_one_value"
+    question: "That breakdown would have only one column - {value} is the only recorded value. Shall I pick a different dimension?"
+
+  - condition: "multi_step_query_received"
+    question: "That is several questions in one. Shall I take them in order, starting with {first_step}?"
+
+  - condition: "context_reference_unresolved"
+    question: "Which {dimension} did you mean by '{value}'? I have lost the thread from the previous answer."

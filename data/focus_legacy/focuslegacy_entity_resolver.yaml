@@ -1,0 +1,1481 @@
+resolver_version: '1.0'
+resolver_name: focuslegacy_entity_resolver
+display_name: Focus Legacy Entity Resolver (Meghalaya) - curated star schema
+generated_from:
+- datasets/Focus legacy/Focus Legacy to share to BLH.xlsx   # Sheet1, 14569 x 22
+- SCHEMA_FOR_DEVELOPERS.md (live information_schema extract, 2026-09-21)
+generated_on: '2026-09-21'
+companion_schema: focuslegacy_schema_partitions.yaml
+
+# ===========================================================================
+# v1.0 - 2026-09-21 - WRITTEN AGAINST THE CURATED STAR SCHEMA
+#
+# Focus Legacy was loaded straight into curated, so there is no flat-table
+# ancestor and no migration to record. Every catalogue below is read from the
+# source workbook; every column name and case rule is read from the live extract.
+#
+# FIVE THINGS MAKE THIS RESOLVER DIFFERENT FROM PMAY'S:
+#
+#   1. THE ENTITY IS A GROUP, NOT A PERSON. pg_id is the only identity. Group
+#      NAMES are unstable - 11,906 groups carry 10,678 distinct names and 1,634
+#      groups are spelled more than one way - so a name is a search term, never
+#      a key. See dimensions.producer_group.
+#
+#   2. THE pg_id LOOKS RESOLVABLE AND IS NOT. PG-FOCUS-WGH-7089 embeds a
+#      district abbreviation, and on 1,075 of 14,569 payments that abbreviation
+#      disagrees with the mapped district - correctly, because of district
+#      bifurcation. NEVER resolve geography from a pg_id.
+#      See dimensions.producer_group.district_token_trap.
+#
+#   3. product_raw IS UNNORMALISED. 62 raw spellings collapse to 45 products.
+#      The resolver owns the folding; the database does not do it.
+#      See dimensions.product.
+#
+#   4. TWO SCHEMES ANSWER TO "FOCUS". Focus Legacy pays producer groups; Focus
+#      Plus pays individuals. A bare "Focus" is a scheme-level ambiguity that
+#      must be resolved before anything else. See scheme.disambiguation.
+#
+#   5. BANKING VALUES ARE RESOLVABLE BUT PARTLY PII. bank_name and ifsc_code
+#      resolve and may be reported. account_no and name_on_the_account are
+#      outside the query surface entirely - this resolver never returns them.
+#
+# ALL RECORD COUNTS, DISTINCT COUNTS AND DISTRIBUTIONS BELOW ARE FROM THE SOURCE
+# WORKBOOK AND HAVE NOT BEEN RE-VERIFIED AGAINST megh_db. The two exceptions the
+# database independently confirms are the 14,569 / 3 / 14,566 reconciliation and
+# the amount = members x 5000 identity.
+# ===========================================================================
+
+description: >
+  Value-level entity resolution for the Focus Legacy NLP-to-SQL bot. This file answers
+  exactly one question: the user typed some text - which stored database value did they
+  mean? It does NOT define column meanings or aggregation; that is the companion stage2
+  semantic schema. Resolve entities with this file FIRST, then hand the resolved
+  canonical values to schema linking and SQL generation.
+
+scheme:
+  id: focus_legacy
+  display_name: Focus Legacy
+  full_name: Focus (legacy producer-group disbursement programme), Meghalaya
+  state: Meghalaya
+  aliases: ["Focus Legacy", "FocusLegacy", "Focus legacy", "legacy Focus", "old Focus",
+            "Focus scheme", "FOCUS", "Focus programme", "producer group scheme",
+            "PG scheme", "producer group payments", "Focus PG"]
+  scheme_code_in_db: UNVERIFIED_ENUMERATE_FIRST
+  scheme_code_note: >
+    curated.dim_scheme now holds 5 rows. The scheme_code for this partition was not
+    captured in the 2026-09-21 extract. Run
+    SELECT scheme_key, scheme_code, scheme_name, money_unit FROM curated.dim_scheme
+    before emitting any scheme filter or reading the money unit.
+
+  disambiguation:
+    critical: true
+    problem: >
+      "Focus" alone is ambiguous between two live schemes in megh_db. Focus Legacy pays
+      PRODUCER GROUPS at Rs 5,000 per member; Focus Plus pays INDIVIDUAL BENEFICIARIES.
+      They share no key, and Focus Plus holds no producer-group column at all.
+    rules:
+    - The words "producer group", "PG", "PG id", "group" force the Focus Legacy reading.
+    - The words "beneficiary", "member id", "tranche", "batch", "93K", "12.5K" force the
+      Focus Plus reading. Route the question to that partition.
+    - A bare "Focus" with no other signal is ASKED, not guessed - see
+      focuslegacy_classification_rules.yaml, condition focus_plus_confused_with_focus_legacy.
+    - Never answer a Focus Plus question from this partition, and never join the two.
+
+tables:
+  payments: curated.v_focus_legacy               # primary query surface, 28 columns
+  fact: curated.fact_focus_legacy_disbursement   # underlying fact - NEVER QUERIED, holds unmasked bank data
+  groups: curated.dim_producer_group             # 12 columns; first/last payment year not exposed by the view
+  entity_types: curated.dim_pg_entity_type       # 3 rows
+  bank_history: curated.bridge_pg_bank_history   # NEVER QUERIED - unmasked account numbers
+  geography: curated.dim_geography               # conformed; holds ac_number / ac_name
+  village_source_bridge: curated.bridge_geography_source
+  reconciliation: meta.v_reconciliation_focus_legacy
+
+dataset_shape:
+  grain: one row per payment to one producer group
+  approx_row_count_db: 14566
+  row_count_note: >
+    The source workbook held 14,569 rows; 3 were quarantined, and the live extract's
+    planner estimate of 14,566 agrees exactly. Run the reconciliation view before
+    publishing a total.
+  single_table: false
+  emits_no_joins: >
+    curated.v_focus_legacy already pre-joins dim_producer_group, dim_pg_entity_type,
+    dim_geography, dim_year and bridge_pg_bank_history, so the generator emits WHERE and
+    GROUP BY only. Three documented exceptions - dim_scheme for the money unit,
+    dim_geography for constituency, dim_producer_group for first/last payment year. See
+    focuslegacy_foreign_key_augmentation.yaml.
+
+# ---------------------------------------------------------------------------
+# HOW TO USE THIS FILE
+# ---------------------------------------------------------------------------
+how_to_use:
+  step_1_classify: >
+    Decide the entity type of each span of user text. Order matters because block and
+    village names collide, and because a pg_id contains a district abbreviation that must
+    NOT be read as geography. Try: scheme -> producer_group_id -> financial_year ->
+    calendar_year -> remittance_date -> district -> block -> village -> pg_entity_type ->
+    programme_variant -> product -> bank -> ifsc -> identifier -> measure.
+  step_2_normalise: Apply normalisation.fold to the user text and to candidate values.
+  step_3_match: Walk matching_pipeline in order; stop at the first stage that hits.
+  step_4_emit: Return an output_contract shape. Never put raw user text into SQL.
+  step_5_predicate: Build WHERE using the dimension's sql_predicate template.
+
+  hard_rules:
+  - "lgd_district and lgd_block are stored UPPERCASE in dim_geography; lgd_village_name,
+    bank_name and product_raw are not. Always compare case-folded, and emit the form the
+    column actually stores. A Title Case district literal returns zero rows silently."
+  - "NEVER PARSE A pg_id. The district abbreviation inside it is the district at
+    enrolment and is stale on 1,075 payments. Resolve geography from lgd_district only."
+  - Villages are resolved by village_code, never by name alone. 94 village names are
+    shared by two or more different villages, covering 208 codes.
+  - "Every village count and village list carries entity_type <> 'Unresolved'. Never
+    extend that filter to a money, district, block or programme total."
+  - "Group names are NOT identities. Resolve a name to one or more pg_id values, ask if
+    more than one survives, then query on pg_id."
+  - "product_raw is unnormalised - 62 spellings, 45 products. Fold case and trim before
+    matching or grouping, always."
+  - "Product answers cover FY2021-22 and FY2022-23 only. Say so every time."
+  - "There is NO always-on predicate. Do not copy PMAY's WHERE NOT is_placeholder - the
+    column does not exist and the query will error."
+  - "amount_disbursed = no_of_pg_members x 5000 on every row. A money ranking and a
+    membership ranking are the same ranking. Never present them as two findings."
+  - "account_no and name_on_the_account are outside the query surface. This resolver
+    never returns them, and account_no_masked is displayable but never countable."
+  - NULL is missing, never zero. 171 payments have no remittance date, 11,457 no product,
+    11,377 no branch and 276 no bank name.
+  - If more than one candidate survives, return ambiguous and ask. Never pick the first row.
+  - If nothing matches above the fuzzy floor, return not_found with suggestions. Never
+    invent a district, block, village, group, product or bank.
+
+# ---------------------------------------------------------------------------
+normalisation:
+  fold:
+  - trim and collapse internal whitespace to single spaces
+  - uppercase
+  - strip trailing qualifier words: BLOCK, DISTRICT, VILLAGE, C&RD
+  - strip trailing group words when matching a group name: PG, P G, PRODUCER GROUP, GROUP
+  - map & to AND
+  - treat - / ( ) and . as a single space, then re-collapse whitespace
+  squash: remove every non-alphanumeric character from the folded form
+  numeric_ids: >
+    village_code, block and district LGD codes and source_row_id are integers. Cast
+    user-typed codes with int() and strip any trailing .0 before comparing.
+  pg_ids: >
+    Uppercase, then remove ALL internal spaces before matching - the source itself
+    contains two space-corrupted ids and users paste ids with stray spaces. Match the
+    whole string; never match on the trailing number alone.
+  ifsc_codes: >
+    Uppercase and strip spaces. Beware the character confusion in the source: MCAB and
+    YESB sponsor codes appear as both YESB0MCA... (digit zero) and YESBOMCA... (letter O).
+    Fold O to 0 in positions 5 onward before comparing, and record which raw form matched.
+  product_terms: >
+    Fold case and trim, then match against the canonical list in dimensions.product.
+    Singular and plural are treated as the same product (VEGETABLE = VEGETABLES).
+
+matching_pipeline:
+- { stage: 1_exact,     test: folded user text == folded canonical, confidence: 1.0 }
+- { stage: 2_alias,     test: folded user text in the value's aliases, confidence: 0.98 }
+- { stage: 3_squash,    test: squashed user text == squashed canonical or alias, confidence: 0.95 }
+- { stage: 4_acronym,   test: district acronym table only, confidence: 0.95,
+    note: "acronyms are defined for districts only - do not invent them for blocks, and
+           do not read a district acronym out of a pg_id" }
+- stage: 5_contains
+  test: folded canonical is a whole-word substring of the user text or vice versa
+  confidence: 0.85
+- stage: 6_fuzzy
+  test: RapidFuzz token_set_ratio over the dimension catalogue
+  accept_at: ">= 90 and runner-up at least 5 points lower"
+  ask_between: 80 - 89, or any score where the runner-up is within 5 points
+  reject_below: 80
+- stage: 7_embedding
+  test: BGE-small nearest neighbour over the dimension catalogue
+  use_when: fuzzy returned nothing at or above 80
+  accept_at: cosine >= 0.88 AND unique within its dimension
+- { stage: 8_fail, action: emit not_found with up to 5 suggestions }
+
+blocked_matches:
+  purpose: >
+    Pairs fuzzy matching gets wrong. Never let stage 6 or 7 resolve the left value to the
+    right one; require an exact or alias hit.
+  pairs:
+  - [Laskein, Thadlaskein]          # two different West Jaintia Hills blocks, 647 vs 383 payments
+  - [Thadlaskein, Laskein]
+  - [Mawkynrew, Mawkyrwat]          # East Khasi Hills block vs South West Khasi Hills block
+  - [Mawkyrwat, Mawkynrew]
+  - [Mawsynram, Mawshynrut]         # East Khasi Hills block vs West Khasi Hills block
+  - [Mawshynrut, Mawsynram]
+  - [Siju, Saipung]                 # South Garo Hills block vs East Jaintia Hills block
+  - [Saipung, Siju]
+  - [Umling, Umsning]               # two different Ri Bhoi blocks, 303 vs 504 payments
+  - [Umsning, Umling]
+  - [Mawpat, Mawlai]                # two different East Khasi Hills blocks
+  - [Mawlai, Mawpat]
+  - [Rambrai, Rerapara]
+  - [Rongram, Rongara]              # West Garo Hills block vs South Garo Hills block
+  - [Rongara, Rongram]
+  - [Dadenggiri, Demdema]
+  - [Bajengdoba, Baghmara]
+  - ["Focus Legacy", "Focus Plus"]  # two different schemes - see scheme.disambiguation
+  - ["FOCUS", "Focus (Addnl)"]      # two programme variants within this scheme
+  - [Ginger, "Long Pepper"]
+  - [Pepper, "Black Pepper"]        # both exist as separate products
+  - ["Black Pepper", "Wild pepper"]
+  - [Vegetables, "Vegetables (Mushroom)"]
+  - [Mushroom, "Vegetables (Mushroom)"]
+  - [Sericulture, Silkworm]         # both exist as separate products
+  - ["Meghalaya Rural Bank", "Meghalaya Co-operative Apex Bank"]
+
+output_contract:
+  resolved:
+    status: resolved
+    entity_type: scheme | producer_group | pg_entity_type | programme_variant | district |
+                 block | village | product | bank | ifsc | financial_year |
+                 calendar_year | remittance_date | identifier | measure
+    user_text: <verbatim span>
+    canonical: <exact stored value>
+    lgd_code: <code, geography only>
+    confidence: <0-1>
+    matched_by: <pipeline stage>
+  ambiguous:
+    status: ambiguous
+    entity_type: <type>
+    user_text: <verbatim span>
+    candidates: [ { canonical, lgd_code, district, block, pg_id } ]
+    question: <one short question naming the distinguishing attribute>
+  not_found:
+    status: not_found
+    entity_type: <type or unknown>
+    user_text: <verbatim span>
+    suggestions: [ up to 5 nearest catalogue values ]
+    message: state plainly that the value is not in the Focus Legacy data.
+  refused:
+    status: refused
+    entity_type: account_number | account_holder_name
+    user_text: <verbatim span>
+    reason: outside the approved query surface
+    message: >
+      State that bank account numbers and account-holder names are not available, offer
+      the masked account for a single named group, and do not attempt a lookup.
+
+# ---------------------------------------------------------------------------
+overloaded_terms:
+  why: >
+    A handful of words map to more than one column, or to more than one scheme. Getting
+    these wrong produces a confidently wrong answer, so they are listed explicitly.
+
+  focus:
+    readings:
+    - { means: this partition, when: "the user says producer group, PG, group, or names this scheme" }
+    - { means: the Focus Plus partition, when: "the user says beneficiary, member id, tranche, batch, 93K or 12.5K" }
+    - { means: programme_variant = the FOCUS variant, when: "the user is contrasting it with Focus (Addnl) inside this scheme" }
+    default: ask. Two schemes and one programme variant all answer to the word.
+
+  beneficiaries:
+    readings:
+    - { means: COUNT(*), when: "the user means payments - the grain" }
+    - { means: COUNT(DISTINCT pg_id), when: "the user means the organisations paid" }
+    - { means: SUM(no_of_pg_members), when: "the user means people reached" }
+    default: ask. The three differ by an order of magnitude - about 14,566, 11,904 and 102,021.
+    critical: >
+      THERE IS NO PERSON-LEVEL ANSWER. SUM(no_of_pg_members) counts MEMBERSHIPS: a group
+      paid in two years contributes twice, and its recorded size can differ between the
+      two payments. Never present it as a headcount of people, and never offer a person
+      lookup - no name, EPIC or member id exists in this partition.
+
+  amount:
+    readings:
+    - { means: SUM(amount_disbursed), when: always - it is the only money column }
+    default: SUM(amount_disbursed), with the x5000 identity stated back.
+    critical: >
+      amount_disbursed = no_of_pg_members x 5000 on every row. SUM(amount) is
+      5000 x SUM(members); AVG(amount) is 5000 x average group size and is NOT an
+      entitlement. "Per member" is the constant 5,000 - say the rate, do not compute it.
+    unit: >
+      UNVERIFIED. Read curated.dim_scheme.money_unit for this scheme before formatting.
+      Magnitudes corroborate rupees; nothing in the extract confirms it.
+
+  members:
+    readings:
+    - { means: SUM(no_of_pg_members), when: the user asks how many members were covered }
+    - { means: AVG(no_of_pg_members), when: the user asks about group size }
+    - { means: "a WHERE on no_of_pg_members", when: "the user asks about groups OF a given size" }
+    default: SUM, labelled as memberships rather than people.
+
+  group:
+    readings:
+    - { means: COUNT(DISTINCT pg_id), when: the user means producer groups }
+    - { means: "a GROUP BY", when: the user means 'group by district' and similar }
+    default: read as producer groups unless the sentence is asking for a breakdown.
+
+  type:
+    readings:
+    - { means: pg_entity_type, when: "the user asks what kind of group - FOCUS, LAMP, EXISTING" }
+    - { means: programme_variant, when: "the user asks which programme - FOCUS vs Focus (Addnl)" }
+    - { means: product_raw, when: "the user asks what type of produce or activity" }
+    default: ask. All three are live and they are different columns.
+
+  current:
+    readings:
+    - { means: bank_details_current, when: the user asks about the group's current account }
+    - { means: "the latest financial year", when: "the user says current year" }
+    default: ask if the sentence touches banking; otherwise read as the latest year.
+    note: >
+      bank_details_current is TRUE or NULL, never FALSE. For "paid to an old account"
+      write bank_details_current IS NULL AND account_no_masked IS NOT NULL.
+
+# ---------------------------------------------------------------------------
+cross_dimension_collisions:
+  measured:
+    block_names_that_are_also_village_names: 17
+    village_names_shared_by_more_than_one_code: 94
+    village_codes_involved_in_a_shared_name: 208
+    district_collisions: 0
+  colliding_block_and_village_names: [Baghmara, Batabari, Gambegre, Laskein, Mawkynrew,
+    Mawkyrwat, Mawlai, Mawpat, Mawryngkneng, Rambrai, Ranikor, Rerapara, Saipung,
+    Songsak, Umling, Umsning, Zikzak]
+  disambiguation_rules:
+  - If the user said "block" or "C&RD block", resolve as block.
+  - If the user said "village" or "gaon", resolve as village.
+  - With no qualifier, default to BLOCK - it is the administrative level users mean.
+  - State the assumption in the answer whenever the default fired on a colliding name.
+  - Districts never collide with anything; resolve them with no qualifier needed.
+  - "A district ABBREVIATION inside a pg_id is not a geography span at all. Do not
+    classify it as a district entity - see dimensions.producer_group.district_token_trap."
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS
+# ---------------------------------------------------------------------------
+dimensions:
+
+  district:
+    name_column: lgd_district
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    case_note: >
+      The source workbook is Title Case ("West Garo Hills"); dim_geography stores
+      district UPPERCASE. The canonical names below are kept in Title Case for display
+      and matching - emit the uppercase form in the predicate.
+    distinct: 12
+    complete: true            # all 12 Meghalaya districts appear in Focus Legacy
+    collisions: none
+    sql_predicate: "lgd_district = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    code_note: >
+      The source's mapped_district_lgd_code has NO equivalent in the curated layer -
+      dim_geography carries village_code only. The lgd_code values below remain useful
+      for RESOLVING a code the user typed to a district name, but the code can never
+      appear in a WHERE clause.
+    alias_provenance: >
+      canonical, lgd_code, payments, groups, blocks and villages are read from the source
+      workbook. acronym, region and the spelling variants are curated linguistic forms,
+      shared with the PMAY and Focus Plus resolvers so that one alias family serves every
+      scheme.
+    acronym_warning:
+      critical: true
+      text: >
+        The acronyms below are also the district tokens inside pg_id values. Resolving
+        "WGH" typed by a user to West Garo Hills is correct. Reading "WGH" out of
+        PG-FOCUS-WGH-7089 is NOT - that token is the district at enrolment and is stale
+        on 1,075 payments.
+    values:
+    - canonical: "West Garo Hills"
+      lgd_code: 278
+      acronym: WGH
+      region: "Garo Hills"
+      payments: 3493
+      groups: 2701
+      blocks: 8
+      villages: 692
+      aliases: ["WGH", "W.G.H.", "West Garo Hill", "West Garo", "W Garo Hills", "W Garo Hill", "W Garo", "WestGaroHills", "West Garo Hills District", "Tura district"]
+    - canonical: "North Garo Hills"
+      lgd_code: 656
+      acronym: NGH
+      region: "Garo Hills"
+      payments: 1476
+      groups: 1173
+      blocks: 4
+      villages: 384
+      aliases: ["NGH", "N.G.H.", "North Garo Hill", "North Garo", "N Garo Hills", "N Garo Hill", "N Garo", "NorthGaroHills", "North Garo Hills District", "Resubelpara district"]
+    - canonical: "West Jaintia Hills"
+      lgd_code: 275
+      acronym: WJH
+      region: "Jaintia Hills"
+      payments: 1325
+      groups: 1130
+      blocks: 4
+      villages: 173
+      aliases: ["WJH", "W.J.H.", "West Jaintia Hill", "West Jaintia", "W Jaintia Hills", "W Jaintia Hill", "W Jaintia", "WestJaintiaHills", "West Jaintia Hills District", "Jowai district"]
+    - canonical: "Ri Bhoi"
+      lgd_code: 276
+      acronym: RB
+      region: "Ri Bhoi"
+      payments: 1233
+      groups: 955
+      blocks: 5
+      villages: 281
+      aliases: ["RB", "R.B.", "Ribhoi", "Ri-Bhoi", "Nongpoh district"]
+    - canonical: "West Khasi Hills"
+      lgd_code: 279
+      acronym: WKH
+      region: "Khasi Hills"
+      payments: 1104
+      groups: 926
+      blocks: 5
+      villages: 293
+      aliases: ["WKH", "W.K.H.", "West Khasi Hill", "West Khasi", "W Khasi Hills", "W Khasi Hill", "W Khasi", "WestKhasiHills", "West Khasi Hills District", "Nongstoin district"]
+      bifurcation_note: >
+        990 payments whose pg_id says WKH now map to Eastern West Khasi Hills. A user
+        saying "West Khasi Hills" means the 1,104 payments in THIS district; if they mean
+        the pre-bifurcation area they must be offered both.
+    - canonical: "East Garo Hills"
+      lgd_code: 273
+      acronym: EGH
+      region: "Garo Hills"
+      payments: 1068
+      groups: 928
+      blocks: 3
+      villages: 331
+      aliases: ["EGH", "E.G.H.", "East Garo Hill", "East Garo", "E Garo Hills", "E Garo Hill", "E Garo", "EastGaroHills", "East Garo Hills District", "Williamnagar district"]
+    - canonical: "South West Garo Hills"
+      lgd_code: 663
+      acronym: SWGH
+      region: "Garo Hills"
+      payments: 1030
+      groups: 794
+      blocks: 4
+      villages: 283
+      aliases: ["SWGH", "S.W.G.H.", "South West Garo Hill", "South West Garo", "S W Garo Hills", "S W Garo Hill", "S W Garo", "SouthWestGaroHills", "South West Garo Hills District", "Ampati district", "S West Garo Hills"]
+      bifurcation_note: 85 payments whose pg_id says WGH map to this district.
+    - canonical: "Eastern West Khasi Hills"
+      lgd_code: 740
+      acronym: EWKH
+      region: "Khasi Hills"
+      payments: 990
+      groups: 792
+      blocks: 2
+      villages: 158
+      aliases: ["EWKH", "E.W.K.H.", "Eastern West Khasi Hill", "Eastern West Khasi", "Eastern W Khasi Hills", "Eastern W Khasi Hill", "Eastern W Khasi", "EasternWestKhasiHills", "Eastern West Khasi Hills District", "Mairang district", "E West Khasi Hills", "Eastern WKH"]
+      bifurcation_note: >
+        EVERY ONE of these 990 payments belongs to a group whose pg_id still says WKH.
+        This district has no pg_id token of its own, which is exactly why the token must
+        never be used as geography.
+    - canonical: "East Khasi Hills"
+      lgd_code: 274
+      acronym: EKH
+      region: "Khasi Hills"
+      payments: 935
+      groups: 909
+      blocks: 11
+      villages: 319
+      aliases: ["EKH", "E.K.H.", "East Khasi Hill", "East Khasi", "E Khasi Hills", "E Khasi Hill", "E Khasi", "EastKhasiHills", "East Khasi Hills District", "Shillong district"]
+      note: 11 blocks - the most fragmented district, and the most likely to need a block filter.
+    - canonical: "East Jaintia Hills"
+      lgd_code: 657
+      acronym: EJH
+      region: "Jaintia Hills"
+      payments: 773
+      groups: 626
+      blocks: 3
+      villages: 89
+      aliases: ["EJH", "E.J.H.", "East Jaintia Hill", "East Jaintia", "E Jaintia Hills", "E Jaintia Hill", "E Jaintia", "EastJaintiaHills", "East Jaintia Hills District", "Khliehriat district"]
+    - canonical: "South Garo Hills"
+      lgd_code: 277
+      acronym: SGH
+      region: "Garo Hills"
+      payments: 618
+      groups: 532
+      blocks: 5
+      villages: 245
+      aliases: ["SGH", "S.G.H.", "South Garo Hill", "South Garo", "S Garo Hills", "S Garo Hill", "S Garo", "SouthGaroHills", "South Garo Hills District", "Baghmara district"]
+    - canonical: "South West Khasi Hills"
+      lgd_code: 658
+      acronym: SWKH
+      region: "Khasi Hills"
+      payments: 524
+      groups: 440
+      blocks: 2
+      villages: 136
+      aliases: ["SWKH", "S.W.K.H.", "South West Khasi Hill", "South West Khasi", "S W Khasi Hills", "S W Khasi Hill", "S W Khasi", "SouthWestKhasiHills", "South West Khasi Hills District", "Mawkyrwat district", "S West Khasi Hills"]
+
+  block:
+    name_column: lgd_block
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    distinct: 56
+    sql_predicate: "lgd_block = UPPER('<canonical>')"
+    sql_predicate_scoped: "lgd_district = UPPER('<district>') AND lgd_block = UPPER('<canonical>')"
+    code_note: >
+      The lgd_code values below come from the source workbook's mapped_block_lgd_code and
+      are kept only to resolve a code a user typed. There is NO block code column in the
+      curated layer, so the code can never appear in a WHERE clause.
+    coverage_caveat:
+      critical: true
+      text: >
+        88 payments have no block at all in the source, and a further 1,013 have a block
+        but no village - those resolved to an Unresolved placeholder whose stored block is
+        UNVERIFIED and may be NULL. A block-level total can therefore fall short of the
+        scheme total by up to 1,101 payments. Compare against the ungrouped total and
+        state the shortfall.
+    resolution_strategy:
+    - 1. Fold the name and look it up, scoped by any district also given.
+    - 2. If the name is in cross_dimension_collisions.colliding_block_and_village_names
+         and the user gave no level word, default to block and say so.
+    - 3. If exactly one block survives, resolve it.
+    - 4. If more than one survives, return ambiguous with the candidates' districts.
+    - 5. Check blocked_matches before accepting any fuzzy hit.
+    values:
+    - { canonical: Songsak,        district: East Garo Hills,          lgd_code: 1973, payments: 385, villages: 118, also_a_village_name: true }
+    - { canonical: Dambo Rongjeng, district: East Garo Hills,          lgd_code: 1971, payments: 357, villages: 114 }
+    - { canonical: Samanda,        district: East Garo Hills,          lgd_code: 1974, payments: 325, villages: 99 }
+    - { canonical: Wapung,         district: East Jaintia Hills,       lgd_code: 1999, payments: 443, villages: 39 }
+    - { canonical: Saipung,        district: East Jaintia Hills,       lgd_code: 2000, payments: 295, villages: 41, also_a_village_name: true }
+    - { canonical: Lumshnong,      district: East Jaintia Hills,       lgd_code: 7337, payments: 33,  villages: 9 }
+    - { canonical: Mylliem,        district: East Khasi Hills,         lgd_code: 1989, payments: 183, villages: 47 }
+    - { canonical: Mawsynram,      district: East Khasi Hills,         lgd_code: 1993, payments: 141, villages: 38 }
+    - { canonical: Sohiong,        district: East Khasi Hills,         lgd_code: 6542, payments: 138, villages: 49 }
+    - { canonical: Mawkynrew,      district: East Khasi Hills,         lgd_code: 1991, payments: 123, villages: 37, also_a_village_name: true }
+    - { canonical: Mawryngkneng,   district: East Khasi Hills,         lgd_code: 1990, payments: 88,  villages: 33, also_a_village_name: true }
+    - { canonical: Pynursla,       district: East Khasi Hills,         lgd_code: 1995, payments: 81,  villages: 45 }
+    - { canonical: Mawphlang,      district: East Khasi Hills,         lgd_code: 1988, payments: 57,  villages: 25 }
+    - { canonical: Mawlai,         district: East Khasi Hills,         lgd_code: 6540, payments: 43,  villages: 12, also_a_village_name: true }
+    - { canonical: Mawpat,         district: East Khasi Hills,         lgd_code: 6541, payments: 42,  villages: 13, also_a_village_name: true }
+    - { canonical: Khatarshnong Laitkroh, district: East Khasi Hills,  lgd_code: 1992, payments: 21,  villages: 10 }
+    - { canonical: Shella Bholaganj,      district: East Khasi Hills,  lgd_code: 1994, payments: 18,  villages: 10 }
+    - { canonical: Mairang,        district: Eastern West Khasi Hills, lgd_code: 1982, payments: 699, villages: 108 }
+    - { canonical: Mawthadraishan, district: Eastern West Khasi Hills, lgd_code: 1981, payments: 291, villages: 50 }
+    - { canonical: Resubelpara,    district: North Garo Hills,         lgd_code: 1970, payments: 569, villages: 145 }
+    - { canonical: Bajengdoba,     district: North Garo Hills,         lgd_code: 6544, payments: 484, villages: 114 }
+    - { canonical: Kharkutta,      district: North Garo Hills,         lgd_code: 1972, payments: 344, villages: 99 }
+    - { canonical: Adokgre,        district: North Garo Hills,         lgd_code: 7334, payments: 79,  villages: 26 }
+    - { canonical: Umsning,        district: Ri Bhoi,                  lgd_code: 1987, payments: 504, villages: 78, also_a_village_name: true }
+    - { canonical: Umling,         district: Ri Bhoi,                  lgd_code: 1985, payments: 303, villages: 91, also_a_village_name: true }
+    - { canonical: Bhoirymbong,    district: Ri Bhoi,                  lgd_code: 6543, payments: 253, villages: 55 }
+    - { canonical: Jirang,         district: Ri Bhoi,                  lgd_code: 1986, payments: 152, villages: 52 }
+    - { canonical: Mawhati,        district: Ri Bhoi,                  lgd_code: 7456, payments: 15,  villages: 5 }
+    - { canonical: Gasuapara,      district: South Garo Hills,         lgd_code: 1976, payments: 276, villages: 82 }
+    - { canonical: Chokpot,        district: South Garo Hills,         lgd_code: 1975, payments: 110, villages: 58 }
+    - { canonical: Siju,           district: South Garo Hills,         lgd_code: 7332, payments: 104, villages: 58 }
+    - { canonical: Baghmara,       district: South Garo Hills,         lgd_code: 1977, payments: 75,  villages: 18, also_a_village_name: true }
+    - { canonical: Rongara,        district: South Garo Hills,         lgd_code: 1978, payments: 50,  villages: 29 }
+    - { canonical: Rerapara,       district: South West Garo Hills,    lgd_code: 6545, payments: 435, villages: 87, also_a_village_name: true }
+    - { canonical: Zikzak,         district: South West Garo Hills,    lgd_code: 1967, payments: 247, villages: 83, also_a_village_name: true }
+    - { canonical: Betasing,       district: South West Garo Hills,    lgd_code: 1966, payments: 221, villages: 78 }
+    - { canonical: Purakhasia,     district: South West Garo Hills,    lgd_code: 7418, payments: 124, villages: 35 }
+    - { canonical: Mawkyrwat,      district: South West Khasi Hills,   lgd_code: 1984, payments: 385, villages: 81, also_a_village_name: true }
+    - { canonical: Ranikor,        district: South West Khasi Hills,   lgd_code: 1983, payments: 138, villages: 55, also_a_village_name: true }
+    - { canonical: Rongram,        district: West Garo Hills,          lgd_code: 1965, payments: 561, villages: 111 }
+    - { canonical: Selsella,       district: West Garo Hills,          lgd_code: 1962, payments: 558, villages: 81 }
+    - { canonical: Demdema,        district: West Garo Hills,          lgd_code: 6546, payments: 477, villages: 74 }
+    - { canonical: Dadenggiri,     district: West Garo Hills,          lgd_code: 1963, payments: 459, villages: 75 }
+    - { canonical: Tikrikilla,     district: West Garo Hills,          lgd_code: 1964, payments: 425, villages: 112 }
+    - { canonical: Dalu,           district: West Garo Hills,          lgd_code: 1969, payments: 419, villages: 102 }
+    - { canonical: Gambegre,       district: West Garo Hills,          lgd_code: 1968, payments: 330, villages: 104, also_a_village_name: true }
+    - { canonical: Batabari,       district: West Garo Hills,          lgd_code: 7339, payments: 205, villages: 33, also_a_village_name: true }
+    - { canonical: Laskein,        district: West Jaintia Hills,       lgd_code: 1997, payments: 647, villages: 62, also_a_village_name: true }
+    - { canonical: Thadlaskein,    district: West Jaintia Hills,       lgd_code: 1996, payments: 383, villages: 54 }
+    - { canonical: Amlarem,        district: West Jaintia Hills,       lgd_code: 1998, payments: 202, villages: 48 }
+    - { canonical: Namdong,        district: West Jaintia Hills,       lgd_code: 7335, payments: 86,  villages: 9 }
+    - { canonical: Nongstoin,      district: West Khasi Hills,         lgd_code: 1980, payments: 553, villages: 112 }
+    - { canonical: Mawshynrut,     district: West Khasi Hills,         lgd_code: 1979, payments: 348, villages: 100 }
+    - { canonical: Shallang,       district: West Khasi Hills,         lgd_code: 7338, payments: 87,  villages: 36 }
+    - { canonical: Rambrai,        district: West Khasi Hills,         lgd_code: 7333, payments: 59,  villages: 26, also_a_village_name: true }
+    - { canonical: Ri Muliang,     district: West Khasi Hills,         lgd_code: 7336, payments: 51,  villages: 19 }
+
+  village:
+    name_column: lgd_village_name
+    code_column: village_code
+    stored_case: >
+      Mixed case in dim_geography.lgd_village_name. UNLIKE district and block, the village
+      name is NOT uppercased in the curated layer - do not apply one casing rule to all
+      three levels.
+    distinct_codes: 3384
+    distinct_names: 3270
+    sql_predicate_preferred: "village_code = <code>"
+    sql_predicate_fallback: "lgd_village_name = '<canonical>'"
+    counting_villages: >
+      COUNT(DISTINCT village_code), never COUNT(DISTINCT name) - 114 codes would be lost
+      to shared names - and always with entity_type <> 'Unresolved'.
+    unresolved_rule:
+      critical: true
+      text: >
+        1,101 payments (7.6%) carry no real village: 1,013 had a block but no village and
+        88 had neither. They resolve to a synthetic Unresolved placeholder under their
+        district. A village LIST or village COUNT must exclude them; a money or district
+        total must not.
+    resolution_strategy:
+    - 1. If the user gave a numeric code, resolve on village_code directly.
+    - 2. Fold the name and look it up scoped by any district or block also given.
+    - 3. If exactly one code survives, resolve and emit the CODE, not the name.
+    - 4. If more than one survives, return ambiguous with candidate codes plus their
+         district and block. Ask which one.
+    - 5. If none survive, run fuzzy then embedding, then not_found with 5 suggestions.
+
+    ambiguity_registry:
+      measured: { shared_names: 94, codes_involved: 208 }
+      split: { resolvable_by_district: 66, needs_block_or_code: 28 }
+      note: >
+        66 of the 94 shared names span more than one district, so naming the district
+        settles them. The remaining 28 repeat INSIDE one district and need a block or a
+        code. Never pick the first row.
+      worst_cases:
+      - { name: ASIMGRE,       codes: 5, districts: [East Garo Hills, South West Garo Hills, West Garo Hills] }
+      - { name: CHIGITCHAKGRE, codes: 5, districts: [South West Garo Hills, West Garo Hills] }
+      - { name: BOLCHUGRE,     codes: 4, districts: [South West Garo Hills, West Garo Hills] }
+      - { name: APALGRE,       codes: 3, districts: [South West Garo Hills, West Garo Hills] }
+      - { name: UMSAW,         codes: 3, districts: [South West Khasi Hills, West Khasi Hills] }
+      - { name: TIEHBAH,       codes: 3, districts: [East Khasi Hills, Eastern West Khasi Hills, West Khasi Hills] }
+      - { name: NOKATGRE,      codes: 3, districts: [South West Garo Hills, West Garo Hills] }
+      - { name: NONGLANG,      codes: 3, districts: [Eastern West Khasi Hills, South West Khasi Hills, West Khasi Hills] }
+      - { name: RANGSAGRE,     codes: 3, districts: [South West Garo Hills, West Garo Hills] }
+      - { name: MAWLIEH,       codes: 3, districts: [East Khasi Hills, Eastern West Khasi Hills, West Khasi Hills] }
+      - { name: MAWSAW,        codes: 3, districts: [South West Khasi Hills, West Khasi Hills] }
+      - { name: MAWBRI,        codes: 3, districts: [Ri Bhoi, South West Khasi Hills, West Khasi Hills] }
+      - { name: JARAIN,        codes: 3, districts: [East Jaintia Hills, East Khasi Hills, West Jaintia Hills] }
+      - { name: MEGONGGRE,     codes: 3, districts: [West Garo Hills], needs: block }
+      - { name: TEKSRAGRE,     codes: 3, districts: [West Garo Hills], needs: block }
+      single_district_repeats:
+        note: >
+          These names repeat INSIDE one district, so naming the district does not settle
+          them - ask for the block, or take a village code.
+        examples: [MEGONGGRE, TEKSRAGRE, CHANDIGRE, BELBARI, BALUPARA, BOLBOKGRE,
+          BOLDAMGRE, GALWANGGRE, DOPANANGGRE, DOLLONGGRE, DALMAGRE, DABAKGRE, CHIBOKGRE,
+          KOTCHUGRE, HARIBHANGA, MANDAGRE, MARAKAPARA, JANGRAPARA, NAWALGRE, LYNGNGAI,
+          LUMPYNGNGAD, MAWROH, POMLUM, NONGMADAN, RONGCHIGRE, SELBALGRE, TEBRONGGRE,
+          TIEHSAW]
+
+  producer_group:
+    id_column: pg_id
+    name_column: pg_name
+    source_dimension: curated.dim_producer_group
+    distinct_ids_in_source: 11906
+    distinct_ids_loaded: 11904
+    distinct_names: 10678
+    sql_predicate: "pg_id = '<canonical>'"
+    sql_predicate_name_search: "pg_name ILIKE '%<folded>%'"
+
+    identity_rule:
+      critical: true
+      text: >
+        pg_id is the ONLY group identity. pg_name is display text: 11,906 groups carry
+        10,678 distinct names, and 1,634 groups appear under more than one spelling - the
+        same group is "Muskan Producer Group" in one payment run and "Muskan Pg" in the
+        next. Names therefore both SPLIT one group across rows and MERGE several groups
+        into one label. Never GROUP BY pg_name and never COUNT(DISTINCT pg_name).
+
+    structure:
+      pattern: "PG-<TYPE>-<DISTRICT_ABBR>-<NUMBER>"
+      examples: [PG-FOCUS-EGH-754, PG-LAMP-WGH-5956, PG-EXISTING-COOPERATIVE-NGH-12]
+      type_tokens: { PG-FOCUS: 12722, PG-LAMP: 1794, PG-EXISTING-COOPERATIVE: 53 }
+      number_rule:
+        critical: true
+        text: >
+          The trailing number is unique only WITHIN a prefix. PG-FOCUS-WKH-5956 and
+          PG-LAMP-WGH-5956 are two different groups. Never match on the number alone and
+          never present it to a user as a quotable "PG number".
+
+    district_token_trap:
+      critical: true
+      measured: { payments_where_token_disagrees_with_mapped_district: 1075 }
+      detail:
+      - "990 payments whose pg_id says WKH map to Eastern West Khasi Hills (LGD 740)."
+      - "85 payments whose pg_id says WGH map to South West Garo Hills."
+      text: >
+        The token records the district AT ENROLMENT; the mapped LGD district records where
+        the village is now. Both are correct about different moments, and the mapped one
+        is what the database groups by. NEVER derive district, block or region from a
+        pg_id, and never "correct" a mapped district because the id disagrees with it.
+
+    malformed_ids:
+      count_in_source: 2
+      values: ["PG-FOCUS- RB- 7751", "PG- FOCUS-EKH-12359"]
+      text: >
+        Both are corrupted by stray spaces and were quarantined as BAD_PG_ID_PREFIX, so
+        two groups are absent from the database. If a user supplies one of these, say the
+        record was not loaded rather than returning not_found with no explanation.
+
+    lookup_strategy:
+    - 1. If the text matches the pg_id pattern, uppercase it, strip ALL spaces, and match exactly.
+    - 2. Otherwise treat it as a NAME. Fold, strip trailing PG / PRODUCER GROUP, and ILIKE.
+    - 3. If exactly one pg_id survives, resolve to that id and say which name matched.
+    - 4. If more than one survives, return ambiguous listing pg_id, name, district and village.
+    - 5. If none survive, offer fuzzy suggestions from pg_name - never invent an id.
+
+    payment_frequency:
+      note: A group may hold more than one payment, so a group filter can return several rows.
+      distribution: { paid_once: 9251, paid_twice: 2647, paid_three_times: 8 }
+      membership_caveat: >
+        A group's recorded member count can DIFFER between its own payments -
+        PG-FOCUS-RB-3210 was paid for 1 member in September 2025 and 12 in January 2026.
+        Member counts are per payment, not a tracked attribute of the group.
+
+  pg_entity_type:
+    name_column: pg_entity_type
+    display_column: pg_entity_type_name
+    source_dimension: curated.dim_pg_entity_type
+    distinct: 3
+    closed_set: true
+    sql_predicate: "pg_entity_type = '<canonical>'"
+    stored_values: UNVERIFIED_ENUMERATE_FIRST
+    critical: >
+      THE STORED type_code STRINGS ARE NOT KNOWN TO THIS FILE. The 2026-09-21 extract
+      does not carry them. RUN
+      SELECT pg_entity_type_key, type_code, type_name, source_id_prefix
+      FROM curated.dim_pg_entity_type
+      before emitting any filter, legend or chart series. Do not guess 'FOCUS', 'LAMP' or
+      'EXISTING'.
+    observed_prefixes:
+    - { source_id_prefix: "PG-FOCUS",                payments: 12722, groups: 10075, members: 94766, user_words: [focus, focus group, regular PG] }
+    - { source_id_prefix: "PG-LAMP",                 payments: 1794,  groups: 1794,  members: 6705,  user_words: [LAMP, lamps, LAMP society] }
+    - { source_id_prefix: "PG-EXISTING-COOPERATIVE", payments: 53,    groups: 37,    members: 550,   user_words: [existing, cooperative, co-operative, existing cooperative] }
+    lamp_caveat:
+      critical: true
+      text: >
+        dim_pg_entity_type.notes records the LAMP reading as an UNCONFIRMED hypothesis -
+        it may correspond to what the Focus+ use-case docs call "LAMP" as distinct from
+        "PG" (UC-041), and no client or SME has confirmed it. Report the counts; do not
+        harden the interpretation into a definition.
+    fixed_rule: >
+      The type is derived from the pg_id prefix at ingest and never changes for a group.
+      It is a structural classification, not a status. There is no 'Other' member - a
+      prefix matching none of the three is quarantined, not bucketed.
+
+  programme_variant:
+    column: programme_variant
+    distinct: 2
+    closed_set: true
+    sql_predicate: "programme_variant = '<canonical>'"
+    stored_form: UNVERIFIED_ENUMERATE_FIRST
+    stored_form_note: >
+      The source holds 'FOCUS' and 'Focus (Addnl)'. Whether the loader stored them
+      verbatim into varchar(20) is unverified - the second is 13 characters so it very
+      likely survived, but run SELECT DISTINCT programme_variant before filtering.
+    values:
+    - canonical: "FOCUS"
+      payments: 13863
+      financial_years: ['2021-22', '2022-23', '2024-25', '2025-26']
+      aliases: [focus, main focus, regular focus, ordinary focus, base focus]
+    - canonical: "Focus (Addnl)"
+      payments: 706
+      financial_years: ['2025-26']
+      remittance_dates: ['2025-06-26']
+      amount: 18405000
+      aliases: [additional, addnl, add-on, top-up, topup, extra focus, additional focus,
+                "focus additional", "focus addnl"]
+      critical: >
+        NOT A SECOND ERA - A SINGLE ROUND. All 706 payments were remitted on one day,
+        2025-06-26, inside FY2025-26. A programme breakdown that is not also a year
+        breakdown reads as a trend when it is a one-off top-up.
+    note: >
+      Do not confuse programme_variant with pg_entity_type. One describes the PAYMENT,
+      the other the GROUP, and both have a member that sounds like "focus".
+
+  product:
+    column: product_raw
+    stored_form: verbatim, unnormalised
+    distinct_raw: 62
+    distinct_folded: 45
+    populated_rows: 3112
+    populated_pct: 21
+    sql_predicate: "UPPER(TRIM(product_raw)) = '<canonical>'"
+    sql_group_by: "GROUP BY UPPER(TRIM(product_raw))"
+
+    folding_rule:
+      critical: true
+      text: >
+        THE RESOLVER OWNS THE FOLDING - the database does not do it. 62 raw spellings
+        collapse to 45 products. A bare GROUP BY product_raw reports PIGGERY, Piggery and
+        piggery as three separate products and can push the true leader out of a top-5.
+        Always fold case and trim, on both sides of the comparison.
+
+    coverage_rule:
+      critical: true
+      by_year: { '2021-22': "965 of 965", '2022-23': "2,139 of 2,139",
+                 '2024-25': "0 of 2,653", '2025-26': "8 of 8,812" }
+      text: >
+        EVERY PRODUCT ANSWER COVERS FY2021-22 AND FY2022-23 ONLY. The field stopped being
+        captured afterwards - the DB column comment confirms the gap is in the source, not
+        the load. A product question about FY2024-25 or FY2025-26 is unanswerable, and the
+        reason is that the field is empty, NOT that the groups had no products.
+
+    semantics: >
+      product_raw describes what the GROUP works on, not what the money bought. Never
+      present it as expenditure by category.
+
+    values:
+    - { canonical: PIGGERY,      payments: 877, raw_spellings: [PIGGERY, Piggery, piggery], aliases: [pig, pigs, pig farming, pig rearing, swine] }
+    - { canonical: GINGER,       payments: 429, raw_spellings: [GINGER, Ginger, ginger], aliases: [ginger cultivation] }
+    - { canonical: VEGETABLES,   payments: 340, raw_spellings: [Vegetables], aliases: [vegetable, veg, vegetable farming] }
+    - { canonical: BROOM GRASS,  payments: 230, raw_spellings: [Broom Grass], aliases: [broom, brooms, broomstick, broom stick] }
+    - { canonical: TURMERIC,     payments: 167, raw_spellings: [Turmeric], aliases: [haldi] }
+    - { canonical: BLACK PEPPER, payments: 124, raw_spellings: [Black Pepper], aliases: [blackpepper, kali mirch] }
+    - { canonical: CASHEW NUT,   payments: 122, raw_spellings: [Cashew nut], aliases: [cashew, cashewnut, cashew nuts] }
+    - { canonical: BANANA,       payments: 108, raw_spellings: [BANANA, Banana], aliases: [bananas, plantain] }
+    - { canonical: POTATO,       payments: 108, raw_spellings: [POTATO, Potato], aliases: [potatoes, aloo] }
+    - { canonical: SQUASH,       payments: 102, raw_spellings: [SQUASH, Squash, squash], aliases: [squashes] }
+    - { canonical: SPICES,       payments: 66,  raw_spellings: [Spices], aliases: [spice] }
+    - { canonical: POULTRY,      payments: 51,  raw_spellings: [POULTRY, Poultry, poultry], aliases: [chicken, hens, birds, poultry farming] }
+    - { canonical: BAY LEAF,     payments: 48,  raw_spellings: [Bay Leaf], aliases: [bayleaf, tejpatta, tejpata] }
+    - { canonical: FRUITS,       payments: 44,  raw_spellings: [Fruits], aliases: [fruit, horticulture] }
+    - { canonical: PINEAPPLE,    payments: 41,  raw_spellings: [PINEAPPLE, Pineapple], aliases: [pineapples, anaras] }
+    - { canonical: MUSTARD,      payments: 35,  raw_spellings: [Mustard], aliases: [mustard seed, sarson] }
+    - { canonical: MUSHROOM,     payments: 34,  raw_spellings: [MUSHROOM, Mushroom], aliases: [mushrooms, mushroom cultivation] }
+    - { canonical: ARECANUT,     payments: 25,  raw_spellings: [Arecanut], aliases: [areca, areca nut, betel nut, supari, kwai] }
+    - { canonical: FISHERY,      payments: 20,  raw_spellings: [FISHERY, Fishery], aliases: [fish, fisheries, fish farming, pisciculture] }
+    - { canonical: JACKFRUIT,    payments: 15,  raw_spellings: [Jackfruit], aliases: [jack fruit, kathal] }
+    - { canonical: BETEL LEAF,   payments: 15,  raw_spellings: [Betel Leaf, Betel leaf], aliases: [betelleaf, paan, pan leaf] }
+    - { canonical: ORANGE,       payments: 14,  raw_spellings: [Orange], aliases: [oranges, citrus, khasi mandarin] }
+    - { canonical: TOMATO,       payments: 13,  raw_spellings: [Tomato], aliases: [tomatoes] }
+    - { canonical: TEA,          payments: 12,  raw_spellings: [Tea], aliases: [tea cultivation, tea garden] }
+    - { canonical: RUBBER,       payments: 10,  raw_spellings: [Rubber], aliases: [rubber plantation] }
+    - { canonical: APICULTURE,   payments: 8,   raw_spellings: [Apiculture], aliases: [bee, bees, beekeeping, bee keeping] }
+    - { canonical: SILKWORM,     payments: 8,   raw_spellings: [Silkworm], aliases: [silk worm, silkworms] }
+    - { canonical: SERICULTURE,  payments: 7,   raw_spellings: [Sericulture], aliases: [silk, silk rearing] }
+    - { canonical: CABBAGE,      payments: 7,   raw_spellings: [Cabbage], aliases: [cabbages] }
+    - { canonical: WEAVING,      payments: 6,   raw_spellings: [Weaving], aliases: [weavers, weaver] }
+    - { canonical: HONEY,        payments: 5,   raw_spellings: [Honey], aliases: [honey production] }
+    - { canonical: HANDLOOM,     payments: 3,   raw_spellings: [HANDLOOM, Handloom], aliases: [hand loom, loom] }
+    - { canonical: LONG PEPPER,  payments: 3,   raw_spellings: [Long Pepper, Long pepper, long pepper], aliases: [longpepper, pipli] }
+    - { canonical: LIVESTOCK (GOAT), payments: 2, raw_spellings: ["Livestock (Goat)"], aliases: [goat, goats, goatery, livestock] }
+    - { canonical: OTHERS,       payments: 2,   raw_spellings: [Others], aliases: [other, miscellaneous] }
+    - { canonical: DAIRY,        payments: 2,   raw_spellings: [Dairy], aliases: [milk, cow, cattle, dairy farming] }
+    - { canonical: COFFEE,       payments: 1,   raw_spellings: [Coffee] }
+    - { canonical: CAULIFLOWER,  payments: 1,   raw_spellings: [Cauliflower] }
+    - { canonical: HANDICRAFT,   payments: 1,   raw_spellings: [Handicraft], aliases: [handicrafts, craft] }
+    - { canonical: LEMON,        payments: 1,   raw_spellings: [Lemon], aliases: [lemons, nimbu] }
+    - { canonical: LICHI,        payments: 1,   raw_spellings: [Lichi], aliases: [litchi, lychee] }
+    - { canonical: PEPPER,       payments: 1,   raw_spellings: [Pepper], note: "distinct from BLACK PEPPER and WILD PEPPER - do not merge" }
+    - { canonical: PUMPKIN,      payments: 1,   raw_spellings: [Pumpkin], aliases: [pumpkins] }
+    - { canonical: VEGETABLES (MUSHROOM), payments: 1, raw_spellings: ["Vegetables (Mushroom)"], note: "a compound label; do not merge into VEGETABLES or MUSHROOM" }
+    - { canonical: WILD PEPPER,  payments: 1,   raw_spellings: [Wild pepper], note: "distinct from PEPPER and BLACK PEPPER" }
+
+    long_tail_note: >
+      Nine products have a single payment each. A "top products" answer is really about
+      the first six, which cover 2,151 of the 3,112 product-bearing payments. Do not
+      present a one-payment product as a programme finding.
+
+  bank:
+    column: bank_name
+    stored_case: Title Case - NOT uppercased, unlike district and block
+    distinct: 13
+    nulls: 276
+    sql_predicate: "bank_name = '<canonical>'"
+    usable: true
+    usable_note: >
+      UNLIKE FOCUS PLUS, bank-wise analysis is legitimate here. Focus Plus withholds
+      bank_name_raw from its view because the values are inconsistent between cohorts;
+      this view exposes bank_name and the values are clean. bank_name is institution-level
+      data, not personal data.
+    concentration: >
+      Two banks carry 13,444 of 14,569 payments - 92%. Any "bank concentration" finding is
+      that one sentence.
+    values:
+    - { canonical: "Meghalaya Rural Bank",             payments: 8174, groups: 6650, ifscs: 23, aliases: [MRB, meghalaya rural, rural bank, MGB] }
+    - { canonical: "Meghalaya Co-operative Apex Bank", payments: 5270, groups: 4517, ifscs: 62, aliases: [MCAB, apex bank, co-operative apex, cooperative apex, meghalaya cooperative, meghalaya co operative apex bank] }
+    - { canonical: "State Bank Of India",              payments: 464,  groups: 400,  ifscs: 32, aliases: [SBI, state bank, state bank of india] }
+    - { canonical: "Hdfc Bank",                        payments: 227,  groups: 199,  ifscs: 5,  aliases: [HDFC, hdfc bank ltd] }
+    - { canonical: "North East Small Finance Bank",    payments: 79,   groups: 53,   ifscs: 2,  aliases: [NESFB, north east small finance, NE small finance] }
+    - { canonical: "Union Bank Of India",              payments: 21,   groups: 18,   ifscs: 2,  aliases: [UBI, union bank] }
+    - { canonical: "Uco Bank",                         payments: 19,   groups: 16,   ifscs: 3,  aliases: [UCO, uco] }
+    - { canonical: "Indian Bank",                      payments: 13,   groups: 10,   ifscs: 1,  aliases: [indian bank] }
+    - { canonical: "Central Bank Of India",            payments: 12,   groups: 10,   ifscs: 3,  aliases: [CBI, central bank] }
+    - { canonical: "Canara Bank",                      payments: 10,   groups: 10,   ifscs: 5,  aliases: [canara] }
+    - { canonical: "Punjab National Bank",             payments: 2,    groups: 2,    ifscs: 2,  aliases: [PNB, punjab national] }
+    - { canonical: "Bank Of Baroda",                   payments: 1,    groups: 1,    ifscs: 1,  aliases: [BOB, baroda] }
+    - { canonical: "United Bank Of India",             payments: 1,    groups: 1,    ifscs: 1,  aliases: [UBI united, united bank] }
+    null_rule: >
+      276 payments have no bank name but DO have an IFSC code. Render them as "not
+      recorded", never merge them into another bank, and use ifsc_code to identify the
+      institution where it matters.
+    ubi_collision: >
+      "UBI" is claimed by both Union Bank Of India (21 payments) and United Bank Of India
+      (1 payment). Treat a bare "UBI" as ambiguous and ask; do not silently pick the
+      larger.
+
+  ifsc:
+    column: ifsc_code
+    distinct: 113
+    nulls: 0
+    sql_predicate: "ifsc_code = '<canonical>'"
+    completeness: The most complete banking column in the partition - present on every payment.
+    sponsor_code_trap:
+      critical: true
+      value: SBIN0RRMEGB
+      payments: 8328
+      text: >
+        This single code covers 8,328 of 14,569 payments because it is Meghalaya Rural
+        Bank's sponsor-bank-issued code, NOT a branch. Never present a count of IFSC
+        codes as a count of branches, and never describe SBIN0RRMEGB as "the busiest
+        branch".
+    not_one_to_one_with_bank:
+      critical: true
+      measured: { ifsc_codes_carrying_more_than_one_bank_name: 19 }
+      worst_case: >
+        SBIN0RRMEGB appears against SEVEN different bank_name values - Meghalaya Rural
+        Bank (7,976), NULL (190), Meghalaya Co-operative Apex Bank (118), State Bank Of
+        India (34), Uco Bank (5), Central Bank Of India (2), Hdfc Bank (2) and United Bank
+        Of India (1).
+      text: >
+        The IFSC-to-bank relationship is dirty in the source. Do NOT use ifsc_code to
+        "correct" bank_name, or vice versa, and do not report a bank-by-IFSC cross-tab as
+        a finding about banking structure - it is a finding about data entry.
+    character_confusion:
+      text: >
+        The Apex Bank's sponsor codes appear as both YESB0MCA0xx (digit zero) and
+        YESBOMCA008 (letter O). Fold O to 0 from position 5 onward when matching, and
+        record which raw form was seen. Report the pair as a data-quality observation if
+        an IFSC-level answer depends on it.
+    pii_status: Not personal data - an IFSC identifies a branch, not an account. It may be reported.
+
+  branch:
+    column: branch_raw
+    distinct: 182
+    populated_rows: 3192
+    populated_pct: 22
+    stored_form: raw free text, unnormalised
+    coverage_by_year: { '2021-22': "965 of 965", '2022-23': "2,002 of 2,139",
+                        '2024-25': "1 of 2,653", '2025-26': "224 of 8,812" }
+    prefer: >
+      Use ifsc_code for branch-level questions - it is on every payment. Reach for
+      branch_raw only when the user explicitly asks for the recorded branch name, and say
+      it covers 22% of payments.
+    sample_values: [Williamnagar, Nongstoin, Tura, Jowai, Shillong, Mairang, Resubelpara]
+
+  financial_year:
+    stored_column: financial_year / financial_year_short on curated.v_focus_legacy
+    key_column: year_key
+    source: curated.dim_year, pre-joined into the view
+    definition: April 1 to March 31, labelled by the starting year, e.g. 2025-26
+    sql_predicate: "financial_year_short = '<canonical>'"
+    sql_predicate_by_key: "year_key = <start_year>"
+    prefer: >
+      financial_year_short is the form the source workbook used, so it is the form users
+      type. Prefer it over the char(9) financial_year for equality filters.
+    distinct: 4
+    closed_set: true
+    covers_every_payment: >
+      Every source row carries a financial year, and the April-March bucket derived from
+      date_of_remittance agrees with it on all 14,398 dated rows - zero mismatches. So an
+      FY grouping loses nothing, while a date grouping loses the 171 dateless payments.
+    gap_rule:
+      critical: true
+      missing_year: '2023-24'
+      text: >
+        FY2023-24 HOLDS NO FOCUS LEGACY PAYMENTS. dim_year contains the row, so a GROUP BY
+        returns no line for it rather than a zero. Never plot through the gap, never call
+        it a decline, and never let "the previous year" step into it - the year before
+        FY2024-25 with payments is FY2022-23. Whether the gap is a programme pause or an
+        extract gap is UNKNOWN; say so rather than choosing.
+    values:
+    - canonical: "2021-22"
+      range: { start: '2021-04-01', end_exclusive: '2022-04-01' }
+      payments: 965
+      groups: 965
+      members: 13647
+      amount: 68235000
+      remittance_dates: 15
+      first_payment: '2021-08-31'
+      last_payment: '2022-03-31'
+      dateless: 1
+      aliases: ["FY2021-22", "FY 2021-22", "2021-2022", "FY2021-2022", "2021/22", "financial year 2021-22", "fiscal 2021-22", "2021-22 FY"]
+    - canonical: "2022-23"
+      range: { start: '2022-04-01', end_exclusive: '2023-04-01' }
+      payments: 2139
+      groups: 2138
+      members: 28358
+      amount: 141790000
+      remittance_dates: 7
+      first_payment: '2022-04-20'
+      last_payment: '2022-05-31'
+      dateless: 0
+      aliases: ["FY2022-23", "FY 2022-23", "2022-2023", "FY2022-2023", "2022/23", "financial year 2022-23", "fiscal 2022-23", "2022-23 FY"]
+      note: >
+        Every payment in this year was made in April and May 2022. The FY label spans
+        twelve months; the money moved in six weeks.
+    - canonical: "2024-25"
+      range: { start: '2024-04-01', end_exclusive: '2025-04-01' }
+      payments: 2653
+      groups: 2653
+      members: 22998
+      amount: 114990000
+      remittance_dates: 2
+      first_payment: '2024-10-07'
+      last_payment: '2024-10-08'
+      dateless: 0
+      aliases: ["FY2024-25", "FY 2024-25", "2024-2025", "FY2024-2025", "2024/25", "financial year 2024-25", "fiscal 2024-25", "2024-25 FY"]
+      note: The whole year is two days in October 2024, and 2,331 of the 2,653 payments fall on one of them.
+    - canonical: "2025-26"
+      range: { start: '2025-04-01', end_exclusive: '2026-04-01' }
+      payments: 8812
+      groups: 8806
+      members: 37018
+      amount: 185090000
+      remittance_dates: 6
+      first_payment: '2025-06-18'
+      last_payment: '2026-03-31'
+      dateless: 170
+      aliases: ["FY2025-26", "FY 2025-26", "2025-2026", "FY2025-2026", "2025/26", "financial year 2025-26", "fiscal 2025-26", "2025-26 FY"]
+      note: >
+        60% of the scheme. Includes all 706 Focus (Addnl) top-up payments and all but one
+        of the 171 dateless rows.
+    relative_terms:
+      latest / current / most recent: '2025-26'
+      previous / last year: '2024-25'
+      the year before that: '2022-23'      # NOT 2023-24 - it holds no payments
+      earliest / first: '2021-22'
+      all years / overall / since inception / till date: no year filter at all
+
+  calendar_year:
+    derivation: EXTRACT(YEAR FROM date_of_remittance)
+    range: 2021 to 2026
+    data_span: { first_payment: '2021-08-31', last_payment: '2026-03-31' }
+    nulls: 171
+    sql_predicate: "date_of_remittance >= '<YYYY>-01-01' AND date_of_remittance < '<YYYY+1>-01-01'"
+    payment_counts:
+      2021: 299
+      2022: 2804
+      2023: 0
+      2024: 2653
+      2025: 8609
+      2026: 33
+    note: >
+      Calendar 2023 holds ZERO payments, matching the FY2023-24 gap. Calendar 2022 holds
+      2,804 payments that span two financial years - 665 in FY2021-22 and 2,139 in
+      FY2022-23.
+
+  year_disambiguation:
+    critical: true
+    problem: >
+      A bare year means different things and the gap is large. Calendar 2022 has 2,804
+      payments; FY2022-23 has 2,139 - a 31% difference. Calendar 2025 has 8,609; FY2025-26
+      has 8,812. Silently choosing one is a materially wrong answer.
+    rules:
+    - A hyphenated or slashed year ("2025-26", "2025/26", "FY 2025") is a FINANCIAL year.
+    - The words "financial year", "FY", "fiscal" force the financial-year reading.
+    - A bare four-digit year ("in 2022", "during 2024") defaults to CALENDAR year, filtered
+      on date_of_remittance. State the assumption, and note that a calendar filter drops
+      the 171 dateless payments while a financial-year filter keeps them.
+    - "A bare 2023 is a special case: BOTH readings are empty. Say that the scheme has no
+      payments in calendar 2023 or FY2023-24, rather than returning an empty result."
+    - When the phrasing is genuinely unclear and the two readings differ materially, ask.
+
+  remittance_date:
+    column: date_of_remittance
+    type: date
+    nulls: 171
+    min: '2021-08-31'
+    max: '2026-03-31'
+    distinct_dates: 30
+    sql_predicate_range: "date_of_remittance >= '<from>' AND date_of_remittance < '<to_exclusive>'"
+    batch_rule:
+      critical: true
+      text: >
+        THIS IS NOT A CONTINUOUS DATE. Money moves in 30 bulk treasury runs across five
+        years. Three dates carry 9,193 of 14,569 payments. A daily or monthly series is a
+        picture of BATCHES, not of a payment rate: label it as such, never interpolate
+        between runs, and never report a month with no batch as a month of zero
+        disbursement.
+    month_names: >
+      Accept "October 2024", "Oct 24", "Q3 2025" and similar. Convert to an explicit
+      half-open date range. Quarters are calendar quarters unless the user says "financial
+      quarter", in which case Q1 = April-June.
+    out_of_range: >
+      Anything before 2021-08-31 or after 2026-03-31 has no payments, and the whole of
+      calendar 2023 is empty. Say so with the actual span rather than returning an empty
+      result with no explanation.
+    batches:
+    - { date: '2021-08-31', fy: '2021-22', payments: 32,   amount: 1930000 }
+    - { date: '2021-09-20', fy: '2021-22', payments: 54,   amount: 3160000 }
+    - { date: '2021-10-06', fy: '2021-22', payments: 17,   amount: 1430000 }
+    - { date: '2021-11-15', fy: '2021-22', payments: 156,  amount: 11265000 }
+    - { date: '2021-12-09', fy: '2021-22', payments: 36,   amount: 2195000 }
+    - { date: '2021-12-23', fy: '2021-22', payments: 4,    amount: 330000 }
+    - { date: '2022-02-21', fy: '2021-22', payments: 39,   amount: 3130000 }
+    - { date: '2022-02-24', fy: '2021-22', payments: 28,   amount: 2140000 }
+    - { date: '2022-02-25', fy: '2021-22', payments: 1,    amount: 100000 }
+    - { date: '2022-03-09', fy: '2021-22', payments: 24,   amount: 1740000 }
+    - { date: '2022-03-15', fy: '2021-22', payments: 117,  amount: 8140000 }
+    - { date: '2022-03-16', fy: '2021-22', payments: 64,   amount: 4480000 }
+    - { date: '2022-03-25', fy: '2021-22', payments: 139,  amount: 11505000 }
+    - { date: '2022-03-30', fy: '2021-22', payments: 1,    amount: 55000 }
+    - { date: '2022-03-31', fy: '2021-22', payments: 252,  amount: 16580000 }
+    - { date: '2022-04-20', fy: '2022-23', payments: 228,  amount: 15090000 }
+    - { date: '2022-04-25', fy: '2022-23', payments: 219,  amount: 13500000 }
+    - { date: '2022-04-29', fy: '2022-23', payments: 201,  amount: 14940000 }
+    - { date: '2022-04-30', fy: '2022-23', payments: 120,  amount: 8505000 }
+    - { date: '2022-05-17', fy: '2022-23', payments: 783,  amount: 50705000 }
+    - { date: '2022-05-18', fy: '2022-23', payments: 94,   amount: 6715000 }
+    - { date: '2022-05-31', fy: '2022-23', payments: 494,  amount: 32335000 }
+    - { date: '2024-10-07', fy: '2024-25', payments: 322,  amount: 13135000 }
+    - { date: '2024-10-08', fy: '2024-25', payments: 2331, amount: 101855000 }
+    - { date: '2025-06-18', fy: '2025-26', payments: 3359, amount: 61420000 }
+    - { date: '2025-06-20', fy: '2025-26', payments: 1041, amount: 15615000 }
+    - { date: '2025-06-26', fy: '2025-26', payments: 706,  amount: 18405000, note: "the entire Focus (Addnl) round" }
+    - { date: '2025-09-11', fy: '2025-26', payments: 3503, amount: 85650000 }
+    - { date: '2026-01-06', fy: '2025-26', payments: 25,   amount: 1540000 }
+    - { date: '2026-03-31', fy: '2025-26', payments: 8,    amount: 670000 }
+
+  identifiers:
+    pg_id:
+      column: pg_id
+      type: varchar(50)
+      unique_in_dimension: true
+      role: the natural key of curated.dim_producer_group and the only group identity
+      resolve_as: producer_group
+    focus_legacy_fact_id:
+      column: focus_legacy_fact_id
+      type: bigint
+      unique: true
+      role: primary key of the fact and the view
+      note: Surrogate and unstable across a reload. Never export it or quote it to a user.
+    source_row_id:
+      column: source_row_id
+      type: integer
+      unique: true
+      role: the source workbook's own `id`; the strongest row identity in the partition
+      note: >
+        Three ids from the workbook are absent from the database - 1148 or 2552 (one of
+        the disputed duplicate pair), 3101 and 14565. If a user quotes one of those, say
+        it was held back at load.
+    village_code:
+      column: village_code
+      type: integer
+      role: LGD village code - the national village identifier
+      note: Identifier, never a measure. Never SUM it.
+    ifsc_code:
+      column: ifsc_code
+      type: varchar(15)
+      role: branch identifier - reportable
+    account_no_masked:
+      column: account_no_masked
+      type: text
+      role: display only
+      critical: >
+        NOT AN IDENTIFIER AND NOT COUNTABLE. Masking is not collision-free - two accounts
+        of the same length ending in the same four digits collapse to one string. Never
+        COUNT(DISTINCT account_no_masked). Display it only for one named group's payment
+        history, never in a bulk export.
+    account_no:
+      column: fact_focus_legacy_disbursement.account_no
+      status: OUT_OF_SCOPE
+      critical: This resolver never resolves or returns it. Emit the `refused` output shape.
+    name_on_the_account:
+      column: fact_focus_legacy_disbursement.name_on_the_account
+      status: OUT_OF_SCOPE
+      critical: >
+        PII, marked is_chatbot_visible = false. Never resolved, never returned, never
+        offered as a search path. Emit the `refused` output shape.
+
+# ---------------------------------------------------------------------------
+measure_vocabulary:
+
+  amount_disbursed:
+    column: amount_disbursed
+    aliases: [amount, amount disbursed, disbursement, disbursed, money, funds, payment,
+              remittance, remitted, released, total amount, spend, expenditure]
+    aggregate: SUM(amount_disbursed)
+    distinct_values: 21
+    nulls: 0
+    unit: UNVERIFIED - read curated.dim_scheme.money_unit
+    source_total: 510105000
+    critical:
+      text: >
+        FULLY DERIVED: amount_disbursed = no_of_pg_members x 5000 on every one of the
+        14,569 source rows, confirmed by the DB table comment and re-confirmed on
+        2026-09-21. The consequences the generator must respect:
+          - SUM(amount) is exactly 5000 * SUM(members). The two carry the same information.
+          - AVG(amount) is 5000 * average group size. It is NOT an entitlement and it does
+            NOT move when policy moves.
+          - "Per member" is the constant 5,000. State the rate; do not compute a ratio.
+          - Ranking by amount and ranking by members produce the SAME order. Never present
+            them as two findings.
+          - A correlation or regression between the two is degenerate.
+    all_values: [5000, 10000, 15000, 20000, 25000, 30000, 35000, 40000, 45000, 50000,
+                 55000, 60000, 65000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 950000]
+    outlier: { value: 950000, payments: 1, pg_id: PG-FOCUS-WKH-3565, members: 190 }
+
+  no_of_pg_members:
+    column: no_of_pg_members
+    aliases: [members, number of members, membership, group size, PG members, member count,
+              how many members, people covered]
+    aggregate: SUM(no_of_pg_members)
+    distinct_values: 21
+    nulls: 0
+    source_total: 102021
+    distribution: { min: 1, median: 6, mean: 7.0, max: 190 }
+    critical: >
+      SUMMING COUNTS MEMBERSHIPS, NOT PEOPLE. A group paid in two years contributes its
+      membership twice, and its recorded size can differ between the two payments. There
+      is no person identifier, so a distinct-people figure is impossible. Say "memberships"
+      or "members covered", never "people".
+    outlier_rule: >
+      One payment carries 190 members against a next-largest of 20. Exclude it explicitly
+      or mention it whenever it would dominate an average or a maximum.
+
+  record_count:
+    aliases: [payments, disbursements, records, transactions, how many payments, count,
+              number of payments]
+    aggregate: COUNT(*)
+    default: true
+    mandatory_filter: none
+    note: >
+      One row = one payment to one group. There is NO always-on predicate on this
+      partition - PMAY's WHERE NOT is_placeholder has no counterpart here. COUNT(*)
+      exceeds the group count by about 2,663 because groups can be paid more than once.
+
+  group_count:
+    aliases: [producer groups, groups, PGs, how many groups, number of groups, organisations]
+    aggregate: COUNT(DISTINCT pg_id)
+    source_value: 11906
+    loaded_value: 11904
+    note: Never COUNT(DISTINCT pg_name) - names split and merge groups. See dimensions.producer_group.
+
+  village_count:
+    aliases: [villages, how many villages, number of villages, village coverage]
+    aggregate: COUNT(DISTINCT village_code)
+    mandatory_filter: "entity_type <> 'Unresolved'"
+    source_value: 3384
+    note: >
+      Village counts exclude the 1,101 placeholder payments, so a village-level total will
+      not reconcile to the scheme total. State the shortfall.
+
+  derived:
+    average_group_size: AVG(no_of_pg_members)
+    payments_per_group: "COUNT(*) / COUNT(DISTINCT pg_id)"
+    forbidden:
+    - "amount per member - it is the constant 5,000, not a calculation"
+    - "correlation between amount and members - the same column twice"
+    - "any rate, ratio or projection against an eligible-group denominator - none is held"
+
+# ---------------------------------------------------------------------------
+region_groupings:
+  note: >
+    Users group districts by hill range. These are not columns - expand into an IN list
+    and state which districts were included. Emit UPPERCASE district literals.
+  groups:
+    "Garo Hills":
+      districts: [West Garo Hills, North Garo Hills, East Garo Hills,
+                  South West Garo Hills, South Garo Hills]
+      payments: 7685
+      aliases: [Garo, Garo region, Garo Hills region, GH]
+    "Khasi Hills":
+      districts: [West Khasi Hills, Eastern West Khasi Hills, East Khasi Hills,
+                  South West Khasi Hills]
+      payments: 3553
+      aliases: [Khasi, Khasi region, Khasi Hills region, KH]
+    "Jaintia Hills":
+      districts: [West Jaintia Hills, East Jaintia Hills]
+      payments: 2098
+      aliases: [Jaintia, Jaintia region, Jaintia Hills region, JH]
+    "Ri Bhoi":
+      districts: [Ri Bhoi]
+      payments: 1233
+      aliases: [Ri Bhoi region, Bhoi]
+      note: >
+        Ri Bhoi belongs to no hill range - it is its own district and its own group. Both
+        readings produce the same filter, so no clarification is needed. Do not fold it
+        into Khasi Hills.
+  whole_state:
+    aliases: [Meghalaya, state, statewide, whole state, all districts, overall]
+    behaviour: no district filter at all.
+
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLES
+# ---------------------------------------------------------------------------
+worked_examples:
+
+- user: "how many Focus Legacy payments in WGH"
+  resolve:
+  - { text: WGH, type: district, canonical: West Garo Hills, lgd_code: 278, matched_by: 4_acronym }
+  - { text: "how many payments", type: measure, canonical: "COUNT(*)" }
+  sql: "SELECT COUNT(*) FROM curated.v_focus_legacy WHERE lgd_district = 'WEST GARO HILLS';"
+  expected: 3493
+  note: The district literal is UPPERCASE. A Title Case literal returns zero rows silently.
+
+- user: "how many producer groups got paid in West Garo Hills"
+  resolve:
+  - { text: West Garo Hills, type: district, canonical: West Garo Hills }
+  - { text: producer groups, type: measure, canonical: "COUNT(DISTINCT pg_id)" }
+  sql: "SELECT COUNT(DISTINCT pg_id) FROM curated.v_focus_legacy WHERE lgd_district = 'WEST GARO HILLS';"
+  expected: 2701
+  note: >
+    3,493 payments but only 2,701 groups - the two are not interchangeable. Say which one
+    the answer is.
+
+- user: "which district is PG-FOCUS-WKH-5956 in"
+  resolve:
+  - { text: PG-FOCUS-WKH-5956, type: producer_group, canonical: PG-FOCUS-WKH-5956, matched_by: 1_exact }
+  response_guidance: >
+    Answer from lgd_district, NOT from the WKH token in the id. Explain that the letters
+    record where the group enrolled and that 990 WKH-coded groups now sit in Eastern West
+    Khasi Hills after the district split.
+  forbidden_sql: "... WHERE lgd_district = 'WEST KHASI HILLS'   -- inferred from the id"
+
+- user: "find the group called Muskan"
+  resolve:
+  - { text: Muskan, type: producer_group, status: ambiguous, matched_by: 5_contains }
+  response:
+    status: ambiguous
+    note: >
+      The same group appears as "Muskan Producer Group" and "Muskan Pg" on two payments.
+      Return the distinct pg_id values with their district and village, ask which is meant,
+      then query on pg_id.
+  sql: "SELECT DISTINCT pg_id, pg_name, lgd_district, lgd_village_name FROM curated.v_focus_legacy WHERE pg_name ILIKE '%muskan%';"
+
+- user: "total disbursed in 2022"
+  resolve:
+  - { text: "2022", type: calendar_year, canonical: 2022, assumption: calendar }
+  sql: "SELECT SUM(amount_disbursed) FROM curated.v_focus_legacy WHERE date_of_remittance >= '2022-01-01' AND date_of_remittance < '2023-01-01';"
+  expected_payments: 2804
+  note: >
+    Calendar 2022 spans two financial years - 665 payments in FY2021-22 and 2,139 in
+    FY2022-23. State that calendar year was assumed and offer FY2022-23 (2,139) as the
+    alternative.
+
+- user: "total disbursed in FY 2022-23"
+  resolve:
+  - { text: "FY 2022-23", type: financial_year, canonical: '2022-23' }
+  sql: "SELECT SUM(amount_disbursed) FROM curated.v_focus_legacy WHERE financial_year_short = '2022-23';"
+  expected: 141790000
+  note: >
+    A different population from the calendar reading above - 2,139 payments against 2,804.
+    This is why year_disambiguation matters.
+
+- user: "how much was disbursed in 2023"
+  resolve:
+  - { text: "2023", type: calendar_year, canonical: 2023, status: empty_both_readings }
+  response_guidance: >
+    BOTH readings are empty - calendar 2023 has no payments and FY2023-24 has none either.
+    Say the scheme has a one-year gap between FY2022-23 and FY2024-25, rather than
+    returning zero with no explanation.
+
+- user: "top 5 products"
+  resolve:
+  - { text: products, type: product, canonical_group: all, folding: required }
+  sql: "SELECT UPPER(TRIM(product_raw)) AS product, COUNT(*) AS payments FROM curated.v_focus_legacy WHERE product_raw IS NOT NULL GROUP BY 1 ORDER BY payments DESC LIMIT 5;"
+  expected: [PIGGERY 877, GINGER 429, VEGETABLES 340, "BROOM GRASS 230", TURMERIC 167]
+  note: >
+    Case folding is mandatory. Without it PIGGERY (632), Piggery and piggery appear as
+    three rows and the leader is understated by 245 payments. The answer must also state
+    that product covers FY2021-22 and FY2022-23 only - 21% of payments.
+
+- user: "how many villages did Focus Legacy reach in Ri Bhoi"
+  resolve:
+  - { text: Ri Bhoi, type: district, canonical: Ri Bhoi }
+  - { text: how many villages, type: measure, canonical: "COUNT(DISTINCT village_code)" }
+  sql: "SELECT COUNT(DISTINCT village_code) FROM curated.v_focus_legacy WHERE lgd_district = 'RI BHOI' AND entity_type <> 'Unresolved';"
+  expected: 281
+  note: The Unresolved exclusion is mandatory for a village count and only for a village count.
+
+- user: "Focus Legacy payments in Asimgre"
+  resolve:
+  - { text: Asimgre, type: village, status: ambiguous }
+  response:
+    status: ambiguous
+    candidates: 5 distinct village codes named ASIMGRE
+    districts: [East Garo Hills, South West Garo Hills, West Garo Hills]
+    question: "Asimgre exists in three districts, with five different village codes. Which one did you mean?"
+  note: never pick the first row.
+
+- user: "payments in Songsak"
+  resolve:
+  - { text: Songsak, type: block, canonical: Songsak, lgd_code: 1973, assumption: default_level }
+  note: >
+    Songsak is both a block in East Garo Hills and a village name. With no level word the
+    default is block - say so in the answer.
+
+- user: "which bank handles most Focus Legacy payments"
+  resolve:
+  - { text: bank, type: bank, canonical_group: all }
+  sql: "SELECT bank_name, COUNT(*) AS payments FROM curated.v_focus_legacy GROUP BY bank_name ORDER BY payments DESC;"
+  expected: ["Meghalaya Rural Bank 8174", "Meghalaya Co-operative Apex Bank 5270"]
+  note: >
+    Legitimate for this scheme, unlike Focus Plus. Report the 276 payments with no bank
+    name as "not recorded", and do not use ifsc_code to fill them in - the IFSC-to-bank
+    mapping is dirty.
+
+- user: "average payment per group"
+  resolve:
+  - { text: average payment, type: measure, canonical: "AVG(amount_disbursed)" }
+  response_guidance: >
+    Answer, but state that amount is fixed at Rs 5,000 per member, so the average amount
+    is the average group size multiplied by 5,000 - about 7 members, so about Rs 35,000.
+    It measures membership, not entitlement.
+
+- user: "who is the account holder for PG-FOCUS-WGH-7089"
+  resolve:
+  - { text: PG-FOCUS-WGH-7089, type: producer_group, canonical: PG-FOCUS-WGH-7089 }
+  - { text: account holder, type: account_holder_name, status: refused }
+  response:
+    status: refused
+    message: >
+      The account-holder name is personal data held for audit only and is outside the
+      approved query surface. Offer the masked account number and the payment history for
+      that group instead.
+
+- user: "show me Focus beneficiaries"
+  resolve:
+  - { text: Focus, type: scheme, status: ambiguous }
+  - { text: beneficiaries, type: overloaded, status: ambiguous }
+  response:
+    status: ambiguous
+    question: >
+      Two questions at once - which scheme (Focus Legacy pays producer groups, Focus Plus
+      pays individuals), and which count (payments, groups, or memberships)? Resolve the
+      scheme first.
+
+# ---------------------------------------------------------------------------
+maintenance:
+  source_files:
+  - "datasets/Focus legacy/Focus Legacy to share to BLH.xlsx"   # Sheet1, 14569 x 22
+  schema_authority: SCHEMA_FOR_DEVELOPERS.md   # live information_schema extract, 2026-09-21
+  row_counts_at_generation: { source_workbook: 14569, quarantined: 3, "curated.v_focus_legacy": 14566 }
+  data_span_in_source: { first_payment: '2021-08-31', last_payment: '2026-03-31' }
+  last_generated: '2026-09-21'
+
+  open_verification_tasks:
+    critical: true
+    note: >
+      This file was written from the workbook plus the structural extract. The catalogues
+      are source observations. Each item below is a query to run before any Focus Legacy
+      answer ships.
+    tasks:
+    - "dim_pg_entity_type: SELECT type_code, type_name, source_id_prefix - the three
+       stored codes are UNKNOWN to this file and block every entity-type filter."
+    - "programme_variant: SELECT DISTINCT programme_variant - confirm 'FOCUS' and
+       'Focus (Addnl)' survived the load verbatim."
+    - "dim_scheme: SELECT scheme_code, money_unit WHERE this scheme - the unit is
+       unconfirmed and no money figure ships without it."
+    - "Geography casing: confirm lgd_district and lgd_block are stored UPPERCASE and
+       lgd_village_name is not."
+    - "Unresolved placeholders: SELECT COUNT(*) WHERE entity_type = 'Unresolved' - expect
+       about 1,101 - and check what those rows store in lgd_block."
+    - "year_key: SELECT COUNT(*) WHERE year_key IS NULL - expect zero; a non-zero result
+       is a load defect."
+    - "product_raw: confirm the 62 raw spellings survived verbatim and that no
+       normalisation happened at load."
+    - "account_no: confirm whether the 78 embedded spaces were stripped, which changes the
+       length of account_no_masked."
+    - "meta.v_access_matrix: confirm megh_readonly can read the view and CANNOT read the
+       fact or bridge_pg_bank_history."
+
+  regeneration_rules:
+  - Re-profile the workbook AND re-query megh_db. Diff every count here. Explain each change.
+  - "Re-run the entitlement identity test. If amount = members x 5000 ever stops holding,
+    that break is the headline finding and measure_vocabulary must be rewritten."
+  - APPEND new canonical values and aliases. Never delete one - old questions must keep
+    resolving.
+  - Re-run the village ambiguity registry. If a name gains a code it must appear here.
+  - Re-check the pg_id district-token disagreement count. A further district split changes it.
+  - "Re-check the product coverage cliff. If the field starts being captured again, the
+    FY2021-22/FY2022-23 caveat must be narrowed rather than dropped."
+  - Watch the FY2023-24 gap. If a later load fills it, every gap rule here must be revisited.
+  - Bump resolver_version.
+
+  companion_files:
+  - Annotations/Focus_Legacy/focuslegacy_schema_partitions.yaml
+  - Annotations/Focus_Legacy/focuslegacy_classification_rules.yaml
+  - Annotations/Focus_Legacy/focuslegacy_default_rules.yaml
+  - Annotations/Focus_Legacy/README.md
+  - SCHEMA_FOR_DEVELOPERS.md
+  - Annotations/PMAY/pmay_entity_resolver.yaml   # the file format this one follows

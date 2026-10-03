@@ -1,0 +1,1581 @@
+resolver_version: '1.0'
+resolver_name: cmelevatelegacy_entity_resolver
+display_name: CM Elevate Legacy (Disbursement) Entity Resolver (Meghalaya) - curated star schema
+generated_from:
+- datasets/CMelevate Legacy/Cm Elevate to share to BLH.xlsx      # Sheet1, 2823 x 43
+- datasets/CMelevate Legacy/Use_Cases_-_CM_Elevate.xlsx          # CM Elevate Legacy, 36 x 3
+- SCHEMA_FOR_DEVELOPERS.md (live information_schema extract, 2026-09-22)
+generated_on: '2026-09-23'
+companion_schema: cmelevatelegacy_schema_partitions.yaml
+
+# ===========================================================================
+# v1.0 - 2026-09-23 - WRITTEN AGAINST THE LIVE DATABASE
+#
+# There is no flat-table ancestor for this scheme, so nothing here is a
+# migration note. The value catalogues below are read from the source workbook;
+# the column names and predicates are read from the live curated view.
+#
+# THE ONE RULE THAT OUTRANKS EVERY OTHER IN THIS FILE
+#   Two schemes in megh_db are called "CM Elevate". This resolver serves the
+#   DISBURSEMENT one (curated.v_cm_elevate_disbursement, 13 schemes, money and
+#   financial year). The other is the APPLICATION one (curated.v_cm_elevate,
+#   15 schemes, no money and no time). They share no identifier, the join is
+#   prohibited, and resolving a scheme name against the wrong catalogue is the
+#   most damaging mistake available here. See scheme.disambiguation.
+#
+# All record counts, distinct counts and value distributions below are from the
+# source workbook (2,823 rows, profiled 2026-09-23) and have NOT been re-verified
+# against megh_db, which holds 2,822 after one quarantine.
+# ===========================================================================
+
+description: >
+  Value-level entity resolution for the CM Elevate Legacy NLP-to-SQL bot. This file
+  answers exactly one question: the user typed some text - which stored database value
+  did they mean? It does NOT define column meanings or aggregation; that is the
+  companion stage2 semantic schema. Resolve entities with this file FIRST, then hand the
+  resolved canonical values to schema linking and SQL generation.
+
+scheme:
+  id: cm_elevate_legacy
+  display_name: CM Elevate Legacy
+  full_name: CM Elevate Disbursement (Meghalaya)
+  state: Meghalaya
+  source_system: cm_elevate_disbursement
+  aliases: ["CM Elevate Legacy", "CM-ELEVATE Legacy", "CM Elevate Disbursement",
+            "CM Elevate disbursements", "CM Elevate legacy data", "Elevate legacy",
+            "CM Elevate sanctions", "CM Elevate loans", "CM Elevate subsidy"]
+  ambiguous_aliases: ["CM Elevate", "CM-ELEVATE", "CMELEVATE", "CM elevate scheme",
+                      "Elevate", "Chief Minister Elevate"]
+  disambiguation:
+    critical: true
+    text: >
+      The aliases under ambiguous_aliases match BOTH CM Elevate schemes and must never
+      be resolved silently. Route to the clarification gate
+      (cm_elevate_scheme_ambiguous) unless the question also names a field that exists
+      in only one of them.
+    this_partition_if_question_mentions:
+    - sanctioned, sanction amount, entitlement
+    - disbursed, disbursement, subsidy, loan, instalment, tranche
+    - lender, bank, LIFCOM
+    - refused, desanctioned, duplicate
+    - financial year, FY, 2024-25, 2025-26
+    - any of the 13 scheme names below
+    other_partition_if_question_mentions:
+    - application status, current level, file status
+    - applicant category, individual / registered / unregistered group
+    - on hold, withdrawn, data verified
+    - request id
+    - a scheme name that is in the 15-scheme catalogue but not the 13-scheme one
+      (e.g. Piggery appears in both - that one does NOT disambiguate)
+
+tables:
+  disbursements: curated.v_cm_elevate_disbursement     # primary query surface, 38 columns
+  fact: curated.fact_cm_elevate_disbursement           # underlying fact, 38 columns
+  scheme_dimension: curated.dim_cm_elevate_disb_scheme # 13 rows
+  cross_scheme_money: none_for_this_scheme
+  cross_scheme_coverage: none_for_this_scheme
+  cross_scheme_note: >
+    curated.v_cross_scheme_money_district_year and
+    curated.v_cross_scheme_village_coverage cover MGNREGA and PMAY only. This scheme
+    appears in neither, so there is no sanctioned cross-scheme surface to resolve to.
+
+dataset_shape:
+  grain: one row per applicant's sanction-and-disbursement record
+  row_count: unverified_in_db
+  row_count_note: >
+    The source workbook holds 2,823 rows; one was quarantined at load
+    (source_row_id 2392, corrupted_identity), so 2,822 is expected. Unmeasured.
+  single_table: false
+  emits_no_joins: >
+    curated.v_cm_elevate_disbursement already pre-joins dim_cm_elevate_disb_scheme,
+    dim_geography and dim_year, so the generator emits WHERE and GROUP BY only. See
+    cmelevatelegacy_foreign_key_augmentation.yaml.
+
+# ---------------------------------------------------------------------------
+# HOW TO USE THIS FILE
+# ---------------------------------------------------------------------------
+how_to_use:
+  step_1_classify: >
+    Decide the entity type of each span of user text. Order matters because block and
+    village names collide - see cross_dimension_collisions. Try: scheme ->
+    financial_year -> district -> block -> village -> loan_entity ->
+    loan_disbursed_status -> desanctioned_reason -> identifier -> measure.
+  step_2_normalise: Apply normalisation.fold to the user text and to candidate values.
+  step_3_match: Walk matching_pipeline in order; stop at the first stage that hits.
+  step_4_emit: Return an output_contract shape. Never put raw user text into SQL.
+  step_5_predicate: Build WHERE using the dimension's sql_predicate template.
+
+  hard_rules:
+  - "WHICH CM ELEVATE COMES FIRST. A bare 'CM Elevate' resolves to nothing until the
+    gate has settled which of the two schemes is meant."
+  - "NEVER PARSE application_number. The leading letters are not a scheme code - 7 of the
+    13 schemes use more than one prefix, and one Poultry record carries Piggery's MPDSI
+    prefix. Resolve the scheme through scheme_name only."
+  - "The two Sericulture schemes differ by ONE SPACE before the bracket. Emit the stored
+    form exactly; an exact match on the wrong spelling returns zero rows silently."
+  - "lgd_district and lgd_block are documented as stored UPPERCASE in dim_geography.
+    lgd_village_name keeps its stored mixed case. Always compare case-folded, and emit
+    the form the column actually stores. The casing is UNCONFIRMED for this partition -
+    see maintenance.open_verification_tasks."
+  - Villages are resolved by village_code, never by name alone. 17 village names in this
+    data are shared by two or more different villages.
+  - "District and block have NO CODE COLUMN in the curated layer. A user who supplies an
+    LGD district code can be resolved to the NAME using the catalogue below, but the code
+    itself can never appear in a WHERE clause."
+  - "Applicant names are not in the query surface. first_name, middle_name and last_name
+    are dropped by the view. A name lookup returns not-held, never a guess, and there is
+    no did-you-mean to offer."
+  - "There is NO MANDATORY ROW FILTER in this scheme - no is_placeholder equivalent. The
+    only conditional exclusion is entity_type <> 'Unresolved' for village-level answers."
+  - "The word disbursed is overloaded three ways - subsidy, loan, or both. See
+    overloaded_terms. Ask; never pick one silently."
+  - "refused_flag_raw is POSITIVE-ONLY. It is TRUE on 8 rows and NULL everywhere else,
+    never FALSE, so NOT refused_flag_raw returns nothing. Use IS DISTINCT FROM TRUE."
+  - "application_number IS unique and source_row_id IS unique - unlike PMAY's reg_no.
+    One record per application number, so a lookup returns at most one row."
+  - NULL is missing; a stored 0 in total_disbursement is a real 'nothing was paid'. The
+    two are different and must not be merged.
+  - If more than one candidate survives, return ambiguous and ask. Never pick the first row.
+  - If nothing matches above the fuzzy floor, return not_found with suggestions. Never
+    invent a scheme, district, block, village or lender.
+
+# ---------------------------------------------------------------------------
+normalisation:
+  fold:
+  - trim and collapse internal whitespace to single spaces
+  - uppercase
+  - "strip trailing qualifier words: BLOCK, DISTRICT, VILLAGE, C&RD, SCHEME"
+  - map & to AND
+  - treat - / ( ) and . as a single space, then re-collapse whitespace
+  squash: remove every non-alphanumeric character from the folded form
+  numeric_ids: >
+    All LGD codes, source_row_id and village_code are integers. Cast user-typed codes
+    with int() and strip any trailing .0 before comparing.
+  application_ids: >
+    application_number is uppercase alphanumeric, exactly 11 characters - five letters
+    then six digits, e.g. MPDSI018328. Uppercase and strip spaces before matching. Do
+    NOT interpret the letters; see hard_rules.
+  scheme_names:
+    critical: true
+    text: >
+      Folding maps "&" to AND and collapses the bracket into a space, so
+      "Meghalaya Sericulture & Weaving Scheme (spinning)" and
+      "Meghalaya Sericulture & Weaving Scheme(weaving)" fold to distinguishable forms
+      ending SPINNING and WEAVING. That is the ONLY reliable way to tell them apart -
+      the raw strings differ by a single space that users never type.
+
+matching_pipeline:
+- { stage: 1_exact,     test: folded user text == folded canonical, confidence: 1.0 }
+- { stage: 2_alias,     test: folded user text in the value's aliases, confidence: 0.98 }
+- { stage: 3_squash,    test: squashed user text == squashed canonical or alias, confidence: 0.95 }
+- { stage: 4_acronym,   test: district acronym table only, confidence: 0.95,
+    note: acronyms are defined for districts only - do not invent them for blocks or schemes }
+- stage: 5_contains
+  test: folded canonical is a whole-word substring of the user text or vice versa
+  confidence: 0.85
+  note: >
+    Dangerous for schemes - every scheme name contains "Scheme" and eleven of them start
+    with "Meghalaya". Require the distinguishing token (PIGGERY, POULTRY, DAIRY, GOAT,
+    SERICULTURE, TOURISM, WAREHOUSE, MOTORCARAVAN, SPORTS, BUSINESS, FACILITY,
+    AGRICULTURE RESPONSE) before accepting a scheme at this stage.
+- stage: 6_fuzzy
+  test: RapidFuzz token_set_ratio over the dimension catalogue
+  accept_at: ">= 90 and runner-up at least 5 points lower"
+  ask_between: 80 - 89, or any score where the runner-up is within 5 points
+  reject_below: 80
+- stage: 7_embedding
+  test: BGE-small nearest neighbour over the dimension catalogue
+  use_when: fuzzy returned nothing at or above 80
+  accept_at: cosine >= 0.88 AND unique within its dimension
+- { stage: 8_fail, action: emit not_found with up to 5 suggestions }
+
+blocked_matches:
+  purpose: >
+    Pairs fuzzy matching gets wrong. Never let stage 6 or 7 resolve the left value to the
+    right one; require an exact or alias hit.
+  pairs:
+  - ["Meghalaya Sericulture & Weaving Scheme (spinning)", "Meghalaya Sericulture & Weaving Scheme(weaving)"]
+  - ["Meghalaya Sericulture & Weaving Scheme(weaving)", "Meghalaya Sericulture & Weaving Scheme (spinning)"]
+  - ["Meghalaya Piggery Development Scheme", "Meghalaya Poultry Farming Scheme"]
+  - ["Meghalaya Poultry Farming Scheme", "Meghalaya Piggery Development Scheme"]
+  - ["Prime Agriculture Response Vehicle Scheme", "Meghalaya Agriculture Warehouse Scheme"]
+  - ["Prime Agriculture Response Vehicle Scheme", "Prime Tourism Vehicle Scheme"]
+  - ["Prime Tourism Vehicle Scheme", "Prime Agriculture Response Vehicle Scheme"]
+  - [Laskein, Thadlaskein]          # two different West Jaintia Hills blocks
+  - [Thadlaskein, Laskein]
+  - [Mawkynrew, Mawkyrwat]          # East Khasi Hills vs South West Khasi Hills
+  - [Mawkyrwat, Mawkynrew]
+  - [Mawsynram, Mawshynrut]         # East Khasi Hills vs West Khasi Hills
+  - [Mawshynrut, Mawsynram]
+  - [Siju, Saipung]
+  - [Mairang, Mawhati]
+  - [Resubelpara, "Resubelpara-Municipal Board"]     # rural block vs municipal board
+  - [Refused, Duplicate]            # the two desanction reasons are not synonyms
+  piggery_poultry_note:
+    critical: true
+    text: >
+      Piggery and Poultry are the two largest schemes (1,353 and 454 records), they both
+      fold to MEGHALAYA P... and their prefixes cross over on one record. A fuzzy hit
+      between them would misassign 48% of the file. Exact or alias only.
+
+output_contract:
+  resolved:
+    status: resolved
+    entity_type: scheme | district | block | village | financial_year | loan_entity |
+                 loan_disbursed_status | desanctioned_reason | identifier | measure
+    user_text: <verbatim span>
+    canonical: <exact stored value>
+    lgd_code: <code, geography only>
+    confidence: <0-1>
+    matched_by: <pipeline stage>
+  ambiguous:
+    status: ambiguous
+    entity_type: <type>
+    user_text: <verbatim span>
+    candidates: [ { canonical, lgd_code, district, block } ]
+    question: <one short question naming the distinguishing attribute>
+  not_found:
+    status: not_found
+    entity_type: <type or unknown>
+    user_text: <verbatim span>
+    suggestions: [ up to 5 nearest catalogue values ]
+    message: state plainly that the value is not in the CM Elevate Legacy data.
+
+# ---------------------------------------------------------------------------
+overloaded_terms:
+  why: >
+    A handful of words map to more than one column, or to more than one scheme, in this
+    dataset. Getting these wrong produces a confidently wrong answer, so they are listed
+    explicitly.
+
+  cm_elevate:
+    critical: true
+    readings:
+    - { means: curated.v_cm_elevate_disbursement, when: "the question needs money, a lender, a refusal or a financial year" }
+    - { means: curated.v_cm_elevate, when: "the question needs application status, applicant category, on-hold or withdrawal" }
+    default: >
+      NONE. Ask. The two are different schemes with different row counts, different
+      sub-scheme lists and no shared key. A wrong route answers a money question from a
+      fact table that has no money column at all.
+
+  disbursed:
+    critical: true
+    readings:
+    - { means: SUM(total_subsidy_disbursement), when: "the user says subsidy, grant, assistance" }
+    - { means: SUM(total_loan_disbursement),    when: "the user says loan, credit, borrowing" }
+    - { means: SUM(total_disbursement),         when: "the user says total, altogether, overall, or confirms both" }
+    default: >
+      ASK. The three differ by up to 64% - Rs 52.57 Cr subsidy, Rs 30.33 Cr loan,
+      Rs 82.90 Cr together. A subsidy is a grant and a loan is credit the applicant
+      carries; presenting one as the other is a category error, not a rounding choice.
+
+  sanctioned:
+    readings:
+    - { means: SUM(sanctioned_amount), when: "the user asks for a sanctioned AMOUNT, money or rupees" }
+    - { means: COUNT(*),               when: "the user asks how many were sanctioned - every record here IS a sanction" }
+    - { means: "a financial-year filter", when: "the user says 'sanctioned in FY <year>'" }
+    default: >
+      "How much was sanctioned" is SUM(sanctioned_amount). "How many were sanctioned" is
+      COUNT(*) with the sentence "every record in this dataset is a sanction record" -
+      it is NOT a filtered subset, and there is no unsanctioned population to compare it
+      against. See absent_dimensions.sanction_status.
+    never: >
+      Never read "sanctioned" as disbursed. Rs 142.74 Cr was sanctioned and Rs 82.90 Cr
+      paid; the gap is the most interesting finding in this data and collapsing it hides
+      the answer.
+
+  refused:
+    critical: true
+    readings:
+    - { means: "desanctioned_reason_raw = 'Refused'", when: "the user means the recorded desanction reason - 52 records" }
+    - { means: "refused_flag_raw IS TRUE",            when: "the user means the refusal flag - 8 records" }
+    - { means: "desanctioned_reason_raw IS NOT NULL", when: "the user means anything withdrawn, refused or duplicated - 83 records" }
+    default: >
+      ASK which. The three fields disagree and none is authoritative - the database's own
+      comment says to surface the disagreement rather than picking one. Whichever is
+      used, name it in the answer.
+    never: >
+      Never read "refused" as "application rejected". These are post-sanction outcomes.
+      See absent_dimensions.sanction_status.
+
+  duplicate:
+    readings:
+    - { means: "desanctioned_reason_raw = 'Duplicate'", when: always }
+    note: >
+      31 records are marked Duplicate, but only 6 have another record with the same name
+      under the same scheme. The marking is weakly evidenced - report it as recorded and
+      say so. It is NOT a de-duplication instruction: application_number is unique on
+      every row, so there are no duplicate rows to remove.
+
+  applications:
+    readings:
+    - { means: COUNT(*), when: "the user is inside this partition and means records" }
+    default: >
+      COUNT(*), and say the answer counts sanction-and-disbursement records. The word is
+      a trap: the use-case workbook calls every row an "application", but the CM Elevate
+      APPLICATION scheme is a different dataset entirely. If the question is really about
+      applications as a population - how many were made, how many succeeded - it belongs
+      to the other partition or cannot be answered at all.
+
+  beneficiaries:
+    readings:
+    - { means: COUNT(*), when: default - the grain is one record }
+    default: COUNT(*), and say the answer is a record count.
+    note:
+      critical: true
+      text: >
+        "Beneficiary" cannot mean a named person here - the name columns are dropped
+        from the view. COUNT(DISTINCT application_number) is identical to COUNT(*)
+        because the column is unique, so there is no distinct-person count to offer.
+        The same person can hold records under two schemes and nothing links them.
+
+  amount:
+    readings:
+    - { means: SUM(sanctioned_amount),          when: the user says sanctioned/approved/entitlement }
+    - { means: SUM(total_disbursement),         when: the user says disbursed/paid/released - AFTER the three-way clarification }
+    - { means: SUM(total_subsidy_disbursement), when: the user says subsidy/grant }
+    - { means: SUM(total_loan_disbursement),    when: the user says loan/credit }
+    default: ask which. Do not silently pick one.
+
+  pending:
+    readings:
+    - { means: "SUM(sanctioned_amount) - SUM(total_disbursement)", when: the user means money not yet paid }
+    note:
+      critical: true
+      text: >
+        UNLIKE PMAY, there is NO amount_pending column in this scheme. It can only be
+        derived, and the derivation must be labelled as one in the answer. Four records
+        disburse more than they sanctioned, so the figure can go negative for a small
+        group - do not clamp it to zero silently.
+
+  bank:
+    readings:
+    - { means: "loan_entity = 'Bank'", when: "the user means the lender category, as opposed to LIFCOM" }
+    - { means: bank_sanctioned_amount, when: "the user means the second sanctioned figure - UNCONFIRMED, see below" }
+    default: >
+      loan_entity. 'Bank' is a literal stored value naming an unspecified bank, not the
+      name of a bank - there is no bank-name column here.
+    bank_sanctioned_warning:
+      critical: true
+      text: >
+        bank_sanctioned_amount has NO CONFIRMED MEANING. Zero on 50.8% of rows; where
+        non-zero the ratio to sanctioned_amount clusters at 0.20 / 0.50 / 0.496 / 0.60
+        and varies within a single scheme. Never present it as a bank's share, never
+        build a percentage on it, and route any question that needs it to the gate.
+
+# ---------------------------------------------------------------------------
+cross_dimension_collisions:
+  measured:
+    block_names_that_are_also_village_names: 19
+    village_names_sharing_a_code: 17
+    district_collisions: 0
+    scheme_name_collisions_with_geography: 0
+  colliding_block_village_names: [Adokgre, Amlarem, Batabari, Demdema, Gambegre, Laskein,
+    Mawkynrew, Mawkyrwat, Mawpat, Mawryngkneng, Mawshynrut, Nongstoin, Ranikor, Saipung,
+    Selsella, Songsak, Tikrikilla, Umling, Zikzak]
+  village_names_with_more_than_one_code: [Amonggre, Ampanggre, Apalgre, Aragittim,
+    Babupara, Bolchugre, Boldamgre, Bolsalgre, Damalgre, Dombagre, Galwanggre, Mawrang,
+    Mawroh, Nongsder, Nongthymmai, Rongchigre, Umtham]
+  disambiguation_rules:
+  - If the user said "block" or "C&RD block", resolve as block.
+  - If the user said "village" or "gaon", resolve as village.
+  - With no qualifier, default to BLOCK - it is the administrative level users mean.
+  - State the assumption in the answer whenever the default fired on a colliding name.
+  - Districts never collide with anything; resolve them with no qualifier needed.
+  - A village name in the shared list resolves to ambiguous unless a district or block
+    narrows it to one code.
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS
+# ---------------------------------------------------------------------------
+dimensions:
+
+  scheme:
+    name_column: scheme_name
+    source: curated.dim_cm_elevate_disb_scheme.scheme_name
+    stored_case: mixed - emit the stored form verbatim
+    distinct: 13
+    sql_predicate: "scheme_name = '<canonical>'"
+    prefer: Filter on the name. Never on application_number.
+    skew_warning:
+      critical: true
+      text: >
+        Piggery alone is 1,353 of 2,823 records (48%) and pays a fixed Rs 1,25,000. Any
+        statewide average is really a Piggery average. Break down by scheme, or say so.
+    alias_provenance: >
+      canonical, records, sanctioned_total and financial_year are read from the source
+      workbook. aliases are curated linguistic forms.
+    values:
+    - canonical: "Meghalaya Piggery Development Scheme"
+      records: 1353
+      sanctioned_each: 125000
+      sanctioned_total: 169125000
+      disbursed_total: 95241250
+      financial_year: '2024-25'
+      application_prefixes: [MPDSI]
+      aliases: [Piggery, "piggery scheme", "pig farming", "pig rearing", "piggery development",
+                "Meghalaya Piggery", MPDSI, "swine", "pig scheme"]
+    - canonical: "Meghalaya Poultry Farming Scheme"
+      records: 454
+      sanctioned_each: 120000
+      sanctioned_total: 54480000
+      disbursed_total: 40067000
+      financial_year: '2024-25'
+      application_prefixes: [MPFSI, MPDSI]
+      aliases: [Poultry, "poultry scheme", "poultry farming", "chicken farming", "bird farming",
+                "Meghalaya Poultry", MPFSI]
+      prefix_warning: >
+        One record (source_row_id 1894, MPDSI001154) carries Piggery's prefix. This is
+        why application_number is never parsed for scheme.
+    - canonical: "Meghalaya Sericulture & Weaving Scheme (spinning)"
+      records: 198
+      sanctioned_total: 20063892
+      disbursed_total: 26000
+      financial_year: none
+      application_prefixes: [MSWSI, MSWSR, MSWSU]
+      aliases: [spinning, "sericulture spinning", "silk spinning", "sericulture and weaving spinning",
+                "spinning scheme", MSWSI]
+      warnings:
+      - "SPACE BEFORE THE BRACKET - 'Scheme (spinning)'. The weaving row has none."
+      - "NO FINANCIAL YEAR on any of its 198 records. This scheme is invisible in every FY-grouped answer."
+      - "Disbursed Rs 26,000 of Rs 2.01 Cr sanctioned - 0.1%. 195 of 198 records received nothing."
+    - canonical: "Meghalaya Sericulture & Weaving Scheme(weaving)"
+      records: 197
+      sanctioned_total: 34252200
+      disbursed_total: 5874220
+      financial_year: none
+      application_prefixes: [MSWWI, MSWWR, MSWWU]
+      aliases: [weaving, "sericulture weaving", "silk weaving", "handloom", "weaving scheme",
+                "sericulture and weaving weaving", MSWWI]
+      warnings:
+      - "NO SPACE BEFORE THE BRACKET - 'Scheme(weaving)'. The spinning row has one."
+      - "NO FINANCIAL YEAR on any of its 197 records."
+      - "9 records carry a real disbursement date (2025-09-24) with no stated financial year."
+    - canonical: "Prime Agriculture Response Vehicle Scheme"
+      records: 192
+      sanctioned_total: 211727331
+      disbursed_total: 142058900
+      financial_year: [2024-25, 2025-26]
+      application_prefixes: [ARVSI, ARVSR, ARVSU]
+      aliases: [PARV, "agriculture response vehicle", "response vehicle", "prime agriculture vehicle",
+                "agri vehicle", "agriculture vehicle", ARVSI]
+    - canonical: "Meghalaya Dairy Development Scheme"
+      records: 132
+      sanctioned_each: 300000
+      sanctioned_total: 39600000
+      disbursed_total: 12710750
+      financial_year: '2024-25'
+      application_prefixes: [MDDSI]
+      aliases: [Dairy, "dairy scheme", "dairy development", "milk", "cattle", "cow", MDDSI]
+    - canonical: "Prime Tourism Vehicle Scheme"
+      records: 92
+      sanctioned_total: 176045659
+      disbursed_total: 143144900
+      financial_year: [2024-25, 2025-26]
+      application_prefixes: [PTVSI, PTVSR]
+      aliases: [PTV, "tourism vehicle", "tourist vehicle", "tourism scheme", "taxi", PTVSI]
+    - canonical: "Meghalaya Agriculture Warehouse Scheme"
+      records: 87
+      sanctioned_total: 443363165
+      disbursed_total: 226180200
+      financial_year: [2024-25, 2025-26]
+      application_prefixes: [MEWSI, MEWSR]
+      aliases: [Warehouse, "agriculture warehouse", "warehouse scheme", "godown", "storage",
+                "cold storage", MEWSR]
+      note: >
+        The largest scheme by money - Rs 44.34 Cr sanctioned from only 87 records -
+        while Piggery is the largest by record count. A "biggest scheme" question is
+        ambiguous between the two and should say which measure it used.
+    - canonical: "Meghalaya Goat Farming Scheme"
+      records: 48
+      sanctioned_each: 100000
+      sanctioned_total: 4800000
+      disbursed_total: 1920000
+      financial_year: '2024-25'
+      application_prefixes: [MGFSI]
+      aliases: [Goat, "goatery", "goat farming", "goat rearing", "goat scheme", MGFSI]
+    - canonical: "Meghalaya Any Business Venture Scheme"
+      records: 33
+      sanctioned_total: 73785657
+      disbursed_total: 53831590
+      financial_year: '2024-25'
+      application_prefixes: [MABVS]
+      aliases: ["business venture", "any business", "business scheme", "general business",
+                "other business", MABVS]
+      note: "The only scheme with 3 of the 3 records that have no sanctioned amount at all - all refusals."
+    - canonical: "Meghalaya Common Facility Center Scheme"
+      records: 27
+      sanctioned_total: 77572800
+      disbursed_total: 44223730
+      financial_year: '2024-25'
+      application_prefixes: [MCFCR, MCFCU]
+      aliases: [CFC, "common facility", "common facility center", "common facility centre",
+                "facility centre", MCFCR]
+    - canonical: "Meghalaya Sports & Wellness Scheme"
+      records: 9
+      sanctioned_total: 117605199
+      disbursed_total: 58700000
+      financial_year: '2024-25'
+      application_prefixes: [MSWCS]
+      aliases: [Sports, "sports scheme", "wellness", "sports and wellness", "gym", "fitness", MSWCS]
+      note: >
+        Nine records, and a tenth was quarantined at load (source_row_id 2392, name
+        "4 For All" - probably a real team name). Any Sports & Wellness total may be
+        short one record. Eight of the nine are S-coded group applications.
+    - canonical: "Meghalaya Motorcaravan Scheme"
+      records: 1
+      sanctioned_each: 5000000
+      sanctioned_total: 5000000
+      disbursed_total: 5000000
+      financial_year: '2024-25'
+      application_prefixes: [MEMSR]
+      aliases: [Motorcaravan, "motor caravan", "caravan", "campervan", "motorhome", MEMSR]
+      note: >
+        ONE RECORD, fully disbursed. Never present it as a rate, a percentage or a
+        ranking position - n=1. Say "one record" in any answer that includes it.
+
+  district:
+    name_column: lgd_district
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography (UNCONFIRMED for this partition)
+    distinct: 12
+    complete: true            # all 12 Meghalaya districts present
+    collisions: none
+    sql_predicate: "lgd_district = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    code_note: >
+      The source workbook's mapped_district_lgd_code has no equivalent in the curated
+      layer - dim_geography carries village_code only. The lgd_code values below remain
+      useful for RESOLVING a code the user typed to a district name, but the code can
+      never appear in a WHERE clause.
+    alias_provenance: >
+      canonical, lgd_code, records, block_count, village_count and unresolved are read
+      from the source workbook. acronym and spelling variants are curated linguistic forms.
+    values:
+    - canonical: "West Garo Hills"
+      lgd_code: 278
+      acronym: WGH
+      region: "Garo Hills"
+      records: 493
+      block_count: 9
+      village_count: 196
+      unresolved: 54
+      aliases: ["WGH", "W.G.H.", "West Garo Hill", "West Garo", "W Garo Hills", "W Garo",
+                "WestGaroHills", "West Garo Hills District", "Tura district"]
+    - canonical: "Ri Bhoi"
+      lgd_code: 276
+      acronym: RB
+      region: "Ri Bhoi"
+      records: 486
+      block_count: 5
+      village_count: 146
+      unresolved: 61
+      aliases: ["RB", "R.B.", "Ribhoi", "Ri-Bhoi", "Nongpoh district"]
+    - canonical: "South West Garo Hills"
+      lgd_code: 663
+      acronym: SWGH
+      region: "Garo Hills"
+      records: 461
+      block_count: 4
+      village_count: 144
+      unresolved: 8
+      aliases: ["SWGH", "S.W.G.H.", "South West Garo Hill", "SW Garo Hills", "S W Garo Hills",
+                "SouthWestGaroHills", "Ampati district"]
+    - canonical: "East Khasi Hills"
+      lgd_code: 274
+      acronym: EKH
+      region: "Khasi Hills"
+      records: 241
+      block_count: 11
+      village_count: 122
+      unresolved: 29
+      aliases: ["EKH", "E.K.H.", "East Khasi Hill", "East Khasi", "E Khasi Hills", "E Khasi",
+                "EastKhasiHills", "Shillong district"]
+    - canonical: "West Khasi Hills"
+      lgd_code: 279
+      acronym: WKH
+      region: "Khasi Hills"
+      records: 217
+      block_count: 5
+      village_count: 80
+      unresolved: 77
+      aliases: ["WKH", "W.K.H.", "West Khasi Hill", "West Khasi", "W Khasi Hills", "W Khasi",
+                "WestKhasiHills", "Nongstoin district"]
+      note: "The highest unresolved share of any district - 77 of 217 records have no village."
+    - canonical: "Eastern West Khasi Hills"
+      lgd_code: 740
+      acronym: EWKH
+      region: "Khasi Hills"
+      records: 210
+      block_count: 2
+      village_count: 65
+      unresolved: 26
+      aliases: ["EWKH", "E.W.K.H.", "Eastern West Khasi Hill", "East West Khasi Hills",
+                "Mairang district", "EasternWestKhasiHills"]
+      note: >
+        A recent bifurcation from West Khasi Hills. A user asking for "West Khasi Hills"
+        may or may not mean it to be included - see the district_split rule in the gate.
+    - canonical: "East Garo Hills"
+      lgd_code: 273
+      acronym: EGH
+      region: "Garo Hills"
+      records: 200
+      block_count: 4
+      village_count: 70
+      unresolved: 41
+      aliases: ["EGH", "E.G.H.", "East Garo Hill", "East Garo", "E Garo Hills", "E Garo",
+                "EastGaroHills", "Williamnagar district"]
+    - canonical: "West Jaintia Hills"
+      lgd_code: 275
+      acronym: WJH
+      region: "Jaintia Hills"
+      records: 153
+      block_count: 4
+      village_count: 61
+      unresolved: 34
+      aliases: ["WJH", "W.J.H.", "West Jaintia Hill", "West Jaintia", "W Jaintia Hills",
+                "W Jaintia", "WestJaintiaHills", "Jowai district"]
+    - canonical: "North Garo Hills"
+      lgd_code: 656
+      acronym: NGH
+      region: "Garo Hills"
+      records: 141
+      block_count: 5
+      village_count: 57
+      unresolved: 39
+      aliases: ["NGH", "N.G.H.", "North Garo Hill", "North Garo", "N Garo Hills", "N Garo",
+                "NorthGaroHills", "Resubelpara district"]
+    - canonical: "South West Khasi Hills"
+      lgd_code: 658
+      acronym: SWKH
+      region: "Khasi Hills"
+      records: 94
+      block_count: 2
+      village_count: 39
+      unresolved: 11
+      aliases: ["SWKH", "S.W.K.H.", "South West Khasi Hill", "SW Khasi Hills", "S W Khasi Hills",
+                "SouthWestKhasiHills", "Mawkyrwat district"]
+    - canonical: "South Garo Hills"
+      lgd_code: 277
+      acronym: SGH
+      region: "Garo Hills"
+      records: 92
+      block_count: 5
+      village_count: 52
+      unresolved: 18
+      aliases: ["SGH", "S.G.H.", "South Garo Hill", "South Garo", "S Garo Hills", "S Garo",
+                "SouthGaroHills", "Baghmara district"]
+    - canonical: "East Jaintia Hills"
+      lgd_code: 657
+      acronym: EJH
+      region: "Jaintia Hills"
+      records: 35
+      block_count: 3
+      village_count: 19
+      unresolved: 6
+      aliases: ["EJH", "E.J.H.", "East Jaintia Hill", "East Jaintia", "E Jaintia Hills",
+                "E Jaintia", "EastJaintiaHills", "Khliehriat district"]
+      note: "The smallest district in this scheme - 35 records. Percentages on it are unstable."
+
+  block:
+    name_column: lgd_block
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography (UNCONFIRMED for this partition)
+    distinct: 59
+    sql_predicate: "lgd_block = UPPER('<canonical>')"
+    collisions: 19 block names are also village names - see cross_dimension_collisions
+    municipal_boards:
+      note: >
+        Three blocks are Municipal Boards, i.e. urban wards rather than C&RD blocks -
+        'Resubelpara-Municipal Board' (14 records), 'William Nagar-Municipal Board' (3)
+        and 'Tura Municipal Board-Municipal Board' (2). Their stored names carry the
+        suffix, and 'Tura Municipal Board-Municipal Board' repeats it. Match on the
+        stored string; do not tidy it.
+      caution: >
+        Do not describe this scheme as wholly rural, and do not fold a Municipal Board
+        into its neighbouring rural block of the same name - Resubelpara exists as both.
+    values:
+      provenance: source workbook, 2026-09-23 (unverified_in_db). disb_cr is SUM(total_disbursement) in crore.
+      catalogue:
+      - {canonical: Umling,                     district: Ri Bhoi,                  records: 224, villages: 60, disb_cr: 1.80, aliases: [umling block]}
+      - {canonical: Zikzak,                     district: South West Garo Hills,    records: 215, villages: 53, disb_cr: 2.28, also_a_village: true}
+      - {canonical: Rongram,                    district: West Garo Hills,          records: 206, villages: 60, disb_cr: 4.03}
+      - {canonical: Nongstoin,                  district: West Khasi Hills,         records: 135, villages: 39, disb_cr: 2.25, also_a_village: true}
+      - {canonical: Rerapara,                   district: South West Garo Hills,    records: 134, villages: 44, disb_cr: 1.43}
+      - {canonical: Mawthadraishan,             district: Eastern West Khasi Hills, records: 120, villages: 30, disb_cr: 1.98}
+      - {canonical: Umsning,                    district: Ri Bhoi,                  records: 106, villages: 32, disb_cr: 2.15}
+      - {canonical: Bhoirymbong,                district: Ri Bhoi,                  records: 96,  villages: 31, disb_cr: 2.36}
+      - {canonical: Tikrikilla,                 district: West Garo Hills,          records: 95,  villages: 42, disb_cr: 2.80, also_a_village: true}
+      - {canonical: Mairang,                    district: Eastern West Khasi Hills, records: 90,  villages: 35, disb_cr: 1.98}
+      - {canonical: Betasing,                   district: South West Garo Hills,    records: 82,  villages: 33, disb_cr: 1.57}
+      - {canonical: Songsak,                    district: East Garo Hills,          records: 78,  villages: 23, disb_cr: 2.13, also_a_village: true}
+      - {canonical: Dambo Rongjeng,             district: East Garo Hills,          records: 74,  villages: 30, disb_cr: 1.64}
+      - {canonical: Mawkyrwat,                  district: South West Khasi Hills,   records: 73,  villages: 31, disb_cr: 2.23, also_a_village: true}
+      - {canonical: Resubelpara,                district: North Garo Hills,         records: 67,  villages: 23, disb_cr: 1.51}
+      - {canonical: Thadlaskein,                district: West Jaintia Hills,       records: 61,  villages: 25, disb_cr: 2.12}
+      - {canonical: Jirang,                     district: Ri Bhoi,                  records: 59,  villages: 22, disb_cr: 0.64}
+      - {canonical: Mylliem,                    district: East Khasi Hills,         records: 58,  villages: 14, disb_cr: 6.67,
+          note: "The single largest block by money in the scheme - 58 records carrying Rs 6.67 Cr, far more per record than anywhere else."}
+      - {canonical: Laskein,                    district: West Jaintia Hills,       records: 56,  villages: 21, disb_cr: 1.77, also_a_village: true}
+      - {canonical: Demdema,                    district: West Garo Hills,          records: 45,  villages: 18, disb_cr: 1.24, also_a_village: true}
+      - {canonical: Samanda,                    district: East Garo Hills,          records: 45,  villages: 15, disb_cr: 0.73}
+      - {canonical: Gambegre,                   district: West Garo Hills,          records: 40,  villages: 20, disb_cr: 0.47, also_a_village: true}
+      - {canonical: Dadenggiri,                 district: West Garo Hills,          records: 38,  villages: 18, disb_cr: 3.67}
+      - {canonical: Bajengdoba,                 district: North Garo Hills,         records: 37,  villages: 18, disb_cr: 0.46}
+      - {canonical: Selsella,                   district: West Garo Hills,          records: 35,  villages: 19, disb_cr: 1.50, also_a_village: true}
+      - {canonical: Amlarem,                    district: West Jaintia Hills,       records: 34,  villages: 13, disb_cr: 0.62, also_a_village: true}
+      - {canonical: Mawshynrut,                 district: West Khasi Hills,         records: 31,  villages: 16, disb_cr: 1.33, also_a_village: true}
+      - {canonical: Purakhasia,                 district: South West Garo Hills,    records: 30,  villages: 14, disb_cr: 0.85}
+      - {canonical: Sohiong,                    district: East Khasi Hills,         records: 28,  villages: 15, disb_cr: 0.65}
+      - {canonical: Shallang,                   district: West Khasi Hills,         records: 26,  villages: 11, disb_cr: 1.03}
+      - {canonical: Dalu,                       district: West Garo Hills,          records: 25,  villages: 12, disb_cr: 0.85}
+      - {canonical: Baghmara,                   district: South Garo Hills,         records: 25,  villages: 10, disb_cr: 0.90}
+      - {canonical: Khatarshnong Laitkroh,      district: East Khasi Hills,         records: 24,  villages: 11, disb_cr: 1.43}
+      - {canonical: Shella Bholaganj,           district: East Khasi Hills,         records: 23,  villages: 15, disb_cr: 2.18}
+      - {canonical: Chokpot,                    district: South Garo Hills,         records: 23,  villages: 16, disb_cr: 2.68}
+      - {canonical: Wapung,                     district: East Jaintia Hills,       records: 23,  villages: 12, disb_cr: 1.61}
+      - {canonical: Mawphlang,                  district: East Khasi Hills,         records: 21,  villages: 13, disb_cr: 2.86}
+      - {canonical: Ranikor,                    district: South West Khasi Hills,   records: 21,  villages: 8,  disb_cr: 1.69, also_a_village: true}
+      - {canonical: Mawlai,                     district: East Khasi Hills,         records: 21,  villages: 14, disb_cr: 1.72}
+      - {canonical: Kharkutta,                  district: North Garo Hills,         records: 20,  villages: 11, disb_cr: 0.41}
+      - {canonical: Rongara,                    district: South Garo Hills,         records: 19,  villages: 9,  disb_cr: 0.31}
+      - {canonical: Mawsynram,                  district: East Khasi Hills,         records: 18,  villages: 9,  disb_cr: 0.85}
+      - {canonical: Mawpat,                     district: East Khasi Hills,         records: 15,  villages: 10, disb_cr: 3.83, also_a_village: true,
+          note: "15 records carrying Rs 3.83 Cr - the second-highest money-per-record block, and a name that is also a village."}
+      - {canonical: Gasuapara,                  district: South Garo Hills,         records: 15,  villages: 10, disb_cr: 0.58}
+      - {canonical: Mawryngkneng,               district: East Khasi Hills,         records: 15,  villages: 7,  disb_cr: 0.68, also_a_village: true}
+      - {canonical: Resubelpara-Municipal Board, district: North Garo Hills,        records: 14,  villages: 2,  disb_cr: 0.00,
+          note: "Urban ward, and NOT the same place as the rural Resubelpara block above. Nothing disbursed."}
+      - {canonical: Rambrai,                    district: West Khasi Hills,         records: 13,  villages: 7,  disb_cr: 0.13}
+      - {canonical: Ri Muliang,                 district: West Khasi Hills,         records: 12,  villages: 7,  disb_cr: 1.01}
+      - {canonical: Pynursla,                   district: East Khasi Hills,         records: 11,  villages: 9,  disb_cr: 1.25}
+      - {canonical: Saipung,                    district: East Jaintia Hills,       records: 11,  villages: 6,  disb_cr: 0.60, also_a_village: true}
+      - {canonical: Siju,                       district: South Garo Hills,         records: 10,  villages: 7,  disb_cr: 0.35}
+      - {canonical: Batabari,                   district: West Garo Hills,          records: 7,   villages: 7,  disb_cr: 0.10, also_a_village: true}
+      - {canonical: Mawkynrew,                  district: East Khasi Hills,         records: 7,   villages: 5,  disb_cr: 0.47, also_a_village: true}
+      - {canonical: William Nagar-Municipal Board, district: East Garo Hills,       records: 3,   villages: 2,  disb_cr: 0.00, note: Urban ward. Nothing disbursed.}
+      - {canonical: Adokgre,                    district: North Garo Hills,         records: 3,   villages: 3,  disb_cr: 0.22, also_a_village: true}
+      - {canonical: Namdong,                    district: West Jaintia Hills,       records: 2,   villages: 2,  disb_cr: 0.11}
+      - {canonical: Tura Municipal Board-Municipal Board, district: West Garo Hills, records: 2,  villages: 0,  disb_cr: 0.06,
+          note: "The stored name repeats 'Municipal Board'. Match it verbatim; do not tidy it. Both records are village-unresolved."}
+      - {canonical: Lumshnong,                  district: East Jaintia Hills,       records: 1,   villages: 1,  disb_cr: 0.15}
+      - {canonical: Mawhati,                    district: Ri Bhoi,                  records: 1,   villages: 1,  disb_cr: 0.00}
+    values_by_district:
+      "East Garo Hills": [Dambo Rongjeng, Samanda, Songsak, "William Nagar-Municipal Board"]
+      "East Jaintia Hills": [Lumshnong, Saipung, Wapung]
+      "East Khasi Hills": ["Khatarshnong Laitkroh", Mawkynrew, Mawlai, Mawpat, Mawphlang,
+                           Mawryngkneng, Mawsynram, Mylliem, Pynursla, "Shella Bholaganj", Sohiong]
+      "Eastern West Khasi Hills": [Mairang, Mawthadraishan]
+      "North Garo Hills": [Adokgre, Bajengdoba, Kharkutta, Resubelpara, "Resubelpara-Municipal Board"]
+      "Ri Bhoi": [Bhoirymbong, Jirang, Mawhati, Umling, Umsning]
+      "South Garo Hills": [Baghmara, Chokpot, Gasuapara, Rongara, Siju]
+      "South West Garo Hills": [Betasing, Purakhasia, Rerapara, Zikzak]
+      "South West Khasi Hills": [Mawkyrwat, Ranikor]
+      "West Garo Hills": [Batabari, Dadenggiri, Dalu, Demdema, Gambegre, Rongram, Selsella,
+                          Tikrikilla, "Tura Municipal Board-Municipal Board"]
+      "West Jaintia Hills": [Amlarem, Laskein, Namdong, Thadlaskein]
+      "West Khasi Hills": [Mawshynrut, Nongstoin, Rambrai, "Ri Muliang", Shallang]
+    size_warning: >
+      The five largest blocks - Umling, Zikzak, Rongram, Nongstoin, Rerapara - hold 914 of
+      the 2,823 records between them, a third of the scheme. The eight smallest hold one
+      or two each. A block ranking is dominated by the top five and a block percentage is
+      unstable at the bottom.
+    resolution_rule: >
+      A block name alone is unique across the 59 in this scheme, so a district is not
+      required to resolve it. A district IS required when the same text is also a village
+      name - see cross_dimension_collisions.
+
+  village:
+    name_column: lgd_village_name
+    code_column: village_code
+    stored_case: mixed - emit the stored form verbatim
+    distinct_codes: 1051
+    distinct_names: 1033
+    sql_predicate: "village_code = <code>"
+    sql_predicate_by_name: "lgd_village_name = '<canonical>'"
+    prefer:
+      critical: true
+      text: >
+        ALWAYS resolve to village_code and filter on it. 17 names are shared by two or
+        more villages, so a name filter silently merges different places. Count villages
+        with COUNT(DISTINCT village_code).
+    unresolved_rule:
+      critical: true
+      text: >
+        404 records (14.3%) have no village at all and resolve to an Unresolved
+        placeholder with entity_type = 'Unresolved' and on_roster = FALSE. They carry a
+        real district. KEEP them in district and state totals so the figures reconcile;
+        EXCLUDE them from every village count or village list with
+        `AND entity_type <> 'Unresolved'`, and say how many were set aside.
+      by_district: >
+        West Khasi Hills 77, Ri Bhoi 61, West Garo Hills 54, East Garo Hills 41,
+        North Garo Hills 39, West Jaintia Hills 34, East Khasi Hills 29,
+        Eastern West Khasi Hills 26, South Garo Hills 18, South West Khasi Hills 11,
+        South West Garo Hills 8, East Jaintia Hills 6.
+    ambiguity_registry:
+      note: >
+        These names each map to more than one village_code in this scheme's data. A user
+        naming one of them must supply a district or block, or the resolver returns
+        ambiguous with the candidate codes below. Sixteen names carry two codes and one -
+        Nongthymmai - carries three.
+      provenance: source workbook, 2026-09-23 (unverified_in_db)
+      entries:
+      - name: Amonggre
+        candidates: [{code: 276259, block: Rongara,       district: South Garo Hills},
+                     {code: 273140, block: Dadenggiri,    district: West Garo Hills}]
+      - name: Ampanggre
+        candidates: [{code: 275359, block: Samanda,       district: East Garo Hills},
+                     {code: 273489, block: Rongram,       district: West Garo Hills}]
+      - name: Apalgre
+        candidates: [{code: 272766, block: Selsella,      district: West Garo Hills},
+                     {code: 273033, block: Rerapara,      district: South West Garo Hills}]
+      - name: Aragittim
+        candidates: [{code: 274864, block: Dambo Rongjeng, district: East Garo Hills},
+                     {code: 274026, block: Zikzak,        district: South West Garo Hills}]
+      - name: Babupara
+        candidates: [{code: 274796, block: Dambo Rongjeng, district: East Garo Hills},
+                     {code: 274005, block: Zikzak,        district: South West Garo Hills}]
+      - name: Bolchugre
+        candidates: [{code: 274086, block: Gambegre,      district: West Garo Hills},
+                     {code: 273796, block: Rerapara,      district: South West Garo Hills}]
+      - name: Boldamgre
+        candidates: [{code: 273516, block: Rongram,       district: West Garo Hills},
+                     {code: 273125, block: Dadenggiri,    district: West Garo Hills}]
+        note: Both candidates are in the SAME district, so a district alone does not disambiguate - the block is required.
+      - name: Bolsalgre
+        candidates: [{code: 273071, block: Selsella,      district: West Garo Hills},
+                     {code: 273811, block: Betasing,      district: South West Garo Hills}]
+      - name: Damalgre
+        candidates: [{code: 273918, block: Purakhasia,    district: South West Garo Hills},
+                     {code: 273024, block: Selsella,      district: West Garo Hills}]
+      - name: Dombagre
+        candidates: [{code: 273927, block: Zikzak,        district: South West Garo Hills},
+                     {code: 273725, block: Rerapara,      district: South West Garo Hills}]
+        note: Both in South West Garo Hills - block required.
+      - name: Galwanggre
+        candidates: [{code: 273176, block: Demdema,       district: West Garo Hills},
+                     {code: 273528, block: Rongram,       district: West Garo Hills}]
+        note: Both in West Garo Hills - block required.
+      - name: Mawrang
+        candidates: [{code: 277072, block: Mairang,       district: Eastern West Khasi Hills},
+                     {code: 276725, block: Rambrai,       district: West Khasi Hills}]
+      - name: Mawroh
+        candidates: [{code: 276970, block: Mawthadraishan, district: Eastern West Khasi Hills},
+                     {code: 277051, block: Mairang,       district: Eastern West Khasi Hills}]
+        note: Both in Eastern West Khasi Hills - block required.
+      - name: Nongsder
+        candidates: [{code: 278940, block: Pynursla,      district: East Khasi Hills},
+                     {code: 278057, block: Bhoirymbong,   district: Ri Bhoi}]
+      - name: Nongthymmai
+        candidates: [{code: 278407, block: Mawryngkneng,  district: East Khasi Hills},
+                     {code: 277681, block: Jirang,        district: Ri Bhoi},
+                     {code: 278993, block: Pynursla,      district: East Khasi Hills}]
+        note: THREE candidates, two of them in East Khasi Hills - the block is required there.
+      - name: Rongchigre
+        candidates: [{code: 272992, block: Selsella,      district: West Garo Hills},
+                     {code: 273539, block: Rongram,       district: West Garo Hills}]
+        note: Both in West Garo Hills - block required.
+      - name: Umtham
+        candidates: [{code: 277925, block: Umsning,       district: Ri Bhoi},
+                     {code: 277592, block: Umling,        district: Ri Bhoi}]
+        note: Both in Ri Bhoi - block required.
+      district_is_not_always_enough:
+        critical: true
+        text: >
+          SIX of the seventeen - Boldamgre, Dombagre, Galwanggre, Mawroh, Rongchigre and
+          Umtham - have all their candidates inside ONE district, and Nongthymmai has two
+          of three inside one. For those, asking "which district?" does not resolve the
+          ambiguity. Ask for the block.
+    largest_villages:
+      note: >
+        Useful for sanity-checking a village answer. Money is concentrated in a handful
+        of single-record villages, so a "top villages by money" list is mostly one-record
+        entries and should say so.
+      by_disbursement:
+      - {village: Mawdiang Diang,   code: 278266, district: East Khasi Hills,       records: 1, disb_cr: 1.800}
+      - {village: Madanrting(Ct),   code: 278359, district: East Khasi Hills,       records: 1, disb_cr: 1.750}
+      - {village: Sohram Lwai,      code: 278169, district: East Khasi Hills,       records: 1, disb_cr: 0.927}
+      - {village: Songsak Agalgre,  code: 275299, district: East Garo Hills,        records: 6, disb_cr: 0.645}
+      - {village: Ranikor,          code: 277211, district: South West Khasi Hills, records: 7, disb_cr: 0.640}
+      - {village: Dambo Rongdeng,   code: 274849, district: East Garo Hills,        records: 8, disb_cr: 0.630}
+      - {village: Kdonghulu,        code: 277944, district: Ri Bhoi,                records: 9, disb_cr: 0.489}
+      caveat: >
+        The top three are single records under the large East Khasi Hills schemes. Never
+        present them as high-performing villages - they are one big sanction each.
+    catalogue_note: >
+      The full 1,051-code catalogue is not inlined here. Resolve village names against
+      curated.dim_geography at runtime, filtered to the codes present in this scheme, and
+      apply the ambiguity registry above before accepting a single match.
+
+  financial_year:
+    name_column: financial_year_short
+    canonical_column: financial_year
+    source: curated.dim_year, reached by LEFT JOIN
+    distinct_in_this_scheme: 2
+    sql_predicate: "financial_year_short = '<canonical>'"
+    values:
+    - canonical: '2024-25'
+      long_form: '2024-2025'
+      records: 2291
+      aliases: ["2024-25", "2024-2025", "FY 2024-25", "FY25", "2024 25", "24-25", "last year", "FY 2024"]
+      schemes: >
+        All 13 schemes except the two Sericulture ones, which carry no year at all.
+    - canonical: '2025-26'
+      long_form: '2025-2026'
+      records: 137
+      aliases: ["2025-26", "2025-2026", "FY 2025-26", "FY26", "2025 26", "25-26", "this year", "current year", "FY 2025"]
+      schemes: >
+        Only three - Prime Tourism Vehicle (84), Agriculture Warehouse (27) and Prime
+        Agriculture Response Vehicle (26). An FY-over-FY comparison is really a
+        comparison of those three schemes.
+    null_bucket:
+      critical: true
+      records: 395
+      label_in_output: "(no financial year)"
+      finding: >
+        THE 395 UNDATED RECORDS ARE EXACTLY THE TWO SERICULTURE SCHEMES - 198 spinning
+        plus 197 weaving, and no record from any other scheme. So a financial-year
+        grouping does not scatter a few stragglers into a NULL bucket; it removes
+        Sericulture from the answer entirely. Any FY breakdown must either report the
+        bucket or state that Sericulture is excluded.
+    date_disagreement:
+      critical: true
+      text: >
+        The stated financial year and the year implied by the first subsidy disbursement
+        date disagree on 114 of the 1,842 records where both exist - 77 stated 2024-25
+        that derive to 2025-26, 34 the other way, 2 deriving to 2026-27 and 1 to 2023-24.
+        9 further records carry a real date (2025-09-24, all Sericulture weaving) with no
+        stated year. The database groups on the stated label, so that is what this
+        resolver emits. Never derive a financial year from a date, and if a question
+        mixes the two, say that they do not reconcile.
+    year_disambiguation:
+      rule: >
+        A bare "2024" or "2025" is ambiguous between a calendar year and a financial
+        year, but the two are not measured the same way here: the financial year is a
+        recorded label, while a calendar year can only come from the disbursement dates,
+        which disagree with that label on 114 records. Prefer the financial year, state
+        the assumption, and offer the date-based reading as an alternative.
+
+  loan_entity:
+    name_column: loan_entity
+    distinct: 2
+    nulls: 401
+    sql_predicate: "loan_entity = '<canonical>'"
+    values:
+    - canonical: "Bank"
+      records: 1733
+      with_loan_money: 452
+      aliases: [bank, banks, "through bank", "bank loan", "commercial bank", "scheduled bank"]
+      note: >
+        A literal category value, not the name of a bank. There is no bank-name column in
+        this scheme - a question naming a specific bank cannot be answered.
+    - canonical: "LIFCOM"
+      records: 689
+      with_loan_money: 331
+      aliases: [lifcom, "LIFCOM loan", "life com", "L.I.F.C.O.M.",
+                "Meghalaya Livestock and Fisheries Corporation"]
+      note: >
+        The expansion in the aliases is a reasonable reading of the acronym, NOT a
+        client-confirmed fact. Accept it as an alias; do not print it as the entity's
+        full name.
+    null_rule:
+      critical: true
+      text: >
+        401 records have no lender recorded, and 19 of them carry loan money anyway. A
+        bare GROUP BY loan_entity drops all 401. Emit
+        COALESCE(loan_entity, '(not recorded)') and keep the bucket visible.
+
+  loan_disbursed_status:
+    name_column: loan_disbursed_status
+    distinct: 2
+    stored_case: lowercase - emit verbatim
+    sql_predicate: "loan_disbursed_status = '<canonical>'"
+    values:
+    - { canonical: "disbursed",     records: 802,  aliases: [disbursed, paid, released, "loan given"] }
+    - { canonical: "not disbursed", records: 2020, aliases: ["not disbursed", "no loan", unpaid, "not paid", "loan not given"] }
+    derived_warning:
+      critical: true
+      text: >
+        This column is FULLY DERIVED from the money: 'disbursed' holds exactly where
+        total_loan_disbursement > 0, on every row without exception. It is the same fact
+        stated twice, so it can filter but can never corroborate an amount. Note the
+        lowercase stored values - 'Disbursed', 'Y' and 'Yes' are not stored forms.
+
+  desanctioned_reason:
+    name_column: desanctioned_reason_raw
+    distinct: 2
+    nulls: 2740
+    sql_predicate: "desanctioned_reason_raw = '<canonical>'"
+    values:
+    - canonical: "Refused"
+      records: 52
+      with_disbursement: 9
+      aliases: [refused, rejected, declined, "turned down", cancelled]
+    - canonical: "Duplicate"
+      records: 31
+      with_disbursement: 23
+      observable_twins: 6
+      aliases: [duplicate, "repeated", "double entry", "same applicant twice"]
+    null_rule: >
+      NULL means nothing was recorded, NOT that the record was accepted. Label it
+      "(none recorded)" in a breakdown, never "not refused".
+    companion_fields:
+      refused_flag_raw:
+        records_true: 8
+        stored_values: TRUE only - never FALSE
+        predicate_for_not_refused: "refused_flag_raw IS DISTINCT FROM TRUE"
+      refused_reason_text:
+        records: 7
+        distinct_values: 6
+        values: ["Unable to connect", "Government Employee", "Wife is a government employee",
+                 "Repeated name", "Family emergency", "Economical reason"]
+        rule: >
+          Free text, not a coded dimension - never GROUP BY it. One value names a family
+          circumstance; do not pair it with a geography narrow enough to identify a
+          person.
+    disagreement:
+      critical: true
+      text: >
+        The three fields disagree. 2 records carry the flag with no desanction reason;
+        47 of the 52 Refused records do not carry the flag; only 4 carry all three, and
+        source_row_id 429 carries the first two with a blank reason. No field is
+        authoritative - name the one used in every answer.
+
+  identifiers:
+    application_number:
+      column: application_number
+      unique: true
+      format: five letters then six digits, exactly 11 characters
+      examples: [MPDSI018328, MPFSI000961, ARVSR000104, PTVSI000088, MSWCS000042]
+      sql_predicate: "application_number = '<value>'"
+      never_parse:
+        critical: true
+        text: >
+          The letters are NOT a scheme code. 7 of the 13 schemes use more than one prefix
+          and one Poultry record carries Piggery's MPDSI. The 5th letter (I/R/U) looks
+          like an applicant-type code but is unreliable - in MABVS and MSWCS it is part
+          of the acronym. Resolve schemes through scheme_name, and never offer an
+          applicant-type split.
+      lookup_behaviour: >
+        Unique, so a lookup returns at most one row - unlike PMAY's reg_no, which repeats.
+        A prefix search is possible but must be labelled as a prefix search, not a scheme
+        filter.
+    source_row_id:
+      column: source_row_id
+      unique: true
+      meaning: the source workbook's own id
+      use: >
+        The anchor for every data-quality finding in this scheme. Accept it when a user
+        quotes one (429, 532, 1351, 1894, 2392 and the rest), and use it to explain an
+        anomaly rather than to list records.
+    village_code:
+      column: village_code
+      meaning: LGD national village code
+      use: The only correct village identity. Never SUM it.
+    applicant_name:
+      status: NOT_RESOLVABLE
+      critical: true
+      text: >
+        first_name, middle_name and last_name exist on the fact for audit only and are
+        dropped by the view and excluded from the embedding layer. A name is not an
+        entity this resolver can return. Emit not-held; do not offer suggestions, a fuzzy
+        match, or a fallback to the fact table.
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS THAT DO NOT EXIST - resolve to a refusal, not a guess
+# ---------------------------------------------------------------------------
+absent_dimensions:
+  why: >
+    Users, and the use-case workbook, ask for these by name. Each looks like it should be
+    a dimension in a scheme of this shape, and none of them is. Resolving any of them to
+    a near-neighbour column would produce a confident wrong answer.
+
+  sanction_status:
+    critical: true
+    asked_by: [TC-14, TC-15, TC-16, TC-19, TC-35]
+    text: >
+      There is no sanctioned/not-sanctioned flag, and there cannot be a sanction rate.
+      Every record here IS a sanction - 2,820 of 2,823 carry an amount and the 3 that do
+      not are refusals. The denominator, all applications, lives in
+      fact_cm_elevate_application with no join key.
+    never: >
+      NEVER resolve "not sanctioned" to the 83 desanctioned records. They are a
+      post-sanction outcome, not a rejected application, and that substitution is the
+      most misleading answer available in this partition.
+
+  applicant_category:
+    asked_by: [users familiar with the other CM Elevate partition]
+    text: >
+      No individual/group column exists here. The other CM Elevate scheme has
+      applicant_category; this one does not, and the letter inside application_number is
+      not a substitute.
+
+  constituency:
+    asked_by: [TC-31, TC-32]
+    text: >
+      mapped_constituency_name exists in the source workbook (55 values, e.g.
+      "30 MAIRANG") and dim_geography carries ac_name and ac_number, but this scheme's
+      fact and view expose neither. Resolve to "not available on this scheme's query
+      surface" - a view change, not a data gap.
+
+  month:
+    asked_by: [users expecting PMAY-style monthly trends]
+    text: >
+      The source's month column was not loaded, and it holds only four values (Nov, Apr,
+      Feb, Mar) across two financial years - a disbursement-batch label, not a time
+      series. PMAY is the only scheme in megh_db with a real monthly grain.
+
+  bank_name:
+    text: >
+      loan_entity holds Bank or LIFCOM. There is no column naming an individual bank, no
+      branch, no IFSC and no account - unlike Focus Legacy, which carries all four.
+
+  demographics:
+    text: >
+      No gender, age, caste, income, category or household field exists for this scheme.
+
+  repayment:
+    text: >
+      The source's loan_repaid column is 0 on every row and was not loaded. "None have
+      been repaid" would present an empty column as a finding.
+
+  business_outcome:
+    text: >
+      Jobs created, income, turnover and survival of the venture are not recorded. The
+      data stops at the money leaving the department.
+
+# ---------------------------------------------------------------------------
+measure_vocabulary:
+
+  record_count:
+    column: "*"
+    aliases: [records, applications, applicants, beneficiaries, cases, how many, count,
+              number of records]
+    aggregate: COUNT(*)
+    note: >
+      One row is one applicant's sanction-and-disbursement record under one scheme. No
+      mandatory filter, unlike PMAY. COUNT(DISTINCT application_number) is identical.
+
+  sanctioned_amount:
+    column: sanctioned_amount
+    aliases: [sanctioned amount, sanction amount, amount sanctioned, approved amount,
+              entitlement, allocation, sanctioned money]
+    aggregate: SUM(sanctioned_amount)
+    unit: rupees
+    source_total: 1427420903            # Rs 142.74 Cr
+    nulls: 3
+    verified_in_db: false
+    constant_for_schemes:
+      critical: true
+      text: >
+        SOURCE-WORKBOOK FINDING, NOT RE-VERIFIED AGAINST megh_db. For 6 of the 13 schemes
+        this column is a per-scheme CONSTANT - Piggery 125,000 on all 1,353 records,
+        Poultry 120,000, Dairy 300,000, Goat 100,000, Motorcaravan 5,000,000, and
+        Sericulture spinning near-constant. Where it holds:
+          - SUM(sanctioned_amount) within one of those schemes is just the entitlement
+            times the record count, so ranking districts by sanctioned amount inside a
+            single scheme is identical to ranking them by record count.
+          - AVG(sanctioned_amount) carries no information. Answer with the entitlement
+            and say it is fixed.
+        The other 7 schemes DO vary - Sports & Wellness spans 400,000 to 30,000,000 - so
+        the rule is per-scheme, not global. This is the same shape as PMAY's flat
+        130,000, but only partial.
+
+  total_disbursement:
+    column: total_disbursement
+    aliases: [total disbursement, total disbursed, amount disbursed, disbursed, payout,
+              money paid, released]
+    aggregate: SUM(total_disbursement)
+    unit: rupees
+    source_total: 828978537.75          # Rs 82.90 Cr
+    zero_rows: 449
+    derived_verified: "= total_subsidy_disbursement + total_loan_disbursement on all 2,823 rows"
+    ambiguity_warning:
+      critical: true
+      text: >
+        This is ONE of three readings of "disbursed". Emit it only after the gate has
+        confirmed the user means subsidy and loan together. See overloaded_terms.disbursed.
+
+  total_subsidy_disbursement:
+    column: total_subsidy_disbursement
+    aliases: [subsidy, total subsidy, subsidy disbursed, grant, assistance, subsidy amount]
+    aggregate: SUM(total_subsidy_disbursement)
+    unit: rupees
+    source_total: 525658223.25          # Rs 52.57 Cr
+    derived_verified: "= subsidy_disbursement_1 + _2 + _3 on all 2,823 rows"
+    tranche_shape: "2 tranches on 1,863 records, 1 on 469, 3 on 13, none on 478"
+
+  total_loan_disbursement:
+    column: total_loan_disbursement
+    aliases: [loan, total loan, loan disbursed, credit, borrowing, loan amount]
+    aggregate: SUM(total_loan_disbursement)
+    unit: rupees
+    source_total: 303320314.50          # Rs 30.33 Cr
+    derived_verified: "= loan_disbursement_1 + _2 + _3 on all 2,823 rows"
+    note: "A loan is credit the applicant carries, not a grant. Never merge it into a subsidy figure without saying so."
+
+  bank_sanctioned_amount:
+    column: bank_sanctioned_amount
+    aliases: ["bank sanctioned", "bank amount", "bank share", "bank contribution"]
+    aggregate: none_permitted
+    unit: rupees
+    source_total: 402109637.60
+    zero_rows: 1435
+    meaning: UNCONFIRMED
+    critical: >
+      DO NOT BUILD A METRIC ON THIS COLUMN. Zero on 50.8% of rows; where non-zero the
+      ratio to sanctioned_amount clusters at 0.20 / 0.50 / 0.496 / 0.60 and varies within
+      a single scheme - 9 distinct ratios inside Prime Tourism Vehicle alone. Route to
+      the gate; never emit a share or a percentage from it.
+
+  derived:
+    disbursement_rate:
+      expression: "SUM(total_disbursement) / NULLIF(SUM(sanctioned_amount), 0)"
+      aliases: [utilisation, utilization, "disbursement rate", "share disbursed",
+                "how much was actually paid", "fund utilisation"]
+      statewide_value: 0.581
+      note: >
+        58.1% statewide, and it is the most informative single figure in this scheme.
+        Ranges from 0.1% (Sericulture spinning) to 100% (Motorcaravan, n=1). Always
+        state both numerator and denominator in the answer.
+    pending_amount:
+      expression: "SUM(sanctioned_amount) - SUM(total_disbursement)"
+      aliases: [pending, outstanding, "not yet paid", balance, "yet to be disbursed"]
+      critical: >
+        A DERIVATION, NOT A COLUMN - unlike PMAY, which stores amount_pending. Label it
+        as calculated. Four records disburse more than they sanctioned, so it can go
+        negative in a small group; do not clamp it silently.
+
+# ---------------------------------------------------------------------------
+# PAYMENT LADDERS AND SCHEME SHAPE
+# Values a user may quote at the bot, and the shape an answer has to respect.
+# All figures: source workbook 2026-09-23, unverified_in_db.
+# ---------------------------------------------------------------------------
+payment_ladders:
+  note: >
+    In the fixed-entitlement schemes the money moves in equal steps, so the amounts a
+    user quotes are recognisable values rather than arbitrary ones. Resolve a quoted
+    amount to the scheme it belongs to before assuming it is a filter value.
+  ladders:
+  - scheme: Meghalaya Piggery Development Scheme
+    entitlement: 125000
+    tranche: 31250
+    tranche_share: one quarter
+    common_totals:
+    - {total: 62500,  records: 1145, meaning: two tranches - half the entitlement, by far the most common outcome}
+    - {total: 125000, records: 98,   meaning: four tranches - fully paid}
+    - {total: 93750,  records: 33,   meaning: three tranches}
+    note: >
+      The four records with a corrupted date all sit at exactly Rs 31,250, i.e. one
+      tranche. Their money is intact; only the date was lost.
+  - scheme: Meghalaya Poultry Farming Scheme
+    entitlement: 120000
+    tranche: 30000
+    tranche_share: one quarter
+    common_totals:
+    - {total: 60000,  records: 226, meaning: two tranches - half the entitlement}
+    - {total: 120000, records: 214, meaning: fully paid}
+  - scheme: Meghalaya Dairy Development Scheme
+    entitlement: 300000
+    tranche: 75000
+    tranche_share: one quarter
+  - scheme: Meghalaya Goat Farming Scheme
+    entitlement: 100000
+    tranche: 40000
+    common_totals: [{total: 40000, records: 48, meaning: one payment on every record - the whole scheme}]
+    note: The only scheme with no loans at all, 0 of 48 records.
+  resolution_rule: >
+    A user quoting "62,500" or "31,250" is almost certainly talking about Piggery, and
+    "60,000" or "30,000" about Poultry. Treat a quoted ladder amount as a strong signal
+    for the scheme, but confirm it rather than filtering on the amount alone - the same
+    figure appears as a loan amount elsewhere (Rs 62,500 appears 96 times as a loan).
+
+scheme_shape_facts:
+  note: >
+    Facts an answer should carry when it names a scheme. Each one changes how a number
+    from that scheme should be read.
+  facts:
+  - scheme: Meghalaya Sericulture & Weaving Scheme (spinning)
+    fact: "NO SUBSIDY WAS PAID AT ALL - 0 of 198 records. The scheme's entire Rs 26,000 of disbursement comes from 2 loans."
+    handling: Say nothing was paid out rather than quoting a 0.1% rate, which reads as underperformance rather than inactivity.
+  - scheme: Meghalaya Goat Farming Scheme
+    fact: "NO LOANS AT ALL - 0 of 48 records. Every record is subsidy-only, one payment of Rs 40,000."
+    handling: A zero in a loan breakdown is correct here, not a gap.
+  - scheme: Prime Agriculture Response Vehicle Scheme
+    fact: "Subsidy and loan on the SAME 135 records - the two are halves of one package."
+    handling: Do not present subsidy and loan as alternatives for this scheme.
+  - scheme: Prime Tourism Vehicle Scheme
+    fact: "Same package shape - 78 records carry both. Also the highest disbursement rate of any scheme at 81.3%."
+  - scheme: Meghalaya Agriculture Warehouse Scheme
+    fact: "The largest scheme BY MONEY - Rs 44.34 Cr sanctioned from just 87 records - while Piggery is largest by count."
+    handling: This is why "biggest scheme" must name its measure.
+  - scheme: Meghalaya Piggery Development Scheme
+    fact: "48% of all records, a fixed Rs 1,25,000 entitlement, and loans on only 211 of 1,353."
+    handling: Any statewide average is a Piggery average. Say so or break it down.
+  - scheme: Meghalaya Poultry Farming Scheme
+    fact: "Loans on 219 of 454 records - a far higher rate than Piggery's, in a much smaller scheme."
+  - scheme: Meghalaya Sports & Wellness Scheme
+    fact: "Nine records spanning Rs 4,00,000 to Rs 3,00,00,000, and a tenth was quarantined at load."
+    handling: Never quote a percentage for this scheme, and carry the quarantine caveat.
+  - scheme: Meghalaya Motorcaravan Scheme
+    fact: "One record, fully disbursed at Rs 50,00,000."
+    handling: n=1. Never a rate, a percentage or a ranking position.
+  - scheme: Meghalaya Any Business Venture Scheme
+    fact: "The most varied sanctions in the scheme - 20 distinct amounts across 33 records - and the only scheme holding records with no sanctioned amount at all."
+
+# ---------------------------------------------------------------------------
+region_groupings:
+  note: >
+    Users group districts by hill range. These are not columns - expand into an IN list
+    and state which districts were included.
+  groups:
+    "Garo Hills":
+      districts: [East Garo Hills, North Garo Hills, South Garo Hills,
+                  South West Garo Hills, West Garo Hills]
+      records: 1387
+      aliases: [Garo, Garo region, Garo Hills region, GH]
+      note: "Just under half the scheme - 1,387 of 2,823 records."
+    "Khasi Hills":
+      districts: [East Khasi Hills, Eastern West Khasi Hills, South West Khasi Hills,
+                  West Khasi Hills]
+      records: 762
+      aliases: [Khasi, Khasi region, Khasi Hills region, KH]
+    "Jaintia Hills":
+      districts: [East Jaintia Hills, West Jaintia Hills]
+      records: 188
+      aliases: [Jaintia, Jaintia region, Jaintia Hills region, JH]
+    "Ri Bhoi":
+      districts: [Ri Bhoi]
+      records: 486
+      aliases: [Ri Bhoi region, Bhoi]
+      note: >
+        Ri Bhoi belongs to no hill range - it is its own district and its own group. Both
+        readings produce the same filter, so no clarification is needed. Do not fold it
+        into Khasi Hills.
+  whole_state:
+    aliases: [Meghalaya, state, statewide, whole state, all districts, overall]
+    behaviour: no district filter at all.
+
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLES
+# ---------------------------------------------------------------------------
+worked_examples:
+
+- user: "how much was disbursed under CM Elevate"
+  resolve:
+  - { text: "CM Elevate", type: scheme_partition, status: ambiguous,
+      question: "the disbursement dataset or the applications dataset?" }
+  - { text: disbursed, type: overloaded, status: ambiguous,
+      question: "subsidy, loan, or both?" }
+  sql: null
+  note: >
+    TWO clarifications before any SQL. This is the single most common question in the
+    use-case workbook and it cannot be answered as asked.
+
+- user: "total disbursement for piggery"
+  resolve:
+  - { text: piggery, type: scheme, canonical: "Meghalaya Piggery Development Scheme", matched_by: 2_alias }
+  - { text: "total disbursement", type: measure, canonical: "SUM(total_disbursement)" }
+  sql: "SELECT ROUND(SUM(total_disbursement)/1e7, 2) AS disbursed_cr FROM curated.v_cm_elevate_disbursement WHERE scheme_name = 'Meghalaya Piggery Development Scheme';"
+  expected_source_value: 95241250
+  note: >
+    "Piggery" names a scheme in BOTH CM Elevate partitions, so it does not settle which
+    one is meant - but "total disbursement" does, because the application partition has
+    no money at all.
+
+- user: "average sanctioned amount for piggery"
+  resolve:
+  - { text: piggery, type: scheme, canonical: "Meghalaya Piggery Development Scheme" }
+  - { text: "average sanctioned amount", type: measure, reading: constant_entitlement }
+  sql: "SELECT sanctioned_amount, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE scheme_name = 'Meghalaya Piggery Development Scheme' GROUP BY sanctioned_amount;"
+  note: >
+    Every Piggery record is 1,25,000, so an average restates the entitlement. Show the
+    distribution and say the amount is fixed.
+
+- user: "sericulture disbursement by financial year"
+  resolve:
+  - { text: sericulture, type: scheme, status: ambiguous,
+      candidates: ["Meghalaya Sericulture & Weaving Scheme (spinning)", "Meghalaya Sericulture & Weaving Scheme(weaving)"],
+      question: "spinning or weaving?" }
+  note:
+    critical: true
+    text: >
+      Whichever is chosen, the answer is the same shape: NEITHER Sericulture scheme has a
+      financial year on ANY record. All 395 undated records in the scheme are these two.
+      The honest answer is that Sericulture cannot be placed on a financial-year axis at
+      all - not that it disbursed nothing in 2024-25.
+
+- user: "how many villages in WGH got support"
+  resolve:
+  - { text: WGH, type: district, canonical: "West Garo Hills", lgd_code: 278, matched_by: 4_acronym }
+  - { text: "how many villages", type: measure, canonical: "COUNT(DISTINCT village_code)" }
+  sql: "SELECT COUNT(DISTINCT village_code) AS villages FROM curated.v_cm_elevate_disbursement WHERE lgd_district = 'WEST GARO HILLS' AND entity_type <> 'Unresolved';"
+  expected_source_value: 196
+  note: >
+    54 West Garo Hills records have no village and are excluded here - say so. They stay
+    in the district's record count and money total.
+
+- user: "how many were refused"
+  resolve:
+  - { text: refused, type: overloaded, status: ambiguous,
+      question: "the desanction reason (52), the refusal flag (8), or anything withdrawn (83)?" }
+  sql: null
+  note: >
+    Three fields, three different numbers, none authoritative. Whichever the user picks,
+    name the field in the answer and mention that 32 desanctioned records still received
+    money.
+
+- user: "which scheme is the biggest"
+  resolve:
+  - { text: biggest, type: measure, status: ambiguous,
+      question: "by number of records, or by money?" }
+  note: >
+    Piggery is the biggest by records (1,353 of 2,823). Agriculture Warehouse is the
+    biggest by sanctioned money (Rs 44.34 Cr from 87 records). The two answers name
+    different schemes, so the question must be settled before SQL.
+
+- user: "records in Songsak"
+  resolve:
+  - { text: Songsak, type: block_or_village, status: ambiguous_by_level,
+      resolution: default to BLOCK, state the assumption }
+  sql: "SELECT COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE lgd_block = 'SONGSAK';"
+  note: "One of the 19 names that are both a block and a village. Default to block and say so."
+
+- user: "who received the most money"
+  resolve:
+  - { text: who, type: applicant_name, status: not_resolvable }
+  sql: null
+  note: >
+    Applicant names are not in the query surface. Offer the application number, scheme
+    and district of the largest record instead, and say names are not held.
+
+- user: "what is the sanction rate for CM Elevate Legacy"
+  resolve:
+  - { text: "sanction rate", type: absent_dimension, status: not_answerable }
+  sql: null
+  note: >
+    Every record here is a sanction. The application denominator is in a different
+    scheme with no join key. Refuse, and do NOT offer the 83 desanctioned records as the
+    complement.
+
+- user: "records in Nongthymmai"
+  resolve:
+  - { text: Nongthymmai, type: village, status: ambiguous,
+      candidates: [{code: 278407, block: Mawryngkneng, district: East Khasi Hills},
+                   {code: 277681, block: Jirang, district: Ri Bhoi},
+                   {code: 278993, block: Pynursla, district: East Khasi Hills}],
+      question: "which block - Mawryngkneng, Jirang or Pynursla?" }
+  sql: null
+  note:
+    critical: true
+    text: >
+      THREE candidates, and asking "which district?" would not resolve it - two of the
+      three are in East Khasi Hills. The question must name the BLOCK. Six other shared
+      names have the same problem; see village.ambiguity_registry.
+
+- user: "how many got 62500"
+  resolve:
+  - { text: "62500", type: payment_ladder_amount, reading: two Piggery tranches,
+      confirm: "the total disbursed, or a single payment?" }
+  sql: "SELECT scheme_name, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE total_disbursement = 62500 GROUP BY scheme_name;"
+  expected_source_value: 1145
+  note: >
+    Rs 62,500 is two Piggery tranches of 31,250, half the 1,25,000 entitlement, and it is
+    the most common outcome in the whole scheme. But the same figure appears 96 times as
+    a LOAN amount elsewhere, so confirm which measure before filtering.
+
+- user: "which block got the most money"
+  resolve:
+  - { text: "most money", type: measure, canonical: "SUM(total_disbursement)" }
+  - { text: block, type: breakdown_level, canonical: lgd_block }
+  sql: "SELECT lgd_block, ROUND(SUM(total_disbursement)/1e7, 2) AS disbursed_cr, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement GROUP BY lgd_block ORDER BY disbursed_cr DESC LIMIT 5;"
+  expected_top: Mylliem at Rs 6.67 Cr from 58 records
+  note: >
+    Mylliem wins on money while Umling wins on records (224). The answer should carry
+    both columns, because "most" means different blocks on the two measures.
+
+- user: "goat farming loans"
+  resolve:
+  - { text: "goat farming", type: scheme, canonical: "Meghalaya Goat Farming Scheme" }
+  - { text: loans, type: measure, canonical: "SUM(total_loan_disbursement)" }
+  sql: "SELECT COUNT(*) FILTER (WHERE total_loan_disbursement > 0) AS with_loan, COUNT(*) AS records FROM curated.v_cm_elevate_disbursement WHERE scheme_name = 'Meghalaya Goat Farming Scheme';"
+  expected_source_value: 0 of 48
+  note: >
+    The honest answer is zero, and it is a real finding rather than a gap - Goat Farming
+    is subsidy-only, one payment of Rs 40,000 on every record.
+
+- user: "show me Resubelpara"
+  resolve:
+  - { text: Resubelpara, type: block, status: ambiguous,
+      candidates: ["Resubelpara", "Resubelpara-Municipal Board"],
+      question: "the rural block, or the Municipal Board?" }
+  note: >
+    Two distinct stored values in the same district, 67 records against 14, and the
+    Municipal Board disbursed nothing. They are different places - never fold them
+    together, and never tidy the stored suffix away.
+
+- user: "average disbursement per applicant"
+  resolve:
+  - { text: "average disbursement", type: measure, canonical: "AVG(total_disbursement)" }
+  - { text: applicant, type: grain, canonical: record }
+  sql: "SELECT scheme_name, COUNT(*) AS records, ROUND(AVG(total_disbursement)) AS avg_rupees FROM curated.v_cm_elevate_disbursement GROUP BY scheme_name ORDER BY avg_rupees DESC;"
+  note: >
+    Broken down by scheme on purpose. A single statewide average mixes a Rs 50,00,000
+    motorcaravan with 1,353 Piggery records at a fixed Rs 1,25,000 entitlement, and is
+    dominated by the latter.
+
+# ---------------------------------------------------------------------------
+maintenance:
+  source_files:
+  - datasets/CMelevate Legacy/Cm Elevate to share to BLH.xlsx      # Sheet1, 2823 x 43
+  - datasets/CMelevate Legacy/Use_Cases_-_CM_Elevate.xlsx          # 36 use cases
+  schema_authority: SCHEMA_FOR_DEVELOPERS.md   # live information_schema extract, 2026-09-22
+  row_counts_at_generation: { source_workbook: 2823, curated.v_cm_elevate_disbursement: unverified_in_db }
+  data_span_in_source:
+    stated_financial_years: ['2024-25', '2025-26']
+    first_subsidy_date: '2024-02-17'
+    last_subsidy_date: '2026-09-04'          # after the extract date - suspect
+    first_loan_date: '1985-07-22'            # suspect, single record
+    last_loan_date: '2025-11-13'
+  last_generated: '2026-09-23'
+
+  open_verification_tasks:
+    critical: true
+    note: >
+      The value catalogues here are measured from the source workbook; the predicates are
+      read from the live view's structure. NOTHING has been measured against megh_db
+      itself. Each item is a query to run before any CM Elevate Legacy answer ships.
+    tasks:
+    - "Row count: SELECT COUNT(*) FROM curated.v_cm_elevate_disbursement - expect 2,822."
+    - "Scheme names: SELECT scheme_name FROM curated.dim_cm_elevate_disb_scheme - confirm
+       the (spinning) / (weaving) spacing survived the load exactly as stored here."
+    - "Geography casing: confirm lgd_district and lgd_block are stored UPPERCASE. Every
+       sql_predicate in this file assumes it."
+    - "dim_scheme: read scheme_code, money_unit, grain_note and time_semantics for this
+       scheme. money_unit decides every conversion and has never been read."
+    - "Unresolved rows: SELECT COUNT(*) WHERE entity_type = 'Unresolved' - expect 404."
+    - "year_key NULLs: expect 395, and confirm they are exactly the two Sericulture schemes."
+    - "loan_entity NULLs: expect 401, of which 19 carry loan money."
+    - "Confirm the four corrupted subsidy dates loaded as NULL, and that source_row_id 532
+       (1985) and 1602 / 1696 (2026-09-04) survived as stored."
+    - "source_row_id 2392 ('4 For All'): confirm it is absent from the fact, and raise the
+       quarantine with the data owner."
+
+  regeneration_rules:
+  - Re-profile the workbook AND re-query megh_db. Diff every count here. Explain each change.
+  - APPEND new canonical values and aliases. Never delete one - old questions must keep
+    resolving.
+  - Re-run the village ambiguity registry. If a name gains a code it must appear here.
+  - Re-check whether sanctioned_amount is still constant per scheme. If a second real
+    value appears inside one of the six, remove that scheme from the constant list.
+  - Re-check the FY-null bucket. If Sericulture gains a financial year, the
+    null_bucket.finding paragraph must be rewritten - it is the sharpest rule in this file.
+  - Re-check the prefix crosstab. A second cross-scheme prefix would strengthen the
+    never-parse rule; its disappearance would not weaken it.
+  - Bump resolver_version.
+  companion_files:
+  - Annotations/CMElevate_Legacy/cmelevatelegacy_schema_partitions.yaml
+  - Annotations/CMElevate_Legacy/cmelevatelegacy_foreign_key_augmentation.yaml
+  - Annotations/CMElevate_Legacy/README.md
+  - SCHEMA_FOR_DEVELOPERS.md
+  - Annotations/PMAY/README.md       # the Excel-to-YAML method this file follows

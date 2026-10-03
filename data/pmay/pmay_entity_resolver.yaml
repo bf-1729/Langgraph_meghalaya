@@ -1,0 +1,1836 @@
+resolver_version: '2.0'
+resolver_name: pmay_entity_resolver
+display_name: PMAY-G Entity Resolver (Meghalaya) - curated star schema
+generated_from:
+- quadrent/datasets/PMAY/PMAY_FullyMapped_with_dates.xlsx
+- quadrent/datasets/PMAY/PMAY_FullyMapped_FY_summary.xlsx
+- SCHEMA_FOR_DEVELOPERS.md (live information_schema extract, 2026-08-24)
+generated_on: '2026-08-21'
+revised_on: '2026-08-24'
+companion_schema: pmay_schema_partitions.yaml
+
+# ===========================================================================
+# v2.0 - 2026-08-24 - RETARGETED FROM THE FLAT TABLE TO THE CURATED VIEW
+#
+# The VALUE catalogues below (district, block and village names, aliases,
+# allotment categories, status labels) are unchanged - those are still the
+# stored values. What changed is WHERE they live and HOW to filter them.
+#
+#   pmay_beneficiaries       -> curated.v_pmay
+#   house_status             -> status_name  (+ is_completed / is_in_progress)
+#   installment_paid         -> installments_paid
+#   mapped_district_lgd_name -> lgd_district        STORED UPPERCASE NOW
+#   mapped_block_lgd_name    -> lgd_block           STORED UPPERCASE NOW
+#   mapped_village_lgd_name  -> lgd_village_name
+#   mapped_village_lgd_code  -> village_code
+#   mapping_status           -> mapping_category (+ mapping_confidence_pct)
+#   mapped_district_lgd_code -> NO EQUIVALENT. District and block have no code
+#   mapped_block_lgd_code       column in the curated layer, only names.
+#   beneficiary_name         -> DROPPED AT INGEST. Name lookup is impossible.
+#   pmay_fy_summary          -> GONE. Financial year is dim_year; the pre-aggregate
+#                               is v_pmay_monthly_sanctions, at MONTH grain.
+#
+# All record counts, distinct counts and value distributions below are from the
+# source workbook (2026-08-21) and have NOT been re-verified against megh_db.
+# ===========================================================================
+
+description: >
+  Value-level entity resolution for the PMAY-G NLP-to-SQL bot. This file answers exactly
+  one question: the user typed some text - which stored database value did they mean?
+  It does NOT define column meanings or aggregation; that is the companion stage2
+  semantic schema. Resolve entities with this file FIRST, then hand the resolved
+  canonical values to schema linking and SQL generation.
+
+scheme:
+  id: pmay
+  display_name: PMAY-G
+  full_name: Pradhan Mantri Awaas Yojana - Gramin
+  state: Meghalaya
+  aliases: [PMAY, PMAYG, "PMAY-G", "PMAY G", "PM Awas", "PM Awaas", "Awas Yojana",
+            "Awaas Yojana", "Pradhan Mantri Awas Yojana", "Pradhan Mantri Awaas Yojana",
+            "housing scheme", "rural housing scheme", "PM housing scheme",
+            "gramin housing", "IAY", "Indira Awaas Yojana"]
+  iay_note: >
+    IAY is the predecessor scheme. Users say it, but this dataset holds PMAY-G records
+    only. Accept it as a scheme alias; never present the data as IAY data.
+
+tables:
+  houses: curated.v_pmay                     # primary query surface, 28 columns
+  fact: curated.fact_pmay_house              # underlying fact, 26 columns
+  monthly: curated.v_pmay_monthly_sanctions  # pre-aggregate, MONTH grain, crore
+  cross_scheme_money: curated.v_cross_scheme_money_district_year
+  cross_scheme_coverage: curated.v_cross_scheme_village_coverage
+
+dataset_shape:
+  grain: one row per sanctioned PMAY-G house
+  row_count: unverified_in_db
+  row_count_note: The source workbook held 171107 rows. The curated count is unmeasured.
+  single_table: false
+  emits_no_joins: >
+    curated.v_pmay already pre-joins dim_year, dim_geography, dim_scheme and
+    dim_pmay_house_status, so the generator still emits WHERE and GROUP BY only. The
+    reason changed in v2.0 - it is no longer "there is nothing to join to" but
+    "it is already joined". See pmay_foreign_key_augmentation.yaml.
+
+# ---------------------------------------------------------------------------
+# HOW TO USE THIS FILE
+# ---------------------------------------------------------------------------
+how_to_use:
+  step_1_classify: >
+    Decide the entity type of each span of user text. Order matters because block and
+    village names collide - see cross_dimension_collisions. Try: financial_year ->
+    calendar_year -> district -> block -> village -> house_status -> house_alloted_to ->
+    mapping_status -> identifier -> measure.
+  step_2_normalise: Apply normalisation.fold to the user text and to candidate values.
+  step_3_match: Walk matching_pipeline in order; stop at the first stage that hits.
+  step_4_emit: Return an output_contract shape. Never put raw user text into SQL.
+  step_5_predicate: Build WHERE using the dimension's sql_predicate template.
+
+  hard_rules:
+  - "CASE RULE CHANGED IN v2.0. lgd_district and lgd_block are stored UPPERCASE in
+    dim_geography. lgd_village_name, status_name and house_alloted_to keep their stored
+    mixed case. Always compare case-folded, and emit the form the column actually stores."
+  - Villages are resolved by village_code, never by name alone. 198 village
+    names are shared by two or more different villages.
+  - "District and block have NO CODE COLUMN in the curated layer. A user who supplies an
+    LGD district or block code can be resolved to the NAME using the catalogue below,
+    but the code itself can never appear in a WHERE clause."
+  - "Beneficiary names are not in the curated layer. beneficiary_name and
+    father_mother_name were dropped at ingest. A name lookup returns not-held, never a
+    guess."
+  - Every count and every sum carries WHERE NOT is_placeholder.
+  - "Prefer is_completed over a status_name string comparison. It is NULLABLE, so
+    'not completed' is (is_completed IS DISTINCT FROM TRUE), never NOT is_completed." 
+  - The word sanctioned is dangerously overloaded - it is a house_status value, a
+    measure (sanctioned_amount) and a date (sanction_date). See overloaded_terms.
+  - A bare year is ambiguous between calendar year and financial year, and the two give
+    materially different answers. See year_disambiguation. Ask.
+  - reg_no is NOT unique (368 duplicates) and sanction_no is very much NOT unique
+    (35131 distinct across 171107 rows). Never treat either as a primary key.
+    pmay_fact_id is, and source_house_id carries the flat table's old id.
+  - NULL is missing, never zero. 462 rows have no installment/release recorded and 126
+    rows have no sanction date or amount.
+  - If more than one candidate survives, return ambiguous and ask. Never pick the first row.
+  - If nothing matches above the fuzzy floor, return not_found with suggestions. Never
+    invent a district, block, village, status or category.
+
+# ---------------------------------------------------------------------------
+normalisation:
+  fold:
+  - trim and collapse internal whitespace to single spaces
+  - uppercase
+  - strip trailing qualifier words: BLOCK, DISTRICT, VILLAGE, C&RD
+  - map & to AND
+  - treat - / ( ) and . as a single space, then re-collapse whitespace
+  squash: remove every non-alphanumeric character from the folded form
+  numeric_ids: >
+    All LGD codes and id are int64. Cast user-typed codes with int() and strip any
+    trailing .0 before comparing.
+  registration_ids: >
+    reg_no is uppercase alphanumeric beginning MG. Uppercase and strip spaces before
+    matching. sanction_no embeds a date in square brackets, e.g.
+    "MG04002/1/987[10-02-2023]" - match on the full string or on the part before "[".
+
+matching_pipeline:
+- { stage: 1_exact,     test: folded user text == folded canonical, confidence: 1.0 }
+- { stage: 2_alias,     test: folded user text in the value's aliases, confidence: 0.98 }
+- { stage: 3_squash,    test: squashed user text == squashed canonical or alias, confidence: 0.95 }
+- { stage: 4_acronym,   test: district acronym table only, confidence: 0.95,
+    note: acronyms are defined for districts only - do not invent them for blocks }
+- stage: 5_contains
+  test: folded canonical is a whole-word substring of the user text or vice versa
+  confidence: 0.85
+- stage: 6_fuzzy
+  test: RapidFuzz token_set_ratio over the dimension catalogue
+  accept_at: ">= 90 and runner-up at least 5 points lower"
+  ask_between: 80 - 89, or any score where the runner-up is within 5 points
+  reject_below: 80
+- stage: 7_embedding
+  test: BGE-small nearest neighbour over the dimension catalogue
+  use_when: fuzzy returned nothing at or above 80
+  accept_at: cosine >= 0.88 AND unique within its dimension
+- { stage: 8_fail, action: emit not_found with up to 5 suggestions }
+
+blocked_matches:
+  purpose: >
+    Pairs fuzzy matching gets wrong. Never let stage 6 or 7 resolve the left value to the
+    right one; require an exact or alias hit.
+  pairs:
+  - [Laskein, Thadlaskein]        # two different West Jaintia Hills blocks
+  - [Thadlaskein, Laskein]
+  - [Mawkynrew, Mawkyrwat]        # East Khasi Hills vs South West Khasi Hills
+  - [Mawkyrwat, Mawkynrew]
+  - [Mawsynram, Mawshynrut]       # East Khasi Hills vs West Khasi Hills
+  - [Mawshynrut, Mawsynram]
+  - [Siju, Saipung]
+  - [Woman-Married, Woman-Unmarried]
+  - [Woman-Widow, Woman-Unmarried]
+  - [Completed, House Sanctioned]
+  - [Proposed Site, "Existing site(Old House)"]
+
+output_contract:
+  resolved:
+    status: resolved
+    entity_type: district | block | village | house_status | house_alloted_to |
+                 mapping_status | financial_year | calendar_year | identifier | measure
+    user_text: <verbatim span>
+    canonical: <exact stored value>
+    lgd_code: <code, geography only>
+    confidence: <0-1>
+    matched_by: <pipeline stage>
+  ambiguous:
+    status: ambiguous
+    entity_type: <type>
+    user_text: <verbatim span>
+    candidates: [ { canonical, lgd_code, district, block } ]
+    question: <one short question naming the distinguishing attribute>
+  not_found:
+    status: not_found
+    entity_type: <type or unknown>
+    user_text: <verbatim span>
+    suggestions: [ up to 5 nearest catalogue values ]
+    message: state plainly that the value is not in the PMAY data.
+
+# ---------------------------------------------------------------------------
+overloaded_terms:
+  why: >
+    A handful of words map to more than one column in this dataset. Getting these wrong
+    produces a confidently wrong answer, so they are listed explicitly.
+
+  sanctioned:
+    readings:
+    - { means: status_name = 'House Sanctioned',
+        when: "the user asks how many houses are 'sanctioned' as a STAGE, i.e. approved but not started" }
+    - { means: SUM(sanctioned_amount),
+        when: "the user asks for a sanctioned AMOUNT, money, or rupees" }
+    - { means: "a sanction_date filter",
+        when: "the user says 'sanctioned in <year>' or 'sanctioned between'" }
+    default: >
+      "houses sanctioned in 2023" is a DATE filter over all rows, not house_status =
+      'House Sanctioned'. Only read it as the status when the user is clearly asking
+      about construction stage. When genuinely unclear, ask.
+
+  completed:
+    readings:
+    - { means: "is_completed", when: always }
+    v2_change: >
+      Use the precomputed boolean is_completed rather than status_name = 'Completed'.
+      For "not completed" write (is_completed IS DISTINCT FROM TRUE) - the flag is
+      NULLABLE and NOT is_completed would drop the undecided rows.
+    note: >
+      Do NOT infer completion from amount_released = 130000 or installments_paid = 3.
+      The status dimension is authoritative. They correlate but are not identical.
+
+  beneficiaries:
+    readings:
+    - { means: COUNT(*), when: default - the grain is one HOUSE }
+    - { means: COUNT(DISTINCT reg_no), when: "the user says distinct, unique, or individual" }
+    default: COUNT(*), and say the answer is a house count.
+    v2_change:
+      critical: true
+      text: >
+        The curated grain is one row per HOUSE, and beneficiary_name /
+        father_mother_name were DROPPED AT INGEST. "Beneficiary" can no longer mean a
+        named person. A question asking WHO a beneficiary is, or asking to look one up by
+        name, is unanswerable - return not-held. reg_no is also nullable now, so
+        COUNT(DISTINCT reg_no) excludes the NULLs; say so.
+
+  houses:
+    means: COUNT(*)
+    note: one row is one house. Same as the default beneficiary count.
+    mandatory_filter: WHERE NOT is_placeholder
+
+  amount:
+    readings:
+    - { means: SUM(sanctioned_amount), when: the user says sanctioned/approved }
+    - { means: SUM(amount_released), when: the user says released/paid/disbursed/utilised }
+    - { means: SUM(amount_pending), when: "the user says pending/unreleased/outstanding/balance" }
+    default: ask which. Do not silently pick one.
+    v2_change: >
+      amount_pending is a STORED column now, so a pending-amount question is a third
+      reading rather than a derivation. Watch the collision: "pending HOUSES" means not
+      completed (is_completed), "pending AMOUNT" means amount_pending.
+
+# ---------------------------------------------------------------------------
+cross_dimension_collisions:
+  measured:
+    block_names_that_are_also_village_names: 26
+    district_collisions: 0
+  colliding_names: [Adokgre, Amlarem, Baghmara, Batabari, Demdema, Gambegre, Laskein,
+    Lumshnong, Mawhati, Mawkynrew, Mawkyrwat, Mawlai, Mawpat, Mawryngkneng, Mawshynrut,
+    Nongstoin, Pynursla, Rambrai, Ranikor, Rerapara, Saipung, Songsak, Tikrikilla,
+    Umling, Umsning, Zikzak]
+  disambiguation_rules:
+  - If the user said "block" or "C&RD block", resolve as block.
+  - If the user said "village" or "gaon", resolve as village.
+  - With no qualifier, default to BLOCK - it is the administrative level users mean.
+  - State the assumption in the answer whenever the default fired on a colliding name.
+  - Districts never collide with anything; resolve them with no qualifier needed.
+
+# ---------------------------------------------------------------------------
+# DIMENSIONS
+# ---------------------------------------------------------------------------
+dimensions:
+
+  district:
+    name_column: lgd_district
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    case_note: >
+      v2.0 CHANGE. The flat table stored Title Case; dim_geography stores district
+      UPPERCASE. The canonical names below are kept in Title Case for display and
+      matching - emit the uppercase form in the predicate.
+    distinct: 12
+    complete: true            # all 12 Meghalaya districts present
+    collisions: none
+    sql_predicate: "lgd_district = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    code_note: >
+      v2.0 CHANGE. mapped_district_lgd_code has NO equivalent in the curated layer -
+      dim_geography carries village_code only. The lgd_code values below remain useful
+      for RESOLVING a code the user typed to a district name, but the code can never
+      appear in a WHERE clause. A question asking for a district's LGD code is
+      unanswerable.
+    prefer: Filter on the name. There is no alternative.
+    alias_provenance: >
+      canonical, lgd_code, block_count, village_count and records are read from the
+      workbook. acronym and spelling variants are curated linguistic forms.
+    values:
+    - canonical: "East Garo Hills"
+      lgd_code: 273
+      acronym: EGH
+      region: "Garo Hills"
+      records: 16899
+      block_count: 3
+      village_count: 420
+      aliases: ["EGH", "E.G.H.", "East Garo Hill", "East Garo", "E Garo Hills", "E Garo Hill", "E Garo", "EastGaroHills", "East Garo Hills District", "Williamnagar district"]
+    - canonical: "East Khasi Hills"
+      lgd_code: 274
+      acronym: EKH
+      region: "Khasi Hills"
+      records: 23952
+      block_count: 11
+      village_count: 711
+      aliases: ["EKH", "E.K.H.", "East Khasi Hill", "East Khasi", "E Khasi Hills", "E Khasi Hill", "E Khasi", "EastKhasiHills", "East Khasi Hills District", "Shillong district"]
+    - canonical: "West Jaintia Hills"
+      lgd_code: 275
+      acronym: WJH
+      region: "Jaintia Hills"
+      records: 12570
+      block_count: 4
+      village_count: 253
+      aliases: ["WJH", "W.J.H.", "West Jaintia Hill", "West Jaintia", "W Jaintia Hills", "W Jaintia Hill", "W Jaintia", "WestJaintiaHills", "West Jaintia Hills District", "Jowai district"]
+    - canonical: "Ri Bhoi"
+      lgd_code: 276
+      acronym: RB
+      region: "Ri Bhoi"
+      records: 17565
+      block_count: 5
+      village_count: 483
+      aliases: ["RB", "R.B.", "Ribhoi", "Ri-Bhoi", "Nongpoh district"]
+    - canonical: "South Garo Hills"
+      lgd_code: 277
+      acronym: SGH
+      region: "Garo Hills"
+      records: 11901
+      block_count: 5
+      village_count: 496
+      aliases: ["SGH", "S.G.H.", "South Garo Hill", "South Garo", "S Garo Hills", "S Garo Hill", "S Garo", "SouthGaroHills", "South Garo Hills District", "Baghmara district"]
+    - canonical: "West Garo Hills"
+      lgd_code: 278
+      acronym: WGH
+      region: "Garo Hills"
+      records: 33147
+      block_count: 8
+      village_count: 848
+      aliases: ["WGH", "W.G.H.", "West Garo Hill", "West Garo", "W Garo Hills", "W Garo Hill", "W Garo", "WestGaroHills", "West Garo Hills District", "Tura district"]
+    - canonical: "West Khasi Hills"
+      lgd_code: 279
+      acronym: WKH
+      region: "Khasi Hills"
+      records: 8437
+      block_count: 5
+      village_count: 450
+      aliases: ["WKH", "W.K.H.", "West Khasi Hill", "West Khasi", "W Khasi Hills", "W Khasi Hill", "W Khasi", "WestKhasiHills", "West Khasi Hills District", "Nongstoin district"]
+    - canonical: "North Garo Hills"
+      lgd_code: 656
+      acronym: NGH
+      region: "Garo Hills"
+      records: 16028
+      block_count: 4
+      village_count: 399
+      aliases: ["NGH", "N.G.H.", "North Garo Hill", "North Garo", "N Garo Hills", "N Garo Hill", "N Garo", "NorthGaroHills", "North Garo Hills District", "Resubelpara district"]
+    - canonical: "East Jaintia Hills"
+      lgd_code: 657
+      acronym: EJH
+      region: "Jaintia Hills"
+      records: 5756
+      block_count: 3
+      village_count: 157
+      aliases: ["EJH", "E.J.H.", "East Jaintia Hill", "East Jaintia", "E Jaintia Hills", "E Jaintia Hill", "E Jaintia", "EastJaintiaHills", "East Jaintia Hills District", "Khliehriat district"]
+    - canonical: "South West Khasi Hills"
+      lgd_code: 658
+      acronym: SWKH
+      region: "Khasi Hills"
+      records: 7411
+      block_count: 2
+      village_count: 277
+      aliases: ["SWKH", "S.W.K.H.", "South West Khasi Hill", "South West Khasi", "S W Khasi Hills", "S W Khasi Hill", "S W Khasi", "SouthWestKhasiHills", "South West Khasi Hills District", "Mawkyrwat district", "S West Khasi Hills"]
+    - canonical: "South West Garo Hills"
+      lgd_code: 663
+      acronym: SWGH
+      region: "Garo Hills"
+      records: 11947
+      block_count: 4
+      village_count: 452
+      aliases: ["SWGH", "S.W.G.H.", "South West Garo Hill", "South West Garo", "S W Garo Hills", "S W Garo Hill", "S W Garo", "SouthWestGaroHills", "South West Garo Hills District", "Ampati district", "S West Garo Hills"]
+    - canonical: "Eastern West Khasi Hills"
+      lgd_code: 740
+      acronym: EWKH
+      region: "Khasi Hills"
+      records: 5494
+      block_count: 2
+      village_count: 175
+      aliases: ["EWKH", "E.W.K.H.", "Eastern West Khasi Hill", "Eastern West Khasi", "Eastern W Khasi Hills", "Eastern W Khasi Hill", "Eastern W Khasi", "EasternWestKhasiHills", "Eastern West Khasi Hills District", "Mairang district", "E West Khasi Hills", "Eastern WKH"]
+
+  block:
+    name_column: lgd_block
+    code_column: none_in_curated_layer
+    stored_case: UPPERCASE in curated.dim_geography
+    case_note: >
+      v2.0 CHANGE. Same as district - dim_geography stores block UPPERCASE. Canonical
+      names below stay Title Case for matching; emit the uppercase form.
+    distinct: 56
+    integrity: >
+      Verified clean in the source workbook: no block code carries more than one name,
+      and no block code appears in more than one district.
+    sql_predicate: "lgd_block = UPPER('<canonical>')"
+    sql_predicate_by_code: null
+    code_note: >
+      v2.0 CHANGE. mapped_block_lgd_code has NO equivalent in the curated layer. Use the
+      lgd_code values below only to resolve a code the user typed to a block name.
+    scope_by_district_when_given: true
+    disambiguation: >
+      26 of these 56 names are also village names. Apply
+      cross_dimension_collisions.disambiguation_rules.
+    values:
+    - canonical: "Dambo Rongjeng"
+      lgd_code: 1971
+      district: "East Garo Hills"
+      records: 5954
+      also_a: []
+      aliases: ["DamboRongjeng", "Rongjeng", "Dambo-Rongjeng", "Dambo Rongjeng Block"]
+    - canonical: "Songsak"
+      lgd_code: 1973
+      district: "East Garo Hills"
+      records: 6103
+      also_a: [village]
+      aliases: ["Songsak Block"]
+    - canonical: "Samanda"
+      lgd_code: 1974
+      district: "East Garo Hills"
+      records: 4842
+      also_a: []
+      aliases: ["Samanda Block"]
+    - canonical: "Wapung"
+      lgd_code: 1999
+      district: "East Jaintia Hills"
+      records: 3146
+      also_a: []
+      aliases: ["Wapung Block"]
+    - canonical: "Saipung"
+      lgd_code: 2000
+      district: "East Jaintia Hills"
+      records: 2027
+      also_a: [village]
+      aliases: ["Sutnga Saipung", "Saipung Block"]
+    - canonical: "Lumshnong"
+      lgd_code: 7337
+      district: "East Jaintia Hills"
+      records: 583
+      also_a: [village]
+      aliases: ["Lumshnong Block"]
+    - canonical: "Mawphlang"
+      lgd_code: 1988
+      district: "East Khasi Hills"
+      records: 3223
+      also_a: []
+      aliases: ["Mawphlang Block"]
+    - canonical: "Mylliem"
+      lgd_code: 1989
+      district: "East Khasi Hills"
+      records: 1594
+      also_a: []
+      aliases: ["Mylliem Block"]
+    - canonical: "Mawryngkneng"
+      lgd_code: 1990
+      district: "East Khasi Hills"
+      records: 1330
+      also_a: [village]
+      aliases: ["Mawryngkneng Block"]
+    - canonical: "Mawkynrew"
+      lgd_code: 1991
+      district: "East Khasi Hills"
+      records: 1986
+      also_a: [village]
+      aliases: ["Mawkynrew Block"]
+      never_fuzzy_to: ["Mawkyrwat"]
+    - canonical: "Khatarshnong Laitkroh"
+      lgd_code: 1992
+      district: "East Khasi Hills"
+      records: 1683
+      also_a: []
+      aliases: ["KhatarshnongLaitkroh", "Khatarshnong", "Laitkroh", "Khatarshnong-Laitkroh", "Khatarshnong Laitkroh Block"]
+    - canonical: "Mawsynram"
+      lgd_code: 1993
+      district: "East Khasi Hills"
+      records: 4957
+      also_a: []
+      aliases: ["Mawsynram Block"]
+      never_fuzzy_to: ["Mawshynrut"]
+    - canonical: "Shella Bholaganj"
+      lgd_code: 1994
+      district: "East Khasi Hills"
+      records: 1654
+      also_a: []
+      aliases: ["ShellaBholaganj", "Shella", "Bholaganj", "Shella-Bholaganj", "Shella Bholaganj Block"]
+    - canonical: "Pynursla"
+      lgd_code: 1995
+      district: "East Khasi Hills"
+      records: 4310
+      also_a: [village]
+      aliases: ["Pynursla Block"]
+    - canonical: "Mawlai"
+      lgd_code: 6540
+      district: "East Khasi Hills"
+      records: 480
+      also_a: [village]
+      aliases: ["Mawlai Block"]
+    - canonical: "Mawpat"
+      lgd_code: 6541
+      district: "East Khasi Hills"
+      records: 167
+      also_a: [village]
+      aliases: ["Mawpat Block"]
+    - canonical: "Sohiong"
+      lgd_code: 6542
+      district: "East Khasi Hills"
+      records: 2568
+      also_a: []
+      aliases: ["Sohing", "Sohiong Block"]
+    - canonical: "Mawthadraishan"
+      lgd_code: 1981
+      district: "Eastern West Khasi Hills"
+      records: 1795
+      also_a: []
+      aliases: ["Mawthadraishan Block"]
+    - canonical: "Mairang"
+      lgd_code: 1982
+      district: "Eastern West Khasi Hills"
+      records: 3699
+      also_a: []
+      aliases: ["Mairang Block"]
+    - canonical: "Resubelpara"
+      lgd_code: 1970
+      district: "North Garo Hills"
+      records: 4258
+      also_a: []
+      aliases: ["Resubelpara Block"]
+    - canonical: "Kharkutta"
+      lgd_code: 1972
+      district: "North Garo Hills"
+      records: 4577
+      also_a: []
+      aliases: ["Kharkutta Block"]
+    - canonical: "Bajengdoba"
+      lgd_code: 6544
+      district: "North Garo Hills"
+      records: 5686
+      also_a: []
+      aliases: ["Bajengdoba Block"]
+    - canonical: "Adokgre"
+      lgd_code: 7334
+      district: "North Garo Hills"
+      records: 1507
+      also_a: [village]
+      aliases: ["Adokgre Block"]
+    - canonical: "Umling"
+      lgd_code: 1985
+      district: "Ri Bhoi"
+      records: 5560
+      also_a: [village]
+      aliases: ["Umling Block"]
+    - canonical: "Jirang"
+      lgd_code: 1986
+      district: "Ri Bhoi"
+      records: 2596
+      also_a: []
+      aliases: ["Jirang Block"]
+    - canonical: "Umsning"
+      lgd_code: 1987
+      district: "Ri Bhoi"
+      records: 4314
+      also_a: [village]
+      aliases: ["Umsning Block"]
+    - canonical: "Bhoirymbong"
+      lgd_code: 6543
+      district: "Ri Bhoi"
+      records: 4774
+      also_a: []
+      aliases: ["Bhoirymbong Block"]
+    - canonical: "Mawhati"
+      lgd_code: 7456
+      district: "Ri Bhoi"
+      records: 321
+      also_a: [village]
+      aliases: ["Mawhati Block"]
+    - canonical: "Chokpot"
+      lgd_code: 1975
+      district: "South Garo Hills"
+      records: 3401
+      also_a: []
+      aliases: ["Chokpot Block"]
+    - canonical: "Gasuapara"
+      lgd_code: 1976
+      district: "South Garo Hills"
+      records: 3514
+      also_a: []
+      aliases: ["Gasuapara Block"]
+    - canonical: "Baghmara"
+      lgd_code: 1977
+      district: "South Garo Hills"
+      records: 1114
+      also_a: [village]
+      aliases: ["Baghmara Block"]
+    - canonical: "Rongara"
+      lgd_code: 1978
+      district: "South Garo Hills"
+      records: 2161
+      also_a: []
+      aliases: ["Rongara Siju", "Rongara Block"]
+    - canonical: "Siju"
+      lgd_code: 7332
+      district: "South Garo Hills"
+      records: 1711
+      also_a: []
+      aliases: ["Siju Block"]
+      never_fuzzy_to: ["Saipung"]
+    - canonical: "Betasing"
+      lgd_code: 1966
+      district: "South West Garo Hills"
+      records: 3321
+      also_a: []
+      aliases: ["Betasing Block"]
+    - canonical: "Zikzak"
+      lgd_code: 1967
+      district: "South West Garo Hills"
+      records: 3791
+      also_a: [village]
+      aliases: ["Zikzak Block"]
+    - canonical: "Rerapara"
+      lgd_code: 6545
+      district: "South West Garo Hills"
+      records: 3328
+      also_a: [village]
+      aliases: ["Rerapara Block"]
+    - canonical: "Purakhasia"
+      lgd_code: 7418
+      district: "South West Garo Hills"
+      records: 1507
+      also_a: []
+      aliases: ["Purakhasia Block"]
+    - canonical: "Ranikor"
+      lgd_code: 1983
+      district: "South West Khasi Hills"
+      records: 3653
+      also_a: [village]
+      aliases: ["Ranikor Block"]
+    - canonical: "Mawkyrwat"
+      lgd_code: 1984
+      district: "South West Khasi Hills"
+      records: 3758
+      also_a: [village]
+      aliases: ["Mawkyrwat Block"]
+      never_fuzzy_to: ["Mawkynrew"]
+    - canonical: "Selsella"
+      lgd_code: 1962
+      district: "West Garo Hills"
+      records: 5028
+      also_a: []
+      aliases: ["Selsella Block"]
+    - canonical: "Dadenggiri"
+      lgd_code: 1963
+      district: "West Garo Hills"
+      records: 3413
+      also_a: []
+      aliases: ["Dadenggre", "Dadenggri", "Dadenggiri Block"]
+    - canonical: "Tikrikilla"
+      lgd_code: 1964
+      district: "West Garo Hills"
+      records: 5529
+      also_a: [village]
+      aliases: ["Tikrikila", "Tikrikilla Block"]
+    - canonical: "Rongram"
+      lgd_code: 1965
+      district: "West Garo Hills"
+      records: 3662
+      also_a: []
+      aliases: ["Rongram Block"]
+    - canonical: "Gambegre"
+      lgd_code: 1968
+      district: "West Garo Hills"
+      records: 1828
+      also_a: [village]
+      aliases: ["Gambegre Block"]
+    - canonical: "Dalu"
+      lgd_code: 1969
+      district: "West Garo Hills"
+      records: 3724
+      also_a: []
+      aliases: ["Dalu Block"]
+    - canonical: "Demdema"
+      lgd_code: 6546
+      district: "West Garo Hills"
+      records: 6125
+      also_a: [village]
+      aliases: ["Demdema Block"]
+    - canonical: "Batabari"
+      lgd_code: 7339
+      district: "West Garo Hills"
+      records: 3838
+      also_a: [village]
+      aliases: ["Batabari Block"]
+    - canonical: "Thadlaskein"
+      lgd_code: 1996
+      district: "West Jaintia Hills"
+      records: 4174
+      also_a: []
+      aliases: ["Thadlaskein Block"]
+      never_fuzzy_to: ["Laskein"]
+    - canonical: "Laskein"
+      lgd_code: 1997
+      district: "West Jaintia Hills"
+      records: 5251
+      also_a: [village]
+      aliases: ["Laskein Block"]
+      never_fuzzy_to: ["Thadlaskein"]
+    - canonical: "Amlarem"
+      lgd_code: 1998
+      district: "West Jaintia Hills"
+      records: 2377
+      also_a: [village]
+      aliases: ["Amlarem Block"]
+    - canonical: "Namdong"
+      lgd_code: 7335
+      district: "West Jaintia Hills"
+      records: 768
+      also_a: []
+      aliases: ["Namdong Block"]
+    - canonical: "Mawshynrut"
+      lgd_code: 1979
+      district: "West Khasi Hills"
+      records: 2682
+      also_a: [village]
+      aliases: ["Mawshynrut Block"]
+      never_fuzzy_to: ["Mawsynram"]
+    - canonical: "Nongstoin"
+      lgd_code: 1980
+      district: "West Khasi Hills"
+      records: 2830
+      also_a: [village]
+      aliases: ["Nongstoin Block"]
+    - canonical: "Rambrai"
+      lgd_code: 7333
+      district: "West Khasi Hills"
+      records: 822
+      also_a: [village]
+      aliases: ["Rambrai Jyrngam", "Rambrai Block"]
+    - canonical: "Ri Muliang"
+      lgd_code: 7336
+      district: "West Khasi Hills"
+      records: 630
+      also_a: []
+      aliases: ["RiMuliang", "Ri Muliang Block"]
+    - canonical: "Shallang"
+      lgd_code: 7338
+      district: "West Khasi Hills"
+      records: 1473
+      also_a: []
+      aliases: ["Shallang Block"]
+
+  village:
+    name_column: lgd_village_name
+    code_column: village_code
+    stored_case: >
+      Title Case in dim_geography.lgd_village_name (21 names legitimately break it -
+      see casing_exceptions). UNLIKE district and block, the village name is NOT
+      uppercased in the curated layer.
+    distinct_names: 4855
+    distinct_codes: 5121
+    integrity: >
+      Verified clean: no village code carries more than one name, and no village code
+      appears in more than one block. The code is a reliable key; the NAME is not.
+    sql_predicate_preferred: "village_code = <lgd_code>"
+    sql_predicate_fallback: "lgd_village_name = '<canonical>'"
+    counting_villages: >
+      Use COUNT(DISTINCT village_code), never COUNT(DISTINCT name) - 266
+      villages would be lost to shared names.
+
+    resolution_strategy:
+    - 1. If the user gave a numeric code, resolve on village_code directly.
+    - 2. Fold the name and look it up scoped by any district or block also given.
+    - 3. If exactly one code survives, resolve and emit the CODE, not the name.
+    - 4. If more than one survives, return ambiguous with candidate codes plus their
+         district and block. Ask which one.
+    - 5. If none survive, run fuzzy then embedding, then not_found with 5 suggestions.
+
+    casing_exceptions:
+      count: 21
+      note: >
+        These are stored exactly as shown and are not Title Case. Do not "correct" them.
+      values: ["12th Mer", "15th Mile Nongthymmai", "5th Mile", "Baridua 10th Mile",
+               "Bogularbhita-II", "Boldamgre II", "Bollonggre II", "Chapahati II",
+               "Chapahati III", "Chengkurigre II", "Dhapangpara II", "Dhapangpara III",
+               "Kalapani II", "Mawmluh II", "Nonglwai II", "Pahammawlein 20th Mile",
+               "Rabidaspara II", "Salbila II", "Salbila III", "Seinduli II",
+               "Soleartek II"]
+      numeric_prefix_rule: >
+        Names beginning with a digit ("5th Mile", "12th Mer") must not be mistaken for
+        LGD codes. A village code in this dataset is a 6-digit integer with no letters.
+
+    ambiguity:
+      shared_names: 198
+      detail: >
+        198 village names are used by two or more physically different villages. Village
+        name alone is NEVER a key.
+      resolve_by_district: 159
+      resolve_by_block: 39      # every copy sits in ONE district, so naming the
+                                # district does not help - ask for the block
+      registry_key: "NAME: { codes, districts, resolve_by }"
+      district_codes_used: >
+        EGH East Garo Hills, EJH East Jaintia Hills, EKH East Khasi Hills,
+        EWKH Eastern West Khasi Hills, NGH North Garo Hills, RB Ri Bhoi,
+        SGH South Garo Hills, SWGH South West Garo Hills, SWKH South West Khasi Hills,
+        WGH West Garo Hills, WJH West Jaintia Hills, WKH West Khasi Hills
+      registry:
+        ADUGRE: { codes: 4, districts: [SGH, SWGH, WGH], resolve_by: district }
+        AGALGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        AKINPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        ALLAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        AMBARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        AMONGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        AMPANGGRE: { codes: 3, districts: [EGH, SGH, WGH], resolve_by: district }
+        ANCHENGGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        APALGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        ARAGITTIM: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        ARUAKGRE: { codes: 2, districts: [NGH], resolve_by: block }
+        ASIMGRE: { codes: 6, districts: [EGH, SGH, WGH], resolve_by: district }
+        ASIRAGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        BALADINGGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BALALGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BALUPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        BAWEGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        BELBARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BERUPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BIBRAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        BILKONA: { codes: 2, districts: [SGH], resolve_by: block }
+        BOKMAGRE: { codes: 2, districts: [NGH, WGH], resolve_by: district }
+        BOLBOKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        BOLCHUGRE: { codes: 6, districts: [SGH, SWGH, WGH], resolve_by: district }
+        BOLDAMGRE: { codes: 5, districts: [SGH, WGH], resolve_by: district }
+        BOLLONGGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BOLSALGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        BORJHORA: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        BORSORA: { codes: 2, districts: [EJH, SWKH], resolve_by: district }
+        BUGAKOLGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        CHAMAGURI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        CHANDIGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        CHERAN SONGGITCHAM: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        CHERANGRE: { codes: 3, districts: [EGH, WGH], resolve_by: district }
+        CHIBOKGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        CHIDEKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        CHIGITCHAKGIRI: { codes: 2, districts: [SGH], resolve_by: block }
+        CHIGITCHAKGRE: { codes: 4, districts: [SWGH, WGH], resolve_by: district }
+        CHIGRANGGRE: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        CHIOKGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        DABAKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DABIGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DAGALGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DALMAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DAMALGRE: { codes: 4, districts: [SGH, SWGH, WGH], resolve_by: district }
+        DAMJONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DANGSAPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DARECHIKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        DASPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        DEMTHRING: { codes: 2, districts: [EKH, WJH], resolve_by: district }
+        DEWLIEH: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        DEWSAW: { codes: 3, districts: [EKH, EWKH], resolve_by: district }
+        DIGRANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DILMA SONGGITAL: { codes: 2, districts: [EGH, NGH], resolve_by: district }
+        DILNIGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        DIRANG: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        DOMBAGRE: { codes: 2, districts: [SWGH], resolve_by: block }
+        DOMBAH: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        DOMJRI: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        DOMTRAW: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        DOPANANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        DURAGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        GALWANGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        GAMBARIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        GIMBILGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        GOLAGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        GONGGANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        JANGRAPARA: { codes: 2, districts: [WGH], resolve_by: block }
+        JARAIN: { codes: 3, districts: [EJH, EKH, WJH], resolve_by: district }
+        JONGDIKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        KIMDEGRE: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        KODALDHOWA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        KORAIBARI: { codes: 2, districts: [SWKH, WGH], resolve_by: district }
+        KOSIGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        KOTCHUGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        KREMMYRSIANG: { codes: 2, districts: [EJH, WJH], resolve_by: district }
+        LAITKSEH: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        LAITMAWSIANG: { codes: 2, districts: [EKH], resolve_by: block }
+        LALMATI: { codes: 2, districts: [RB, WGH], resolve_by: district }
+        LANGTOR: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        LAPALANG: { codes: 2, districts: [EKH], resolve_by: block }
+        LAWSIEJ: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        LUMDIENGJRI: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        LUMDIENGNGAN: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        LUMKYA: { codes: 2, districts: [RB, WJH], resolve_by: district }
+        LUMMAWBAH: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        LUMPYNGNGAD: { codes: 4, districts: [SWKH, WJH, WKH], resolve_by: district }
+        LUMSHYIAP: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        LUMSOHPHOH: { codes: 2, districts: [RB], resolve_by: block }
+        LYNGNGAI: { codes: 2, districts: [EKH], resolve_by: block }
+        MAGURMARI: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        MALCHAPARA: { codes: 2, districts: [NGH, SWGH], resolve_by: district }
+        MANDAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        MANDALGRE: { codes: 2, districts: [EGH, SWGH], resolve_by: district }
+        MARAKAPARA: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        MATCHOKGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        MATCHOKPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        MAWBEH: { codes: 2, districts: [EKH], resolve_by: block }
+        MAWBLANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWBRI: { codes: 4, districts: [EKH, RB, SWKH, WKH], resolve_by: district }
+        MAWIAPBANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWIONG: { codes: 4, districts: [EKH, RB, SWKH, WKH], resolve_by: district }
+        MAWKHAN: { codes: 3, districts: [EKH, EWKH, RB], resolve_by: district }
+        MAWKHAP: { codes: 3, districts: [EKH, RB, WKH], resolve_by: district }
+        MAWLANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWLEIN: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        MAWLIEH: { codes: 3, districts: [EKH, EWKH, WKH], resolve_by: district }
+        MAWLONG: { codes: 5, districts: [EKH, RB, WJH, WKH], resolve_by: district }
+        MAWNGAP: { codes: 2, districts: [WJH, WKH], resolve_by: district }
+        MAWPAT: { codes: 3, districts: [EWKH, RB, SWKH], resolve_by: district }
+        MAWPDANG: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        MAWPEN: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        MAWROH: { codes: 2, districts: [EWKH], resolve_by: block }
+        MAWRYNGKANG: { codes: 3, districts: [EKH, RB], resolve_by: district }
+        MAWSAW: { codes: 3, districts: [SWKH, WKH], resolve_by: district }
+        MAWSHUT: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        MAWSMAI: { codes: 4, districts: [EKH, EWKH, RB, WKH], resolve_by: district }
+        MEGAPGRE: { codes: 3, districts: [SGH, SWGH, WGH], resolve_by: district }
+        MEGONGGRE: { codes: 3, districts: [WGH], resolve_by: block }
+        MYNSAIN: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        NAWALGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        NAYAPARA: { codes: 3, districts: [SWGH, SWKH, WGH], resolve_by: district }
+        NIANGDAI: { codes: 2, districts: [EWKH, RB], resolve_by: district }
+        NOGORPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        NOKATGRE: { codes: 3, districts: [SGH, SWGH], resolve_by: district }
+        NONGBAH: { codes: 2, districts: [WJH, WKH], resolve_by: district }
+        NONGDEWSAW: { codes: 2, districts: [RB, SWKH], resolve_by: district }
+        NONGDHAR: { codes: 2, districts: [WJH, WKH], resolve_by: district }
+        NONGDOM: { codes: 3, districts: [EWKH, WKH], resolve_by: district }
+        NONGJRI: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        NONGKASEN: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        NONGKYNDANG: { codes: 2, districts: [WKH], resolve_by: block }
+        NONGKYNRIH: { codes: 2, districts: [RB, WJH], resolve_by: district }
+        NONGLAIT: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        NONGLANG: { codes: 2, districts: [EWKH, SWKH], resolve_by: district }
+        NONGLUM: { codes: 2, districts: [RB], resolve_by: block }
+        NONGMAWLEIN: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        NONGMAWLONG: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        NONGPRIANG: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        NONGRAH: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        NONGRIAT: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        NONGRYNGKOH: { codes: 2, districts: [EKH, WJH], resolve_by: district }
+        NONGSDER: { codes: 2, districts: [EKH, RB], resolve_by: district }
+        NONGTHYMMAI: { codes: 4, districts: [EWKH, RB, WKH], resolve_by: district }
+        NONGTHYMME: { codes: 2, districts: [EJH, WJH], resolve_by: district }
+        NONGTRAW: { codes: 3, districts: [EKH, RB, WKH], resolve_by: district }
+        NOONMATI: { codes: 2, districts: [SWGH], resolve_by: block }
+        PANBARI: { codes: 2, districts: [NGH, WGH], resolve_by: district }
+        PHOTJALEI: { codes: 2, districts: [SWKH, WKH], resolve_by: district }
+        POMLUM: { codes: 2, districts: [EKH], resolve_by: block }
+        PYRDA: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        RANGSAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        RONGALGRE: { codes: 3, districts: [EGH, WGH], resolve_by: district }
+        RONGBAKGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        RONGBILBANGGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        RONGBOKGRE: { codes: 2, districts: [SGH, WGH], resolve_by: district }
+        RONGCHIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RONGDENGGRE: { codes: 3, districts: [SGH, WGH], resolve_by: district }
+        RONGJIGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        RONGRAMGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        RONGRONGGRE: { codes: 3, districts: [EGH, SGH, WGH], resolve_by: district }
+        RONGRU ASIM: { codes: 2, districts: [SGH], resolve_by: block }
+        RONGSIGRE: { codes: 2, districts: [SGH], resolve_by: block }
+        RTIANG: { codes: 2, districts: [RB, WJH], resolve_by: district }
+        SALBARI: { codes: 2, districts: [SWGH, WKH], resolve_by: district }
+        SAMPALGRE: { codes: 2, districts: [EGH, WGH], resolve_by: district }
+        SHYRWANG: { codes: 2, districts: [EJH, EWKH], resolve_by: district }
+        SIEJIONG: { codes: 2, districts: [EKH, SWKH], resolve_by: district }
+        SILDUBI: { codes: 2, districts: [NGH, WKH], resolve_by: district }
+        SOHPHOH: { codes: 3, districts: [EKH, RB, WJH], resolve_by: district }
+        TARAPARA: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+        TEBRONGGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        TEKSRAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        TIEHBAH: { codes: 3, districts: [EKH, EWKH, WKH], resolve_by: district }
+        TIMBOGRE: { codes: 2, districts: [RB, WGH], resolve_by: district }
+        TLUH: { codes: 2, districts: [EJH, EKH], resolve_by: district }
+        TUM TUM: { codes: 2, districts: [WJH, WKH], resolve_by: district }
+        ULUBARI: { codes: 2, districts: [RB, SWGH], resolve_by: district }
+        UMBIR: { codes: 2, districts: [RB, SWKH], resolve_by: district }
+        UMBLAI: { codes: 2, districts: [EKH], resolve_by: block }
+        UMIONG: { codes: 2, districts: [RB, WKH], resolve_by: district }
+        UMKREM: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        UMPDEM: { codes: 2, districts: [EKH, EWKH], resolve_by: district }
+        UMPUNG: { codes: 2, districts: [RB, SWKH], resolve_by: district }
+        UMSALANG: { codes: 2, districts: [WJH], resolve_by: block }
+        UMSAW: { codes: 6, districts: [EKH, RB, SWKH, WKH], resolve_by: district }
+        UMSOHLANG: { codes: 2, districts: [RB], resolve_by: block }
+        UMTHAM: { codes: 2, districts: [RB], resolve_by: block }
+        UMTHLI: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        UMTHLONG: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        WADAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        WAGEBOKGRE: { codes: 2, districts: [SGH], resolve_by: block }
+        WAHIAJER: { codes: 2, districts: [EJH, WJH], resolve_by: district }
+        WAHLYNGDOH: { codes: 2, districts: [EKH, WKH], resolve_by: district }
+        WAKANTAGRE: { codes: 3, districts: [SWGH, WGH], resolve_by: district }
+        WANKOLAGRE: { codes: 2, districts: [WGH], resolve_by: block }
+        WARAMGRE: { codes: 2, districts: [NGH, SGH], resolve_by: district }
+        WATREGRE: { codes: 2, districts: [SWGH, WGH], resolve_by: district }
+
+  house_status:
+    column: status_name
+    column_v1: house_status
+    source: curated.dim_pmay_house_status, pre-joined into curated.v_pmay
+    rollup_flags: [is_completed, is_in_progress]
+    stored_case: Title Case
+    distinct: 6
+    closed_set: true
+    nulls: 12
+    sql_predicate: "status_name = '<canonical>'"
+    prefer_rollup: >
+      v2.0 CHANGE. For 'completed' and 'in progress' use the precomputed booleans
+      is_completed / is_in_progress instead of comparing status_name to a string. Reach
+      for status_name only for the stages that have no flag - Plinth, Roof Cast,
+      House Sanctioned, Proposed Site, Existing site(Old House).
+    rollup_null_trap:
+      critical: true
+      text: >
+        is_completed and is_in_progress are NULLABLE - a status whose roll-up is
+        undecided is NULL, not false. WHERE is_completed is correct for 'completed'.
+        NOT is_completed is WRONG for 'not completed' because it also drops the NULLs.
+        Write (is_completed IS DISTINCT FROM TRUE).
+    authoritative: >
+      status_name is the ONLY authoritative construction-stage field. Never infer stage
+      from amount_released or installments_paid even though they correlate.
+    ordering: >
+      Progression is Proposed Site -> Existing site(Old House) -> House Sanctioned ->
+      Plinth -> Roof Cast -> Completed. Use this order for stage comparisons and charts.
+    values:
+    - canonical: "Completed"
+      records: 129941
+      stage_order: 6
+      aliases: ["complete", "finished", "done", "constructed", "built", "house completed", "completed house", "fully built"]
+    - canonical: "Roof Cast"
+      records: 25000
+      stage_order: 5
+      aliases: ["roof", "roof casting", "roof level", "roof stage", "roof cast stage", "casting done"]
+    - canonical: "Plinth"
+      records: 13984
+      stage_order: 4
+      aliases: ["plinth level", "plinth stage", "foundation", "foundation level", "plinth completed"]
+    - canonical: "House Sanctioned"
+      records: 2057
+      stage_order: 3
+      aliases: ["sanctioned", "sanctioned only", "approved not started", "not started", "yet to start", "sanction stage", "sanctioned stage", "sanctioned status"]
+    - canonical: "Existing site(Old House)"
+      records: 73
+      stage_order: 2
+      aliases: ["old house", "existing site", "existing house", "old site", "existing site old house"]
+    - canonical: "Proposed Site"
+      records: 40
+      stage_order: 1
+      aliases: ["proposed", "site proposed", "proposed stage"]
+    null_handling:
+      rows: 12
+      rule: >
+        12 rows have no house_status. They are missing, not a stage. Exclude them from
+        status breakdowns and say so if the user asks for a full status split.
+    derived_groups:
+      note_v2: >
+        v2.0 CHANGE. in_progress is now a stored boolean, is_in_progress, on
+        dim_pmay_house_status. Prefer the flag over the member list - the flag is the
+        database's own roll-up and the member list is this file's reconstruction of it.
+        If they disagree, the flag wins and this file is stale.
+      in_progress:
+        prefer_flag: is_in_progress
+        members: [Roof Cast, Plinth, House Sanctioned]
+        records: 41041
+        aliases: [in progress, ongoing, under construction, incomplete, not completed,
+                  pending houses, work in progress]
+      not_started:
+        members: [House Sanctioned, Proposed Site, "Existing site(Old House)"]
+        records: 2170
+        aliases: [not started, yet to begin, no construction]
+      note: >
+        v2.0 CHANGE. "incomplete" or "pending" means NOT completed. Build it as
+        (is_completed IS DISTINCT FROM TRUE), which keeps the rows whose roll-up is
+        undecided. The v1.0 form status_name <> 'Completed' AND status_name IS NOT NULL
+        silently drops the 12 status-less houses.
+        Do not confuse "pending houses" with amount_pending, which is money.
+
+  house_alloted_to:
+    column: house_alloted_to
+    stored_case: mixed - stored exactly as shown, do not re-case
+    distinct: 7
+    closed_set: true
+    nulls: 0
+    sql_predicate: "house_alloted_to = '<canonical>'"
+    warning: >
+      Do not infer gender or marital status beyond the stored category. There is no
+      separate gender column.
+    values:
+    - canonical: "Joint(Husband and Wife)"
+      records: 110365
+      aliases: ["joint", "joint ownership", "husband and wife", "couple", "jointly allotted", "joint allotment", "husband wife"]
+    - canonical: "Woman-Married"
+      records: 42331
+      aliases: ["married woman", "married women", "woman married", "wife"]
+    - canonical: "Man"
+      records: 14221
+      aliases: ["male", "men", "male beneficiary", "males"]
+    - canonical: "Woman-Widow"
+      records: 3133
+      aliases: ["widow", "widows", "widowed woman", "woman widow"]
+    - canonical: "Woman-Unmarried"
+      records: 1055
+      aliases: ["unmarried woman", "single woman", "unmarried women", "woman unmarried"]
+    - canonical: "Self"
+      records: 1
+      aliases: []
+      singleton: true
+      note: >
+        Exactly 1 record. Almost certainly a data-entry artefact rather than a
+        real category. Include it in totals but never present it as a
+        meaningful category in a breakdown without saying n=1.
+    - canonical: "Woman"
+      records: 1
+      aliases: ["woman only"]
+      singleton: true
+      note: >
+        Exactly 1 record. Almost certainly a data-entry artefact rather than a
+        real category. Include it in totals but never present it as a
+        meaningful category in a breakdown without saying n=1.
+    derived_groups:
+      women_any:
+        members: [Woman-Married, Woman-Widow, Woman-Unmarried, Woman]
+        records: 46520
+        aliases: [women, woman, female, female beneficiaries, women beneficiaries,
+                  houses to women, allotted to women]
+        critical: >
+          "How many houses went to women" means ALL FOUR of these categories, not just
+          Woman-Married. Answering with Woman-Married alone understates by 4189 records.
+          This group EXCLUDES Joint(Husband and Wife) - mention that joint allotments
+          (110365) also involve a woman if the user's intent looks broader, and offer
+          the wider figure rather than silently choosing.
+      women_or_joint:
+        members: [Woman-Married, Woman-Widow, Woman-Unmarried, Woman,
+                  "Joint(Husband and Wife)"]
+        records: 156885
+        aliases: [women including joint, any female ownership, women owned or co-owned]
+      solely_male:
+        members: [Man]
+        records: 14221
+        aliases: [men only, solely male, male only]
+
+  mapping_status:
+    column: mapping_category
+    column_v1: mapping_status
+    raw_label_column: fact_pmay_house.mapping_status_raw
+    confidence_column: mapping_confidence_pct
+    v2_change:
+      critical: true
+      text: >
+        The 44 composite labels were split at ingest. curated.v_pmay exposes
+        mapping_category (a bucket) and mapping_confidence_pct (a number). The raw
+        44-label string survives only as fact_pmay_house.mapping_status_raw, which the
+        VIEW DOES NOT EXPOSE. Filter on mapping_category; compare confidence with
+        mapping_confidence_pct. The percent-parsing SQL below is OBSOLETE.
+      obsolete_predicates:
+      - "mapping_status = 'Fully Mapped (100%)'"
+      - "mapping_status LIKE 'Fuzzy Mapped%'"
+      - "CAST(REPLACE(SPLIT_PART(SPLIT_PART(mapping_status,'(',2),'%',1),'','') AS DECIMAL)"
+      replacement_note: >
+        The exact bucket values in mapping_category are NOT known from the
+        information_schema extract - only that the column is varchar(20). Enumerate them
+        with SELECT DISTINCT mapping_category before writing any predicate against it.
+    distinct: 44
+    distinct_note: 44 is the RAW label count in the source workbook, not the mapping_category cardinality.
+    stored_format: "<Family> (<percent>%)  - RAW LABEL ONLY, not the curated column"
+    nulls: 0
+    families:
+    - canonical_prefix: "Fully Mapped"
+      exact_value: "Fully Mapped (100%)"
+      records: 136141
+      share_pct: 79.6
+      sql_predicate: null
+      sql_predicate_v1_obsolete: "mapping_status = 'Fully Mapped (100%)'"
+      sql_predicate_v2_pending: "mapping_category = '<bucket for fully mapped>'"
+      blocked_until_verified: >
+        The curated bucket value is UNKNOWN. Run SELECT DISTINCT mapping_category before
+        emitting any predicate here. Do NOT fall back to the v1 form - mapping_status
+        does not exist on curated.v_pmay.
+      aliases: [fully mapped, exact match, exactly mapped, confirmed mapping,
+                100 percent mapped, clean mapping]
+    - canonical_prefix: "Fuzzy Mapped"
+      distinct_values: 43
+      records: 34966
+      share_pct: 20.4
+      confidence_range: "85.3% to 97.7%"
+      sql_predicate: null
+      sql_predicate_v1_obsolete: "mapping_status LIKE 'Fuzzy Mapped%'"
+      sql_predicate_v2_pending: "mapping_category = '<bucket for fuzzy mapped>'"
+      blocked_until_verified: >
+        The curated bucket value is UNKNOWN. Run SELECT DISTINCT mapping_category before
+        emitting any predicate here. Confidence now lives in mapping_confidence_pct, so a
+        threshold question is a numeric comparison, not a LIKE.
+      aliases: [fuzzy mapped, fuzzy match, approximate mapping, uncertain mapping,
+                partially mapped, low confidence mapping]
+      critical: >
+        There are 43 DIFFERENT fuzzy labels, each with its own percentage. Never filter
+        with mapping_status = 'Fuzzy Mapped' - that value does not exist and returns zero
+        rows. Always use the LIKE prefix, or parse the percentage.
+    percent_extraction: >
+      OBSOLETE IN v2.0. The stored numeric column now exists - use
+      mapping_confidence_pct directly. The string-parsing expression was written for the
+      flat table and must not be emitted against the curated view.
+    observed_percentages: [85.3, 85.5, 85.7, 86.7, 87.0, 87.2, 87.5, 87.8, 88.0, 88.2, 88.9, 89.5, 89.7, 90.0, 90.3, 90.5, 90.9, 91.4, 91.7, 92.3, 92.7, 92.9, 93.3, 93.8, 94.0, 94.1, 94.4, 94.7, 95.0, 95.2, 95.7, 96.0, 96.2, 96.3, 96.6, 96.7, 96.8, 97.0, 97.1, 97.3, 97.4, 97.6, 97.7, 100.0]
+    runtime: >
+      This is data-quality metadata. Do not filter on it unless the user explicitly asks
+      about mapping quality or confidence. When a question is about mapping quality,
+      state that 20.4% of records are fuzzy-mapped and may not be exactly located.
+
+# ---------------------------------------------------------------------------
+# TIME  - the highest-risk dimension in this dataset
+# ---------------------------------------------------------------------------
+  financial_year:
+    stored_column: financial_year / financial_year_short on curated.v_pmay
+    key_column: year_key
+    source: curated.dim_year, pre-joined into curated.v_pmay
+    definition: April 1 to March 31, labelled by the starting year, e.g. 2023-24
+    v2_change:
+      critical: true
+      text: >
+        THE BIGGEST CHANGE IN THIS FILE. v1.0 said "no financial-year column exists,
+        derive it from sanction_date with a CASE expression". A real financial-year
+        dimension exists now. Filter and group financial_year_short directly. The CASE
+        derivation must NOT be emitted any more.
+      obsolete_derivation_sql: >
+        CASE WHEN EXTRACT(MONTH FROM sanction_date) >= 4
+             THEN EXTRACT(YEAR FROM sanction_date)
+             ELSE EXTRACT(YEAR FROM sanction_date) - 1 END
+    sql_predicate: "financial_year_short = '<canonical>'"
+    sql_predicate_by_key: "year_key = <start_year>"
+
+    coverage_conflict:
+      critical: true
+      unresolved: true
+      text: >
+        dim_year holds FOUR rows covering FY 2022-23 through FY 2025-26 (verified
+        2026-08-20, for MGNREGA). PMAY sanctions in the source workbook run from
+        2017-08-09 to 2023-07-04 - SEVEN financial years, five of which (2017-18,
+        2018-19, 2019-20, 2020-21, 2021-22) fall OUTSIDE that window. Those five hold
+        56,229 of 171,107 houses, about 33%.
+        Exactly one of these is true, and the extract cannot say which:
+          (a) dim_year was extended when PMAY loaded, and all seven years resolve; or
+          (b) dim_year still holds four years, and ~33% of PMAY houses carry
+              year_key = NULL and vanish from every GROUP BY on financial year.
+        THIS MUST BE MEASURED BEFORE ANY PMAY TIME SERIES IS PUBLISHED. Run:
+          SELECT financial_year_short, COUNT(*) FROM curated.v_pmay
+          WHERE NOT is_placeholder GROUP BY 1 ORDER BY 1;
+        and check the NULL bucket. If (b) holds, every FY figure below is unreachable
+        through year_key and the answer must fall back to sanction_date ranges.
+    null_year_rule: >
+      year_key is NULLABLE. Always count the NULL bucket before reporting a time series,
+      and state how many houses it holds.
+    distinct: 7
+    distinct_note: 7 financial years in the SOURCE. dim_year may expose fewer - see coverage_conflict.
+    closed_set: true
+    excluded_rows: >
+      126 records have a NULL sanction_date and belong to NO financial year. Separately,
+      any sanction outside dim_year's window keeps year_key NULL - see coverage_conflict.
+    sql_predicate_fallback: "sanction_date >= '<start>' AND sanction_date < '<end>'"
+    sql_predicate_fallback_when: use only if coverage_conflict resolves to (b)
+    values:
+    - canonical: "2017-18"
+      range: { start: '2017-04-01', end_exclusive: '2018-04-01' }
+      houses: 15513
+      completed: 15456
+      sanctioned_cr: 201.669
+      released_cr: 201.4623
+      completion_pct: 99.63
+      aliases: ["FY2017-18", "FY 2017-18", "2017-2018", "FY2017-2018", "2017/18", "financial year 2017-18", "fiscal 2017-18", "2017-18 FY"]
+    - canonical: "2018-19"
+      range: { start: '2018-04-01', end_exclusive: '2019-04-01' }
+      houses: 3535
+      completed: 3524
+      sanctioned_cr: 45.955
+      released_cr: 45.89325
+      completion_pct: 99.69
+      aliases: ["FY2018-19", "FY 2018-19", "2018-2019", "FY2018-2019", "2018/19", "financial year 2018-19", "fiscal 2018-19", "2018-19 FY"]
+    - canonical: "2019-20"
+      range: { start: '2019-04-01', end_exclusive: '2020-04-01' }
+      houses: 9952
+      completed: 9702
+      sanctioned_cr: 129.376
+      released_cr: 129.0289
+      completion_pct: 97.49
+      aliases: ["FY2019-20", "FY 2019-20", "2019-2020", "FY2019-2020", "2019/20", "financial year 2019-20", "fiscal 2019-20", "2019-20 FY"]
+    - canonical: "2020-21"
+      range: { start: '2020-04-01', end_exclusive: '2021-04-01' }
+      houses: 24215
+      completed: 20664
+      sanctioned_cr: 314.795
+      released_cr: 309.1829
+      completion_pct: 85.34
+      aliases: ["FY2020-21", "FY 2020-21", "2020-2021", "FY2020-2021", "2020/21", "financial year 2020-21", "fiscal 2020-21", "2020-21 FY"]
+    - canonical: "2021-22"
+      range: { start: '2021-04-01', end_exclusive: '2022-04-01' }
+      houses: 3014
+      completed: 2371
+      sanctioned_cr: 39.182
+      released_cr: 37.8742
+      completion_pct: 78.67
+      aliases: ["FY2021-22", "FY 2021-22", "2021-2022", "FY2021-2022", "2021/22", "financial year 2021-22", "fiscal 2021-22", "2021-22 FY"]
+    - canonical: "2022-23"
+      range: { start: '2022-04-01', end_exclusive: '2023-04-01' }
+      houses: 8225
+      completed: 6248
+      sanctioned_cr: 106.925
+      released_cr: 105.36505
+      completion_pct: 75.96
+      aliases: ["FY2022-23", "FY 2022-23", "2022-2023", "FY2022-2023", "2022/23", "financial year 2022-23", "fiscal 2022-23", "2022-23 FY"]
+    - canonical: "2023-24"
+      range: { start: '2023-04-01', end_exclusive: '2024-04-01' }
+      houses: 106527
+      completed: 71976
+      sanctioned_cr: 1384.851
+      released_cr: 1356.45325
+      completion_pct: 67.57
+      aliases: ["FY2023-24", "FY 2023-24", "2023-2024", "FY2023-2024", "2023/24", "financial year 2023-24", "fiscal 2023-24", "2023-24 FY"]
+    relative_terms:
+      latest / current / most recent: '2023-24'
+      previous / last year: '2022-23'
+      earliest / first: '2017-18'
+      all years / overall / since inception / till date: no date filter at all
+    coverage_warning: >
+      2023-24 is PARTIAL. sanction_date stops at 2023-07-04, so that FY covers only
+      April-June 2023. It holds 106527 of the 170981 dated records (62%) but is not a
+      full year. Never compare 2023-24 against a complete year without saying this, and
+      never call its 67.6% completion rate a decline - those houses are simply newer.
+
+  calendar_year:
+    derivation: EXTRACT(YEAR FROM sanction_date)
+    range: 2017 to 2023
+    data_span: { first_sanction: '2017-08-09', last_sanction: '2023-07-04' }
+    nulls: 126
+    sql_predicate: "sanction_date >= '<YYYY>-01-01' AND sanction_date < '<YYYY+1>-01-01'"
+    record_counts:
+      2017: 13469
+      2018: 5457
+      2019: 5394
+      2020: 14846
+      2021: 16869
+      2022: 4056
+      2023: 110890
+
+  year_disambiguation:
+    critical: true
+    problem: >
+      A bare year means different things and the gap is large. Calendar 2023 has 110890
+      records; FY 2023-24 has 106527. Calendar 2022 has 4056; FY 2022-23 has 8225 - more
+      than double. Silently choosing one is a wrong answer roughly half the time.
+    rules:
+    - A hyphenated or slashed year ("2023-24", "2023/24", "FY 2023") is a FINANCIAL year.
+    - The words "financial year", "FY", "fiscal" force the financial year reading.
+    - A bare four-digit year ("in 2023", "during 2022") defaults to CALENDAR year,
+      filtered on sanction_date. State the assumption in the answer. Note that in v2.0 a
+      financial-year reading is now cheap to offer as an alternative, because
+      financial_year_short is a stored column rather than a derivation.
+    - If the question asks about "utilisation", "completion rate" or "pending amount",
+      use the FINANCIAL year - financial_year_short on curated.v_pmay. (v1.0 pointed at
+      the FY summary workbook for these; that object does not exist in megh_db.)
+    - When the phrasing is genuinely unclear and the two readings differ materially, ask.
+
+  sanction_date:
+    column: sanction_date
+    type: date
+    nulls: 126
+    min: '2017-08-09'
+    max: '2023-07-04'
+    sql_predicate_range: "sanction_date >= '<from>' AND sanction_date < '<to_exclusive>'"
+    month_names: >
+      Accept "January 2023", "Jan 23", "Q1 2023" and similar. Convert to an explicit
+      half-open date range. Quarters are calendar quarters unless the user says
+      "financial quarter", in which case Q1 = April-June.
+    out_of_range: >
+      Anything before 2017-08-09 or after 2023-07-04 has no records. Say so with the
+      actual data span rather than returning an empty result with no explanation.
+
+# ---------------------------------------------------------------------------
+  identifiers:
+    pmay_fact_id:
+      column: pmay_fact_id
+      type: bigint
+      unique: true
+      role: the primary key of curated.fact_pmay_house and curated.v_pmay
+      aliases: [record id, row id, fact id]
+      rule: identifier only - never SUM or AVG.
+      unstable: >
+        Surrogate, regenerated on every reload. Never export it or quote it back to a
+        user as a durable reference.
+    source_house_id:
+      column: source_house_id
+      type: integer
+      role: >
+        The flat table's old `id`. v2.0 CHANGE - a user or saved query referring to PMAY
+        record id N means this column, not pmay_fact_id.
+      aliases: [source id, original id, house id]
+      rule: identifier only - never SUM or AVG.
+    reg_no:
+      column: reg_no
+      type: string
+      format: "MG followed by 9 digits, e.g. MG123676572"
+      distinct: 170739
+      duplicates: 368
+      max_repeats: 2
+      unique: false
+      aliases: [registration number, registration no, reg no, beneficiary registration
+                number, registration id]
+      rule: >
+        NOT unique - 368 registration numbers appear twice. COUNT(DISTINCT reg_no) is the
+        right answer only when the user explicitly asks for distinct or unique
+        beneficiaries. Never join or key on it.
+      resolution: uppercase and strip spaces, then exact match. Do not fuzzy-match reg_no.
+    sanction_no:
+      column: sanction_no
+      type: string
+      format: "<office>/<n>/<seq>[DD-MM-YYYY], e.g. MG04002/1/987[10-02-2023]"
+      distinct: 35131
+      nulls: 126
+      unique: false
+      max_repeats: 322
+      median_repeats: 2
+      aliases: [sanction number, sanction no, sanction reference, sanction order]
+      rule: >
+        Strongly NOT unique - one sanction number covers up to 322 records, median 2.
+        A sanction is an office order covering many houses. Never treat it as a
+        beneficiary key. Counting sanctions means COUNT(DISTINCT sanction_no).
+      embedded_date: >
+        The bracketed date is the sanction order date and usually matches sanction_date.
+        Prefer the sanction_date column for any date filtering; do not parse the string.
+    beneficiary_name:
+      status: DROPPED_AT_INGEST
+      column: null
+      v1_column: beneficiary_name
+      aliases: [beneficiary, beneficiary name, applicant name, house owner, name]
+      rule:
+        critical: true
+        text: >
+          v2.0 CHANGE. This column is NOT in the curated layer. Personal names were
+          dropped when PMAY loaded into megh_db, and there is no join that recovers them.
+          A question naming a person, or asking who a beneficiary is, must return
+          "not held in this data". Never substitute reg_no for a name, never guess, and
+          never build a beneficiary-lookup feature against this schema.
+      resolver_behaviour: >
+        Classify the span as entity_type: person_name and emit not_found with the reason
+        "personal names are not held in the curated layer" - not a did-you-mean list.
+    father_mother_name:
+      status: DROPPED_AT_INGEST
+      column: null
+      v1_column: father_mother_name
+      v1_source_column: father_s_mother_s_name
+      v1_nulls: 114118
+      v1_null_share_pct: 66.7
+      aliases: [father name, mother name, parent name, guardian name]
+      rule:
+        critical: true
+        text: >
+          v2.0 CHANGE. Not in the curated layer, for the same reason as
+          beneficiary_name. Any rule about splitting on "[" or reporting the 66.7% null
+          share is obsolete - there is no column to split..
+
+# ---------------------------------------------------------------------------
+# MEASURE VOCABULARY - user phrasing to column. stage2 owns aggregation semantics.
+# ---------------------------------------------------------------------------
+measure_vocabulary:
+  sanctioned_amount:
+    column: sanctioned_amount
+    aliases: [sanctioned amount, sanction amount, amount sanctioned, approved amount,
+              allocated amount, sanctioned money, allocation]
+    aggregate: SUM(sanctioned_amount)
+    distinct_values: 2
+    constant_value: 130000
+    zero_rows: 126
+    verified_in_db: false
+    critical: >
+      SOURCE-WORKBOOK FINDING, NOT RE-VERIFIED AGAINST megh_db. Check the distribution
+      before relying on it. As profiled, this column is effectively a CONSTANT - every
+      real record is 130000 and only the 126 dateless records are 0. If that still holds,
+      the consequences the LLM must respect are:
+        - SUM(sanctioned_amount) is just 130000 * record count. Ranking districts by
+          sanctioned amount is IDENTICAL to ranking them by house count.
+        - AVG(sanctioned_amount) is always ~130000 and carries no information. If the
+          user asks for it, answer but say it is a flat per-house entitlement.
+        - Never present "which district got the most money sanctioned" as a funding
+          insight - it is purely a count of houses.
+    unit: rupees per house (flat PMAY-G unit assistance)
+
+  amount_released:
+    column: amount_released
+    aliases: [amount released, released amount, funds released, money released,
+              disbursed, payment released, utilised amount, utilisation]
+    aggregate: SUM(amount_released)
+    distinct_values: 4
+    nulls: 462
+    value_ladder:
+      note: >
+        amount_released takes only four values and they track installments_paid exactly.
+        This is a stepped entitlement, not a continuous amount.
+      mapping:
+      - { installments_paid: 1, amount_released: 52000, records: 1986 }
+      - { installments_paid: 2, amount_released: "110500 or 120000", records: 15836 }
+      - { installments_paid: 3, amount_released: 130000, records: 152823 }
+    never_exceeds_sanctioned: true
+    zero_rows: 0
+    null_rule: >
+      462 rows have NULL amount_released AND NULL installments_paid - the same 462 rows.
+      NULL means no release recorded, not zero released. AVG silently skips them; SUM
+      treats them as absent. Say so when the answer depends on them.
+
+  installments_paid:
+    column: installments_paid
+    aliases: [installments paid, installment count, number of installments,
+              payments made, instalments]
+    distinct_values: [1, 2, 3]
+    nulls: 462
+    counts: { 1: 1986, 2: 15836, 3: 152823 }
+    rule: >
+      For "how many beneficiaries/houses" use COUNT(*) with a WHERE on installments_paid.
+      Use SUM(installments_paid) only when the user explicitly asks for TOTAL installments
+      across records. Confusing the two is the most common error on this column.
+
+  record_count:
+    aliases: [houses, records, beneficiaries, how many, number of houses, count,
+              total houses, sanctioned houses]
+    aggregate: COUNT(*)
+    default: true
+    mandatory_filter: WHERE NOT is_placeholder
+    note: >
+      One row = one house. v2.0 CHANGE - every count carries NOT is_placeholder, because
+      the curated layer flags rows that are not real sanctioned houses. The flat table
+      had no such flag, so v1.0 counts were unfiltered.
+
+  amount_pending:
+    column: amount_pending
+    aliases: [pending amount, unreleased amount, balance, outstanding, remaining funds,
+              not yet released, amount pending]
+    aggregate: SUM(amount_pending)
+    unit: rupees
+    v2_change:
+      critical: true
+      text: >
+        NEW STORED COLUMN. v1.0 listed pending_amount under `derived` with the formula
+        SUM(sanctioned_amount - amount_released) and a NULL guard. That derivation is
+        OBSOLETE - do not emit it. Read the column.
+    collision_warning: >
+      "pending houses" is a CONSTRUCTION question (is_completed), "pending amount" is a
+      MONEY question (amount_pending). The words are the same; the columns are not.
+
+  derived:
+    pending_amount_obsolete:
+      status: replaced_by_stored_column
+      v1_formula: SUM(sanctioned_amount - amount_released)
+      replacement: SUM(amount_pending)
+      note: Kept only so a stale retrieval hit is recognised as stale.
+    completion_rate:
+      formula: "100.0 * COUNT(*) FILTER (WHERE is_completed) / NULLIF(COUNT(*),0)"
+      v1_formula: "100.0 * COUNT(*) FILTER (WHERE house_status = 'Completed') / NULLIF(COUNT(*),0)"
+      aliases: [completion rate, completion percentage, percent completed, completion pct]
+    utilisation_rate:
+      formula: "100.0 * SUM(amount_released) / NULLIF(SUM(sanctioned_amount),0)"
+      aliases: [utilisation, utilization rate, fund utilisation, percent utilised]
+      note: >
+        Both operands are RUPEES on curated.v_pmay, so the ratio is unit-safe. Do not
+        mix in the crore columns from v_pmay_monthly_sanctions.
+
+# ---------------------------------------------------------------------------
+pre_aggregate_table:
+  table: curated.v_pmay_monthly_sanctions
+  replaces: pmay_fy_summary
+  rows: unverified_in_db
+  grain: one row per sanction MONTH, statewide
+  v2_change:
+    critical: true
+    text: >
+      pmay_fy_summary DOES NOT EXIST in megh_db. Its replacement is a MONTHLY view, not
+      a financial-year one, and it has FOUR columns rather than eight - completed,
+      pending_cr, completion_pct and utilisation_pct are all gone. Those four metrics
+      must now be computed from curated.v_pmay, not read from a summary.
+      There is also NO GEOGRAPHY BREAKDOWN - the view is statewide only. For district
+      money use curated.v_cross_scheme_money_district_year.
+  relationship: >
+    A pre-aggregate of curated.v_pmay, NOT a join target. Read it alone for monthly
+    questions, or group the detail on sanction_month - never both. Joining the detail to
+    its own rollup repeats every monthly figure once per house.
+  columns:
+    sanction_month: the month, as a date
+    houses_sanctioned: COUNT(*) for that month
+    sanctioned_cr: sanctioned amount that month, in CRORE rupees
+    released_cr: released amount that month, in CRORE rupees
+  unit_warning: >
+    The _cr columns are in CRORE, while sanctioned_amount, amount_released and
+    amount_pending on curated.v_pmay are in RUPEES. 1 crore = 10,000,000. Never compare
+    or add across the two without converting, and always state the unit.
+  metrics_that_moved:
+    completed: COUNT(*) FILTER (WHERE is_completed) on curated.v_pmay
+    pending: SUM(amount_pending) on curated.v_pmay - a stored column now
+    completion_pct: computed from curated.v_pmay
+    utilisation_pct: computed from curated.v_pmay
+  retired_totals:
+    note: >
+      v1.0 carried verified FY-summary totals - 170981 houses, 2222.753 sanctioned_cr,
+      2185.25985 released_cr, 129941 completed. Those were measured from the source
+      workbook and reconcile with it exactly, but they have NOT been re-derived from
+      megh_db and no curated object reproduces them. Do not quote them as database
+      figures.
+    houses: 170981
+    sanctioned_cr: 2222.753
+    released_cr: 2185.25985
+    completed: 129941
+    verified_in_db: false
+
+# ---------------------------------------------------------------------------
+region_groupings:
+  note: >
+    Users group districts by hill range. These are not columns - expand into an IN list
+    and state which districts were included.
+  groups:
+    "Garo Hills":
+      districts: [East Garo Hills, North Garo Hills, South Garo Hills,
+                  South West Garo Hills, West Garo Hills]
+      records: 89922
+      aliases: [Garo, Garo region, Garo Hills region, GH]
+    "Khasi Hills":
+      districts: [East Khasi Hills, Eastern West Khasi Hills, South West Khasi Hills,
+                  West Khasi Hills]
+      records: 45294
+      aliases: [Khasi, Khasi region, Khasi Hills region, KH]
+    "Jaintia Hills":
+      districts: [East Jaintia Hills, West Jaintia Hills]
+      records: 18326
+      aliases: [Jaintia, Jaintia region, Jaintia Hills region, JH]
+    "Ri Bhoi":
+      districts: [Ri Bhoi]
+      records: 17565
+      aliases: [Ri Bhoi region, Bhoi]
+      note: >
+        Ri Bhoi belongs to no hill range - it is its own district and its own group. Both
+        readings produce the same filter, so no clarification is needed. Do not fold it
+        into Khasi Hills.
+  whole_state:
+    aliases: [Meghalaya, state, statewide, whole state, all districts, overall]
+    behaviour: no district filter at all.
+
+# ---------------------------------------------------------------------------
+# WORKED EXAMPLES
+# ---------------------------------------------------------------------------
+worked_examples:
+
+- user: "how many PMAY houses in EGH"
+  resolve:
+  - { text: EGH, type: district, canonical: East Garo Hills, lgd_code: 273,
+      matched_by: 4_acronym }
+  - { text: "how many houses", type: measure, canonical: "COUNT(*)" }
+  sql: "SELECT COUNT(*) FROM curated.v_pmay WHERE lgd_district = 'East Garo Hills';"
+  expected: 16899
+
+- user: "e garo hill completed houses"
+  resolve:
+  - { text: "e garo hill", type: district, canonical: East Garo Hills, matched_by: 2_alias }
+  - { text: completed, type: house_status, canonical: Completed }
+  note: >
+    Alias family: EGH, E Garo Hills, East Garo Hill, East Garo, EAST GARO HILLS all land
+    on the same canonical district.
+
+- user: "houses sanctioned in 2023"
+  resolve:
+  - { text: sanctioned, type: overloaded, reading: sanction_date filter }
+  - { text: "2023", type: calendar_year, canonical: 2023, assumption: calendar }
+  sql: "SELECT COUNT(*) FROM curated.v_pmay WHERE sanction_date >= '2023-01-01' AND sanction_date < '2024-01-01';"
+  expected: 110890
+  note: >
+    "sanctioned in <year>" is a DATE filter, not status_name = 'House Sanctioned'.
+    State that calendar year was assumed.
+
+- user: "houses sanctioned in FY 2023-24"
+  resolve:
+  - { text: "FY 2023-24", type: financial_year, canonical: '2023-24' }
+  sql: "SELECT COUNT(*) FROM curated.v_pmay WHERE sanction_date >= '2023-04-01' AND sanction_date < '2024-04-01';"
+  expected: 106527
+  note: >
+    Different number from the calendar-year reading above - 106527 vs 110890. This is why
+    year_disambiguation matters. Also flag that 2023-24 is partial (data ends 2023-07-04).
+
+- user: "how many houses are at sanctioned stage"
+  resolve:
+  - { text: sanctioned stage, type: house_status, canonical: House Sanctioned }
+  sql: "SELECT COUNT(*) FROM curated.v_pmay WHERE status_name = 'House Sanctioned';"
+  expected: 2057
+  note: the word "stage" flips "sanctioned" from a date filter to a status filter.
+
+- user: "how many houses went to women"
+  resolve:
+  - { text: women, type: house_alloted_to, canonical_group: women_any,
+      members: [Woman-Married, Woman-Widow, Woman-Unmarried, Woman] }
+  sql: "SELECT COUNT(*) FROM curated.v_pmay WHERE house_alloted_to IN ('Woman-Married','Woman-Widow','Woman-Unmarried','Woman');"
+  expected: 46520
+  note: >
+    Must include all four Woman-* categories. Answering with Woman-Married alone (42331)
+    understates by 4189. Also offer the 156885 figure that includes joint allotments,
+    since those involve a woman too - but do not silently substitute it.
+
+- user: "which district got the most sanctioned amount"
+  resolve:
+  - { text: sanctioned amount, type: measure, canonical: sanctioned_amount }
+  response_guidance: >
+    Answer, but state plainly that sanctioned_amount is a flat 130000 per house, so this
+    ranking is identical to ranking districts by house count. Do not present it as a
+    funding-allocation insight.
+
+- user: "PMAY houses in Asimgre"
+  resolve:
+  - { text: Asimgre, type: village, status: ambiguous }
+  response:
+    status: ambiguous
+    candidates: 6 distinct village codes named ASIMGRE
+    districts: [East Garo Hills, South Garo Hills, West Garo Hills]
+    question: "Asimgre exists in three districts. Which one did you mean?"
+  note: never pick the first row.
+
+- user: "PMAY houses in Mawlai"
+  resolve:
+  - { text: Mawlai, type: block, canonical: Mawlai, lgd_code: 6540,
+      assumption: default_level }
+  note: >
+    Mawlai is both a block and a village name. With no qualifier the default is block.
+    State the assumption.
+
+- user: "how many fuzzy mapped records"
+  resolve:
+  - { text: fuzzy mapped, type: mapping_status, family: "Fuzzy Mapped" }
+  sql: "SELECT COUNT(*) FROM curated.v_pmay WHERE NOT is_placeholder AND mapping_category = '<bucket>';"
+  expected: 34966
+  expected_verified_in_db: false
+  note: >
+    v2.0 CHANGE. The v1.0 predicate mapping_status LIKE 'Fuzzy Mapped%' no longer works -
+    curated.v_pmay exposes mapping_category, not the 44 raw labels. The bucket values are
+    unknown from the information_schema extract; enumerate them with
+    SELECT DISTINCT mapping_category before writing this predicate.
+
+- user: "total funds released in crores"
+  resolve:
+  - { text: funds released, type: measure, canonical: amount_released }
+  - { text: crores, type: unit_request }
+  guidance: >
+    curated.v_pmay stores RUPEES. Divide by 10000000 and label the result crore, or read
+    released_cr straight from curated.v_pmay_monthly_sanctions, which is already crore
+    but is monthly and statewide only. Do not mix the two units.
+
+- user: "average sanctioned amount per beneficiary"
+  resolve:
+  - { text: average sanctioned amount, type: measure, canonical: sanctioned_amount }
+  guidance: >
+    Returns ~130000 for every cut of the data. Answer, but say it is a flat per-house
+    entitlement so the average carries no comparative information.
+
+- user: "houses completed in Nagaland"
+  resolve:
+  - { text: Nagaland, type: unknown, status: not_found }
+  response: >
+    Not in the PMAY data - this dataset covers the 12 districts of Meghalaya only.
+
+- user: "total expenditure under PMAY"
+  resolve:
+  - { text: total expenditure, type: measure, status: ambiguous }
+  question: >
+    There is no generic expenditure column. Do you mean total sanctioned amount or total
+    amount released?
+
+- user: "how many beneficiaries are there"
+  resolve:
+  - { text: beneficiaries, type: overloaded, reading: "COUNT(*)" }
+  expected: 171107
+  expected_verified_in_db: false
+  note: >
+    Default is the house count, with WHERE NOT is_placeholder. Say it is a house count.
+    Only use COUNT(DISTINCT reg_no) if the user asks for distinct or unique
+    registrations, and note that reg_no is nullable so NULLs are excluded.
+    The 171107 / 170739 figures are source-workbook counts and do not account for
+    placeholder rows - do not quote them as database figures.
+
+# ---------------------------------------------------------------------------
+maintenance:
+  source_files:
+  - quadrent/datasets/PMAY/PMAY_FullyMapped_with_dates.xlsx      # Sheet1, 171107 x 18
+  - quadrent/datasets/PMAY/PMAY_FullyMapped_FY_summary.xlsx      # Sheet1, 7 x 8
+  schema_authority: SCHEMA_FOR_DEVELOPERS.md   # live information_schema extract, 2026-08-24
+  row_counts_at_generation: { source_workbook: 171107, curated.v_pmay: unverified_in_db }
+  data_span_in_source: { first_sanction: '2017-08-09', last_sanction: '2023-07-04' }
+  last_generated: '2026-08-21'
+  last_revised: '2026-08-24'
+
+  open_verification_tasks:
+    critical: true
+    note: >
+      v2.0 retargeted this file from structure alone. NOTHING below has been measured
+      against megh_db. Each item is a query to run before any PMAY answer ships.
+    tasks:
+    - "Row count: SELECT COUNT(*) FROM curated.v_pmay - and how many are is_placeholder."
+    - "dim_year coverage: does it hold the five pre-2022 PMAY financial years, or do ~33%
+       of houses carry year_key = NULL? See dimensions.financial_year.coverage_conflict."
+    - "mapping_category: SELECT DISTINCT mapping_category - the bucket values are unknown."
+    - "Geography casing: confirm lgd_district and lgd_block are stored UPPERCASE."
+    - "sanctioned_amount: is it still a flat 130000 constant after the load?"
+    - "status roll-ups: how many rows have is_completed IS NULL."
+    - "completed_underfunded and is_placeholder: how many rows carry each flag."
+
+  regeneration_rules:
+  - Re-profile the workbooks AND re-query megh_db. Diff every count here. Explain each change.
+  - APPEND new canonical values and aliases. Never delete one - old questions must keep
+    resolving.
+  - Re-run the village ambiguity registry. If a name gains a code it must appear here.
+  - Re-check the dim_year coverage conflict. It is the single highest-risk open item.
+  - Re-check whether sanctioned_amount is still constant. If a second real value appears,
+    the "ranking equals counting" guidance must be removed.
+  - Watch the 2023-24 partial-year caveat. Once later data lands, update or drop it.
+  - Bump resolver_version.
+  companion_files:
+  - Annotations/PMAY/pmay_schema_partitions.yaml
+  - Annotations/PMAY/pmay_foreign_key_augmentation.yaml
+  - SCHEMA_FOR_DEVELOPERS.md
+  - Annotations/MGNREGA/README.md    # the Excel-to-YAML method this file follows

@@ -1,0 +1,30 @@
+# Runtime dependencies. Requires Python 3.11+ (the deployed venv is 3.11.9).
+#
+# Each pin is `>=working,<next-major`: the lower bound is the version this
+# service is verified against, the upper bound stops an unattended `pip install`
+# on a rebuild pulling a breaking major release months from now. For a
+# byte-identical rebuild use requirements.lock instead:
+#     pip install -r requirements.lock
+
+fastapi>=0.141,<1.0
+uvicorn[standard]>=0.52,<1.0
+pydantic>=2.13,<3.0
+pydantic-settings>=2.15,<3.0
+asyncpg>=0.31,<1.0
+httpx>=0.28,<1.0
+PyYAML>=6.0,<7.0
+rapidfuzz>=3.14,<4.0
+qdrant-client>=1.19,<2.0
+python-multipart>=0.0.32,<0.1
+fastembed>=0.8,<1.0        # local CPU embeddings (EMBEDDING_PROVIDER=local)
+redis>=8.1,<9.0            # optional shared L2 response cache (REDIS_URL)
+# LangGraph orchestrator (app/pipeline_graph.py, D-032; off unless
+# PIPELINE_GRAPH_ENABLED / _CANARY_PERCENT). Pulls langchain-core and langsmith
+# (LangSmith tracing stays off unless LANGSMITH_TRACING is set), and
+# langgraph-sdk pins websockets<17.
+langgraph>=1.2,<2.0
+langgraph-checkpoint-sqlite>=3.1,<4.0   # default checkpointer (LANGGRAPH_CHECKPOINT_DIR)
+# Shared checkpointer across workers and VMs (PIPELINE_GRAPH_CHECKPOINTER_DSN=postgres,
+# tables in app.*; verified live 2026-10-02). psycopg 3 is used only for this.
+langgraph-checkpoint-postgres>=3.1,<4.0
+psycopg[binary,pool]>=3.2,<4.0

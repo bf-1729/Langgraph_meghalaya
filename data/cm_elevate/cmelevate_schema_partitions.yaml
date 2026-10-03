@@ -1,0 +1,1314 @@
+schema_version: '1.0'
+schema_name: cmelevate_curated_semantic_schema
+display_name: CM Elevate Curated Star-Schema Semantic Schema (megh_db)
+
+# ===========================================================================
+# v1.0 - 2026-09-04 - FIRST VERSION, WRITTEN AGAINST THE LIVE DATABASE
+#
+# There is no v1.0 flat-table predecessor for CM Elevate. This file describes
+# the curated star schema as loaded, from the beginning.
+#
+# Authority: SCHEMA_FOR_DEVELOPERS.md, rewritten 2026-09-04 from the live
+# database extract (DATABASE_SCHEMA.md, generated 2026-09-04 09:59 UTC).
+#
+# WHAT CM ELEVATE IS
+#   CM Elevate is a PROGRAMME, not a scheme. It is ONE row in curated.dim_scheme
+#   (scheme_code = CM_ELEVATE) covering FIFTEEN individual government schemes.
+#   curated.dim_cm_elevate_scheme holds those 15, and cm_scheme_key is the only
+#   column that separates them. A CM Elevate total with no sub-scheme breakdown
+#   mixes 15 unrelated programmes into one number.
+#
+# THE TWO FACTS THAT GOVERN EVERY RULE IN THIS FILE
+#   1. THERE IS NO MEASURE. fact_cm_elevate_application carries no amount, no
+#      quantity, no score. COUNT(*) is the entire aggregate vocabulary. There is
+#      no sanctioned amount, no subsidy, no loan, no disbursement.
+#   2. THERE IS NO TIME. No year_key, no FK to dim_year, no date column of any
+#      kind. CM Elevate cannot be trended, cannot be filtered to a financial
+#      year, and cannot appear in any year-keyed view.
+#   Both were verified against the source export, not merely inferred from the
+#   schema: the 2026-08-18 API export carries no date column either. This is a
+#   SOURCE limitation, not a loader omission. See `unanswerable_categories`.
+#
+# ARCHITECTURE - SPINE PLUS JSONB
+#   ~19 fields common to (nearly) all 15 schemes are promoted to typed columns.
+#   Everything scheme-specific stays in scheme_specific (jsonb, GIN-indexed).
+#   The source export confirms the split: 25 columns appear in all 15 sheets,
+#   125 columns appear in exactly one.
+#
+# PROVENANCE OF NUMBERS IN THIS FILE
+#   Column names, types, nullability, defaults, PKs, FKs, indexes
+#                                                  -> live DB, 2026-09-04. Trust.
+#   Value distributions, distinct counts, row counts
+#                                                  -> source export
+#                                                     CM_Elevate_AllSchemes_20260818_122217.xlsx,
+#                                                     8,436 rows, read 2026-09-04.
+#                                                     NOT re-verified against megh_db,
+#                                                     which reports ~8,543 rows.
+#                                                     Marked `unverified_in_db: true`.
+#   No CM Elevate figure may be published until it is measured against the database.
+#
+# KNOWN CONFLICT WITH THE USE-CASE WORKBOOK - READ THIS
+#   `Megh One AI - CM Elevate NLP Use Cases.xlsx` was written against a DIFFERENT
+#   dataset: 2,847 applications, 13 schemes, 1,153 villages, and four rupee
+#   measures (sanctioned / subsidy / loan / total disbursed), Bank-vs-LIFCOM loan
+#   channels, subsidy tranches, desanctioned and refused flags, and Month/Year
+#   columns. NONE of those columns exist in megh_db or in the source export, and
+#   the scheme lists do not reconcile - the workbook references a
+#   "Common Facility Center" scheme that does not exist here, and omits
+#   PRIME Small Enterprise Empowerment, which is the LARGEST scheme in the real
+#   data at 3,621 of 8,436 rows.
+#   40 of the 89 use cases are therefore UNANSWERABLE against this schema. They
+#   are enumerated in `unanswerable_categories` and encoded as refusals in
+#   few_shot_examples. Do not answer them from an application count.
+# ===========================================================================
+
+architecture_alignment:
+  schema_linking: Enriched table and column documents are embedded for scheme-partitioned Qdrant retrieval.
+  entity_resolution: Dimension catalogue plus approved aliases, RapidFuzz, and BGE-small fallback.
+  join_discovery: information_schema FKs plus SME-reviewed implicit FK YAML; LLM never invents joins.
+  sql_generation: Retrieved schema, resolved entities, graph-generated joins, and curated question-to-SQL examples.
+  safety: SQLGlot read-only validation, enforced LIMIT, SELECT-only database role.
+  observability: Inputs, outputs, rule firings, SQL, results, chart spec, and response are traceable.
+
+database:
+  name: megh_db
+  schema: curated
+  read_role: megh_readonly
+  primary_query_surface: curated.v_cm_elevate
+  structure_verified: '2026-09-04'
+  volumes_verified: false
+
+datasets:
+
+  # =========================================================================
+  # PRIMARY QUERY SURFACE - query this, not the fact table
+  # =========================================================================
+  v_cm_elevate:
+    table_name: curated.v_cm_elevate
+    object_type: view
+    over: curated.fact_cm_elevate_application
+    column_count: 22
+    grain: one row per application (request_id) under one of the 15 CM Elevate schemes
+    row_count: unverified_in_db
+    row_count_note: >
+      The database reports ~8,543 rows (reltuples estimate). The 2026-08-18 source
+      export held 8,436 rows across 15 sheets. The two do not agree and neither has
+      been counted exactly. Do not quote a total until it is measured.
+    aggregate_before_reporting: false
+    grain_note: >
+      One row IS one application, so COUNT(*) is an application count with no prior
+      aggregation needed. Because request_id carries no unique constraint,
+      COUNT(*) and COUNT(DISTINCT request_id) can differ - see request_id.
+    money_unit: none
+    money_unit_note: >
+      CM Elevate has NO money column. curated.dim_scheme.money_unit still holds a
+      value for the CM_ELEVATE row, but there is no amount on the fact for it to
+      describe. Never format, convert or report a rupee figure for this scheme.
+    join_losslessness: >
+      Both joins in the view definition are INNER joins (dim_cm_elevate_scheme and
+      dim_geography) and both keys are NOT NULL on the fact, so no rows are lost.
+      The view row count equals the fact row count.
+    columns:
+
+    # ---- keys -------------------------------------------------------------
+    - name: cm_elevate_fact_id
+      source_column: fact_cm_elevate_application.cm_elevate_fact_id
+      meaning: Surrogate primary key of the CM Elevate application fact.
+      type: bigint
+      category: technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, COUNT DISTINCT]
+      synonyms: [record id, row id, fact id]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - Not stable across a reload. Never export it or store it outside the database.
+
+    - name: request_id
+      source_column: fact_cm_elevate_application.request_id
+      meaning: The application reference number issued by the CM Elevate portal.
+      type: varchar(100)
+      nullable: false
+      category: application_identifier
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT, COUNT DISTINCT]
+      synonyms: [application number, application id, request id, request number, reference number, file number]
+      sample_values:
+      - REQ/001/001/10102025/188877
+      - REQ/002/005/10102025/189385
+      - REQ/017/036/10102025/189163
+      - REQ/233/137/10112025/224648
+      - REQ/003/008/1032026/328648
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "NOT UNIQUE and NOT unique-constrained. 36 duplicate request_ids across 64 rows in the source export, all inside the Piggery scheme (unverified_in_db). Uniqueness was unverified at ingest and the loader collapses only exact full-row duplicates."
+      - "COUNT(*) and COUNT(DISTINCT request_id) can differ. If they do, that is a finding to report, not a number to quietly pick between."
+      - "A lookup on request_id may legitimately return more than one row. Never assume LIMIT 1 is safe."
+      - "DO NOT PARSE A DATE OUT OF IT. The 4th segment looks like an unpadded date (DDMMYYYY with leading zeros dropped, so 6, 7 or 8 digits) but it is genuinely ambiguous - 1032026 is validly either 1-Mar-2026 or 10-Mar-2026. A naive parse over the source export resolved only 3,038 of 8,436 rows and produced dates after the export date. There is a date signal here but no reliable date. See time_dimension."
+      - Individual-level identifier. Do not emit it into exports or vector-store payloads.
+
+    # ---- sub-scheme -------------------------------------------------------
+    - name: cm_scheme_key
+      source_column: fact_cm_elevate_application.cm_scheme_key
+      meaning: Key into the CM Elevate sub-scheme dimension.
+      type: smallint
+      nullable: false
+      category: scheme_key
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [scheme key, sub-scheme key, cm scheme key]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "THE COLUMN THAT SEPARATES THE 15 SCHEMES. NOT NULL, so every application belongs to exactly one."
+      - Prefer scheme_name for display and for user-facing filters; use cm_scheme_key when scoping a scheme_specific JSONB read.
+      - "MANDATORY for any scheme_specific query - see scheme_specific."
+
+    - name: scheme_name
+      source_column: dim_cm_elevate_scheme.scheme_name
+      meaning: Full name of the individual CM Elevate scheme the application was made under.
+      type: text
+      nullable: false
+      category: scheme_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, ORDER BY]
+      synonyms: [scheme, scheme name, sub-scheme, programme, which scheme]
+      sample_values:
+      - Meghalaya Poultry Farming Scheme
+      - Meghalaya Piggery Development Scheme
+      - Meghalaya Goat Farming Scheme
+      - Meghalaya Dairy Development Scheme
+      - Meghalaya Warehouse Scheme
+      - PRIME Agriculture Response Vehicle Scheme
+      - PRIME Tourism Vehicle Scheme
+      - Chief Minister's Green Taxi Scheme
+      - Meghalaya Motorcaravan Scheme
+      - Meghalaya Sericulture & Weaving Scheme
+      - Agro Tourism Villa Scheme
+      - PRIME Small Enterprise Empowerment and Development (SEED)
+      - Meghalaya Cinema Theatre Scheme
+      - Meghalaya Sports & Wellness Centre Scheme
+      - Meghalaya Any Business Venture Scheme
+      business_rules:
+      - "UNIQUE in the dimension. This is the name a user will say; resolve casual names against it."
+      - "THERE ARE 15 SCHEMES, not 13. Any answer, template or chart legend asserting 13 is wrong - that figure comes from the use-case workbook, which describes a different dataset."
+      - "Highly skewed. In the source export: PRIME Small Enterprise Empowerment 3,621; Piggery 2,982; Poultry 488; PRIME Tourism Vehicle 403; PRIME Agriculture Response Vehicle 339; Dairy 294; Any Business Venture 136; Goat 98; Warehouse 38; Sericulture and Weaving 14; Green Taxi 10; Agro Tourism Villa 3; Motorcaravan 2; Cinema Theatre 2; Sports and Wellness 6 (unverified_in_db)."
+      - "Six schemes have fewer than 15 applications. Never publish a percentage or a ranking for those without stating the denominator."
+      - "A programme-level total without a scheme breakdown is misleading. Offer the breakdown."
+
+    - name: endpoint
+      source_column: dim_cm_elevate_scheme.endpoint
+      meaning: The API endpoint the scheme's applications were ingested from.
+      type: varchar(80)
+      nullable: false
+      category: scheme_technical_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [endpoint, api endpoint, source dataset]
+      business_rules:
+      - "UNIQUE in the dimension, and the SOURCE OF TRUTH for which fact rows came from which API call."
+      - "This is the value that appears as source_dataset in raw.source_rows and staging.quarantine, and as dataset in meta.v_reconciliation_cm_elevate."
+      - Internal identity. Prefer scheme_name in any user-facing answer.
+
+    # ---- geography --------------------------------------------------------
+    - name: geography_key
+      source_column: fact_cm_elevate_application.geography_key
+      meaning: Surrogate key into the conformed geography dimension.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: low
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [geography key]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - NOT stable across a reload. Use village_code for anything leaving the database.
+      - "Resolved at ingest via village_lgd_code through the tiered strategy shared with Focus Plus: explicit -> self-match -> roster unique match -> fuzzy match -> Unresolved placeholder."
+      - "NOT NULL, so every application has a geography_key - but that key may point at an Unresolved placeholder. See entity_type."
+
+    - name: village_code
+      source_column: fact_cm_elevate_application.village_code
+      meaning: LGD village code - the national village identifier, denormalised onto the row.
+      type: integer
+      nullable: false
+      category: geographic_identifier
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT DISTINCT]
+      synonyms: [village code, LGD village code]
+      business_rules:
+      - Identifier only; never SUM or AVG.
+      - "VILLAGE IDENTITY. Count villages with COUNT(DISTINCT village_code), never by name - 345 village names in Meghalaya are shared by more than one village."
+      - Denormalised on the row - filter on it directly, no join to dim_geography needed.
+      - "Pair every village count with `entity_type <> 'Unresolved'`. The placeholder rows carry a village_code that is not a real village."
+      - "2,038 distinct village codes in the source export, and 16 rows had no village code at all (unverified_in_db)."
+
+    - name: lgd_village_name
+      source_column: dim_geography.lgd_village_name
+      meaning: LGD-standardised village name.
+      type: varchar(200)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [village, LGD village, village name]
+      business_rules:
+      - Display and filter name. NOT an identity - see village_code.
+      - "The source export's own village_name column is NOT this column. It stays in scheme_specific; this one is the roster-resolved name. They can differ."
+
+    - name: lgd_block
+      source_column: dim_geography.lgd_block
+      meaning: LGD-standardised block name, uppercased in the dimension.
+      type: varchar(150)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [block, LGD block, block name]
+      business_rules:
+      - "STORED UPPERCASE in dim_geography. Compare case-folded and emit the stored form."
+      - "NO BLOCK CODE IS AVAILABLE. The source carries block_lgd_code but it is NEVER TRUSTED - confirmed incompatible numbering system. The block shown here comes from the dim_geography join, not from the raw field. Do not reintroduce the raw code from raw.source_rows."
+      - "58 distinct block names in the source export (unverified_in_db). The use-case workbook says 57; that figure describes a different dataset."
+      - Some block names are also village names. Resolve the level before filtering.
+
+    - name: lgd_district
+      source_column: dim_geography.lgd_district
+      meaning: LGD-standardised district name, uppercased in the dimension.
+      type: varchar(100)
+      nullable: true
+      category: geographic_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [district, LGD district, district name]
+      sample_values: ['RI BHOI', 'WEST GARO HILLS', 'EAST KHASI HILLS', 'EAST GARO HILLS', 'WEST KHASI HILLS', 'SOUTH GARO HILLS', 'SOUTH WEST KHASI HILLS', 'EASTERN WEST KHASI HILLS', 'NORTH GARO HILLS', 'WEST JAINTIA HILLS', 'SOUTH WEST GARO HILLS', 'EAST JAINTIA HILLS']
+      business_rules:
+      - "STORED UPPERCASE in dim_geography. Compare case-folded and emit the stored form."
+      - "NO DISTRICT CODE IS EXPOSED. dim_geography carries village_code only."
+      - "All 12 Meghalaya districts appear in CM Elevate. Distribution in the source export is heavily skewed: Ri-Bhoi 2,592; West Garo Hills 1,676; East Khasi Hills 1,017; East Garo Hills 607; West Khasi Hills 495; South Garo Hills 461; South West Khasi Hills 414; Eastern West Khasi Hills 331; North Garo Hills 268; West Jaintia Hills 235; South West Garo Hills 186; East Jaintia Hills 154 (unverified_in_db)."
+      - "SPELLING VARIANCE. The source export writes 'Ri-Bhoi' with a hyphen; dim_geography stores 'RI BHOI' without one. Resolve both to the stored form."
+
+    - name: on_roster
+      source_column: dim_geography.on_roster
+      meaning: Whether the village is in the official LGD roster or was only seen in a data file.
+      type: boolean
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY]
+      synonyms: [on roster, official village, in roster]
+      business_rules:
+      - Shared with every other scheme through dim_geography.
+      - "ALWAYS FALSE for an Unresolved placeholder row. It is a weaker test than entity_type; prefer entity_type for the village-count rule."
+      - Off-roster villages that are not Unresolved are real; do not filter them out unless the question is about roster coverage.
+
+    - name: has_geo_conflict
+      source_column: dim_geography.has_geo_conflict
+      meaning: Sources disagree on this village's block or district; the roster value is what is stored.
+      type: boolean
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT, FILTER]
+      synonyms: [geo conflict, geography conflict, conflicting district, conflicting block]
+      business_rules:
+      - "v_cm_elevate and v_focus_plus are the only detail views that expose this flag."
+      - "The conflict is recorded, not resolved. The stored block and district are the roster's."
+      - "Add `WHERE NOT has_geo_conflict` when an answer turns on which block or district an application landed in, and say that you did."
+      - "COUNT IS CONTESTED. The live column comment says four codes are known; an earlier verification pass counted 16. Neither has been re-derived. Do not quote either figure."
+
+    - name: entity_type
+      source_column: dim_geography.entity_type
+      meaning: Whether the geography row is a real Village, a Ward, or an Unresolved placeholder.
+      type: varchar(10)
+      nullable: true
+      category: geographic_quality
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT, FILTER]
+      synonyms: [entity type, geography type, village type]
+      sample_values: [Village, Ward, Unresolved]
+      business_rules:
+      - "CRITICAL AND EASY TO MISS. 'Unresolved' is a SYNTHETIC PLACEHOLDER - one per district, or a single global one where even the district was unknown - created when a source row's locality could not be matched to any real roster entry. It is NEVER a real village."
+      - "These rows are kept ON PURPOSE so scheme TOTALS reconcile to the source file. Keep them in a total; drop them from anything that answers 'which villages' or 'how many villages'."
+      - "Every village count and every village list must carry `entity_type <> 'Unresolved'`."
+      - "on_roster is always FALSE for these rows."
+      - "Do not extend the exclusion to district or block answers - an Unresolved row still carries the district it was placed under, and dropping it there would understate the district total."
+
+    # ---- applicant ---------------------------------------------------------
+    - name: applicant_category
+      source_column: fact_cm_elevate_application.applicant_category
+      meaning: Normalised applicant type - whether the applicant is an individual or a registered/unregistered body.
+      type: varchar(20)
+      nullable: true
+      category: applicant_dimension
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT, FILTER]
+      synonyms: [applicant category, applicant type, type of applicant, individual or group, entity category]
+      sample_values: [individual, registered, unregistered]
+      business_rules:
+      - "USE THIS, NOT type_raw, whenever a query spans more than one scheme. It is the normalised form and it is comparable across all 15 schemes."
+      - "Derived from type_raw by stripping the scheme prefix. In the source export the split is individual 8,342; registered 83; unregistered 11 (unverified_in_db)."
+      - "The programme is overwhelmingly individual applicants. A registered/unregistered breakdown rests on fewer than 100 rows - always state the denominator."
+      - "NOT every scheme uses all three values. Some split two ways, some three. dim_cm_elevate_scheme.applicant_types_seen records what was observed per scheme."
+      - NULLABLE. Handle NULL before grouping.
+
+    - name: type_raw
+      source_column: fact_cm_elevate_application.type_raw
+      meaning: The applicant type string exactly as the API returned it, kept for audit.
+      type: varchar(100)
+      nullable: true
+      category: applicant_raw_label
+      nlp_sql_priority: low
+      sql_operations: [WHERE]
+      synonyms: [raw type, original type, type raw]
+      sample_values:
+      - poultry individual
+      - piggery registered
+      - 'Prime Seed  unregistered'
+      - Any Bussiness Venture individual
+      - Sericulture and Weaving Spinning Individual
+      - Agriculture Warehouse registered
+      business_rules:
+      - "AUDIT ONLY. NEVER GROUP BY type_raw across schemes - the taxonomy is not shared and the same concept is spelled differently in every scheme."
+      - "The strings are dirty by design and are preserved verbatim: a double space in 'Prime Seed  unregistered', a typo in 'Any Bussiness Venture', a capital I in 'Sericulture and Weaving Spinning Individual'. Do not clean them; do not match on them."
+      - Reach for this only when the user explicitly asks what the source recorded.
+
+    # ---- workflow status ---------------------------------------------------
+    - name: current_file_status
+      source_column: fact_cm_elevate_application.current_file_status
+      meaning: Where the application file currently stands in the workflow.
+      type: varchar(30)
+      nullable: true
+      category: workflow_status
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT, FILTER]
+      synonyms: [file status, current status, application status, workflow status]
+      sample_values: [forward, 'sendback to vdv/citizen', resubmit, sendback]
+      business_rules:
+      - "FREE VARCHAR, NOT A DIMENSION. There is no dim table and no precomputed roll-up flag. Nothing here corresponds to PMAY's is_completed."
+      - "ENUMERATE BEFORE FILTERING. Values in the source export: Forward 8,302; sendback to vdv/citizen 90; Resubmit 43; Sendback 1 (unverified_in_db)."
+      - "CASE AND WORDING COLLIDE. 'sendback' and 'sendback to vdv/citizen' are different stored strings for a related idea. Match case-insensitively and treat both as sent-back."
+      - "NEARLY CONSTANT. 98.4% of rows are 'forward'. A status breakdown is close to a single-bucket answer - say so rather than presenting it as a distribution."
+      - "This is NOT an approval or sanction status. It says where the file sits, not whether it was funded. Do not present 'forward' as approved."
+
+    - name: current_level
+      source_column: fact_cm_elevate_application.current_level
+      meaning: The workflow level the application has reached.
+      type: varchar(30)
+      nullable: true
+      category: workflow_status
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, GROUP BY, COUNT]
+      synonyms: [level, current level, stage, workflow level]
+      sample_values: [level1, level0, Level1, Level2]
+      business_rules:
+      - "FREE VARCHAR, NOT A DIMENSION. No ordering is asserted by the data."
+      - "CASE VARIANTS ARE REAL AND MUST BE FOLDED. 'level1' (8,273 rows) and 'Level1' (45 rows) are the same level stored two ways. Always LOWER() before grouping, or the same level appears twice in the answer."
+      - "Values in the source export after case-folding: level1 8,318; level0 90; level2 28 (unverified_in_db)."
+      - "DO NOT INVENT A PIPELINE ORDER. level0 -> level1 -> level2 is a guess; the data does not assert progression, and level0 co-occurs with 'sendback to vdv/citizen'."
+
+    - name: application_mode
+      source_column: fact_cm_elevate_application.application_mode
+      meaning: The channel through which the application was submitted.
+      type: varchar(30)
+      nullable: true
+      category: channel_dimension
+      nlp_sql_priority: high
+      sql_operations: [WHERE, GROUP BY, COUNT, FILTER]
+      synonyms: [application mode, mode, channel, how applied, submission mode, applied online]
+      sample_values: [online, cmconnectcenter]
+      business_rules:
+      - "CLEAN TWO-VALUE FIELD - the most reliable categorical on this fact. No case variants observed."
+      - "Source export: online 7,643 (90.6%); cmconnectcenter 793 (9.4%) (unverified_in_db)."
+      - "'cmconnectcenter' is an assisted walk-in centre, not an online submission. Emit the stored form; do not reword it to 'Offline' without saying so."
+      - Genuinely answerable and genuinely interesting - offer this breakdown when a user asks how people applied.
+
+    - name: data_verified
+      source_column: fact_cm_elevate_application.data_verified
+      meaning: The verification verdict recorded against the application's data.
+      type: varchar(20)
+      nullable: true
+      category: verification_status
+      nlp_sql_priority: critical
+      sql_operations: [WHERE, GROUP BY, COUNT, FILTER]
+      synonyms: [data verified, verification status, verified, validation status, on hold, is it verified]
+      sample_values: [Valid, 'On Hold', Wrong, Invalid]
+      business_rules:
+      - "A VARCHAR, NOT A BOOLEAN. It has five states including NULL. Never treat it as true/false and never write `WHERE data_verified` ."
+      - "THIS IS THE REAL STATUS FIELD OF THIS SCHEME, and the only one with meaningful spread. Source export: Valid 6,700; On Hold 1,199; NULL 389; Wrong 81; Invalid 67 (unverified_in_db)."
+      - "CRITICAL ROUTING RULE: a question about applications 'on hold' MUST be answered from data_verified = 'On Hold', NOT from the onhold boolean, which is FALSE on every row in the data. Getting this wrong returns zero and looks correct."
+      - "'Wrong' and 'Invalid' are separate stored verdicts. Do not merge them without saying so."
+      - "NULL means no verdict was recorded - it is not 'Valid'. Exclude NULL from a verdict breakdown and report the count separately."
+
+    - name: onhold
+      source_column: fact_cm_elevate_application.onhold
+      meaning: Boolean flag intended to mark an application as on hold.
+      type: boolean
+      nullable: true
+      category: workflow_flag
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [on hold flag, held]
+      business_rules:
+      - "EFFECTIVELY DEAD. FALSE on all 8,436 rows of the source export - zero TRUE, zero NULL (unverified_in_db). Filtering on it returns nothing, always."
+      - "DO NOT USE IT TO ANSWER 'how many are on hold'. Route that to data_verified = 'On Hold' (1,199 rows). This is the single most likely wrong-answer path in this partition."
+      - "NULLABLE in the schema, so it is a THREE-STATE column in principle. Write `onhold IS TRUE` / `onhold IS NOT TRUE`; a bare `NOT onhold` would silently drop NULLs if any ever appear."
+      - Report its emptiness as a data-quality finding if a user asks about it directly.
+
+    - name: is_withdraw
+      source_column: fact_cm_elevate_application.is_withdraw
+      meaning: Boolean flag intended to mark an application as withdrawn.
+      type: boolean
+      nullable: true
+      category: workflow_flag
+      nlp_sql_priority: low
+      sql_operations: [WHERE, COUNT, FILTER]
+      synonyms: [withdrawn, is withdraw, cancelled, retracted]
+      business_rules:
+      - "EFFECTIVELY DEAD. FALSE on all 8,436 rows of the source export (unverified_in_db)."
+      - "There are NO withdrawn applications in this data. A 'how many withdrew' question should answer zero AND say the flag is unpopulated, so the zero is not read as a finding about applicant behaviour."
+      - "NULLABLE in the schema. Write `is_withdraw IS TRUE` / `IS NOT TRUE`, never a bare NOT."
+      - "This is NOT a refusal or desanction flag. CM Elevate has neither - see unanswerable_categories."
+
+    # ---- scheme-specific extension -----------------------------------------
+    - name: scheme_specific
+      source_column: fact_cm_elevate_application.scheme_specific
+      meaning: Every source field not promoted to a typed column, kept verbatim as JSONB.
+      type: jsonb
+      nullable: true
+      category: scheme_specific_extension
+      nlp_sql_priority: medium
+      sql_operations: [WHERE, jsonb_object_keys, '->>', '@>']
+      synonyms: [scheme specific, extra fields, additional details, other fields]
+      business_rules:
+      - "KEYS ARE NOT SHARED ACROSS THE 15 SCHEMES. In the source export 25 columns appear in all 15 schemes and 125 appear in exactly one."
+      - "MANDATORY: scope every scheme_specific read with a cm_scheme_key or scheme_name filter. Without it, `->> 'key'` returns NULL for every scheme that lacks the key, and those NULLs are indistinguishable from a genuinely empty value."
+      - "DISCOVER KEYS FIRST: SELECT DISTINCT jsonb_object_keys(scheme_specific) for the one scheme, then read them. Never assume a key exists."
+      - "`->>` returns NULL for a missing key rather than erroring, which is why a missing key is silent. This is the main correctness trap in this column."
+      - "The GIN index (idx_cm_elevate_specific_gin) supports containment (@>) and applies on the FACT table. A containment query that needs the index must run against curated.fact_cm_elevate_application, not the view."
+      - "GENDER LIVES HERE. The source column gender_id is NOT an id - it holds 'Female' / 'Male' / 'Other' as text and is fully populated. Source export: Female 5,178 (61.4%); Male 3,250; Other 8 (unverified_in_db). It is common to all 15 schemes but was not promoted, so a gender breakdown must read scheme_specific ->> 'gender_id'. This is a real and reportable finding - CM Elevate is female-majority."
+      - "PII WAS STRIPPED BEFORE INSERT: epic_id, citizen_name, mobile_number, pan_number, and bank_account_number / bank_account_no / bank_account. Do not look for them and do not tell a user they exist."
+      - "BUT THE STRIP LIST IS NOT COMPLETE. The source export also carries dob, email_id, address, member_id, family_id, pds_id, account_holder_name and ifsc_code, none of which are on the strip list, so they land here and are queryable. dob plus address plus village is re-identifying. Never surface these, never aggregate to a group small enough to expose one person, and never emit them into exports or embeddings. Flagged for the data team in the README."
+      - Never a grouping key on its own. Extract a scalar with ->> and group on that.
+
+  # =========================================================================
+  # UNDERLYING FACT - documented for lineage; query v_cm_elevate instead
+  # =========================================================================
+  fact_cm_elevate_application:
+    table_name: curated.fact_cm_elevate_application
+    object_type: table
+    column_count: 20
+    grain: one row per application (request_id) across all 15 CM Elevate schemes
+    primary_key: cm_elevate_fact_id
+    row_count: unverified_in_db
+    row_count_note: ~8,543 by reltuples estimate; 8,436 in the 2026-08-18 source export.
+    query_preference: >
+      Use curated.v_cm_elevate. It pre-joins dim_cm_elevate_scheme and dim_geography,
+      so the generator never has to emit those joins. The one reason to touch the fact
+      directly is a scheme_specific containment query that needs the GIN index.
+    foreign_keys:
+    - {column: scheme_key,    references: curated.dim_scheme.scheme_key,                     declared: true, nullable: false}
+    - {column: cm_scheme_key, references: curated.dim_cm_elevate_scheme.cm_scheme_key,       declared: true, nullable: false}
+    - {column: geography_key, references: curated.dim_geography.geography_key,               declared: true, nullable: false}
+    - {column: raw_id,        references: raw.source_rows.raw_id,                            declared: true, nullable: true}
+    absent_foreign_keys:
+    - {column: year_key,   would_reference: curated.dim_year.year_key,                 present: false, note: "NO TIME DIMENSION. The column does not exist. This is the defining constraint of the partition."}
+    - {column: status_key, would_reference: curated.dim_pmay_house_status.status_key,   present: false, note: "That dimension is PMAY-only. CM Elevate status fields are uncontrolled varchars."}
+    - {column: alias_key,  would_reference: curated.dim_geography_alias.alias_key,      present: false, note: "Geography was resolved at ingest. CM Elevate does not use the alias table."}
+    indexes:
+    - {name: idx_cm_elevate_request_id,    on: request_id}
+    - {name: idx_cm_elevate_scheme,        on: cm_scheme_key}
+    - {name: idx_cm_elevate_geo,           on: geography_key}
+    - {name: idx_cm_elevate_village,       on: village_code}
+    - {name: idx_cm_elevate_batch,         on: batch_id}
+    - {name: idx_cm_elevate_raw_id,        on: raw_id}
+    - {name: idx_cm_elevate_specific_gin,  on: scheme_specific, method: gin, note: "Supports @> containment. Only applies when querying the fact directly."}
+    columns_not_in_v_cm_elevate:
+    - name: scheme_key
+      meaning: FK to dim_scheme. Constant for this partition - always the CM_ELEVATE row.
+      business_rules: [Never a grouping key within CM Elevate - it has one value. cm_scheme_key is the one that varies.]
+    - name: raw_id
+      meaning: FK to raw.source_rows for full lineage back to the source row.
+      business_rules: [Not readable by megh_readonly - raw is outside the read boundary.]
+    - name: source_row_num
+      meaning: Audit.
+    - name: batch_id
+      type: uuid
+      meaning: Audit - the load batch.
+    - name: source_system
+      type: varchar(50)
+      default: "'cm_elevate'"
+      meaning: Audit - constant 'cm_elevate' for this partition.
+    - name: ingested_at
+      type: timestamptz
+      meaning: >
+        Audit - when the row was loaded. THE ONLY TIMESTAMP ON THIS FACT, and it describes
+        the LOAD, not the application. Never use it as an application date, an approval
+        date, or the basis of a trend.
+    dropped_at_ingest:
+    - column: epic_id
+      reason: PII. Stripped by the loader before scheme_specific is written.
+    - column: citizen_name
+      reason: >
+        PII. Stripped by the loader. A beneficiary NAME lookup is therefore impossible -
+        return 'not held in this data', never an improvised join.
+    - column: mobile_number
+      reason: PII. Stripped by the loader.
+    - column: pan_number
+      reason: PII. Stripped by the loader.
+    - column: bank_account_number / bank_account_no / bank_account
+      reason: PII. All three spellings stripped by the loader.
+    never_trusted:
+    - column: block_lgd_code
+      reason: >
+        Present in the source but confirmed to use an incompatible numbering system.
+        Block and district exposed anywhere downstream come from the dim_geography join,
+        never from this field. Do not reintroduce it from raw.source_rows.
+
+  # =========================================================================
+  # DIMENSIONS
+  # =========================================================================
+  dim_cm_elevate_scheme:
+    table_name: curated.dim_cm_elevate_scheme
+    object_type: table
+    column_count: 6
+    row_count: 15
+    grain: one row per individual scheme under the CM Elevate umbrella
+    primary_key: cm_scheme_key
+    scheme_scoped: true
+    columns:
+    - {name: cm_scheme_key,        type: smallint,    nullable: false, meaning: PK.}
+    - {name: scheme_name,          type: text,        nullable: false, unique: true, meaning: Full scheme name - what a user will say.}
+    - {name: endpoint,             type: varchar(80), nullable: false, unique: true, meaning: API endpoint - the source-of-truth identity, and the source_dataset value in raw and staging.}
+    - {name: source_section,       type: varchar(80), nullable: true,  meaning: Which section of the portal the endpoint sits under.}
+    - {name: applicant_types_seen, type: 'text[]',    nullable: true,  meaning: The raw applicant `type` values observed live per endpoint on 2026-09-03.}
+    - {name: created_at,           type: timestamptz, nullable: false, meaning: Audit.}
+    business_rules:
+    - Pre-joined into v_cm_elevate as scheme_name and endpoint. Do not join it yourself.
+    - "15 ROWS. This is the authority on how many CM Elevate schemes exist."
+    - "applicant_types_seen IS AN OBSERVATION, NOT A CONTROLLED VOCABULARY. It records what each endpoint actually returned on one day. The endpoints disagree - some split applicants two ways, some three, and Sericulture uses the non-standard label 'Sericulture Spinning Collectives'. Never build a filter, a legend or a chart series from this array; use applicant_category."
+    - It will drift as the API returns new labels, and nothing re-checks it. Treat a match against it as a hint, never as validation.
+
+  dim_scheme:
+    table_name: curated.dim_scheme
+    object_type: table
+    column_count: 8
+    row_count: 4
+    grain: one row per scheme
+    primary_key: scheme_key
+    shared_across_schemes: true
+    columns:
+    - {name: scheme_key,     type: smallint,     nullable: false, meaning: PK.}
+    - {name: scheme_code,    type: varchar(20),  nullable: false, meaning: Short scheme code - CM_ELEVATE for this partition.}
+    - {name: scheme_name,    type: text,         nullable: false, meaning: Full programme name.}
+    - {name: ministry,       type: varchar(100), nullable: true,  meaning: Owning ministry.}
+    - {name: grain_note,     type: text,         nullable: false, meaning: What one fact row means for this scheme.}
+    - {name: money_unit,     type: varchar(20),  nullable: false, meaning: The scheme's money unit.}
+    - {name: time_semantics, type: text,         nullable: false, meaning: What the year on a row means.}
+    - {name: created_at,     type: timestamptz,  nullable: false, meaning: Audit.}
+    business_rules:
+    - "ONE ROW COVERS ALL 15 CM ELEVATE SCHEMES. scheme_code = CM_ELEVATE. The sub-scheme split lives in dim_cm_elevate_scheme, not here."
+    - "money_unit IS NOT USABLE FOR THIS PARTITION. The CM_ELEVATE row carries a value because the column is NOT NULL, but there is no amount column on the fact for it to describe. Do not read it as evidence that a money figure exists."
+    - "Likewise time_semantics: CM Elevate has no year on a row for it to describe."
+    - Do not confuse dim_scheme.scheme_name (the programme) with dim_cm_elevate_scheme.scheme_name (one of the 15). The view exposes the latter.
+
+  dim_geography:
+    table_name: curated.dim_geography
+    object_type: table
+    column_count: 13
+    row_count: 7377
+    grain: one row per LGD village, ward or Unresolved placeholder
+    primary_key: geography_key
+    natural_key: village_code
+    shared_across_schemes: true
+    business_rules:
+    - "CONFORMED ACROSS ALL FOUR SCHEMES. This is what makes cross-scheme comparison possible at all."
+    - Pre-joined into v_cm_elevate. Do not join it yourself.
+    - District and block exist as NAMES only - there is no district or block code column exposed.
+    - "Names are stored UPPERCASE for block and district."
+    - "entity_type now has THREE values, not two: Village, Ward and Unresolved. See the entity_type column rules - this is the newest cross-cutting trap in megh_db."
+    - CM Elevate does NOT use dim_geography_alias. It has no alias_key.
+
+  dim_year:
+    table_name: curated.dim_year
+    object_type: table
+    row_count: 9
+    applies_to_cm_elevate: false
+    business_rules:
+    - "NOT REACHABLE FROM CM ELEVATE. fact_cm_elevate_application has no year_key and no FK to this table."
+    - "Listed here only so the generator does not attempt the join. Any CM Elevate question mentioning a year, a financial year, a month or a trend is unanswerable - see unanswerable_categories."
+    - "The dimension itself now holds 9 rows, not the 4 that older annotation files assert. That is irrelevant to CM Elevate but relevant if a query is routed here by mistake."
+
+  # =========================================================================
+  # CROSS-SCHEME VIEWS - CM ELEVATE IS IN NEITHER
+  # =========================================================================
+  v_cross_scheme_money_district_year:
+    table_name: curated.v_cross_scheme_money_district_year
+    object_type: view
+    cross_scheme: true
+    includes_cm_elevate: false
+    business_rules:
+    - "CM ELEVATE IS NOT IN THIS VIEW AND CANNOT BE. The view definition is a two-branch UNION ALL over MGNREGA and PMAY only, and CM Elevate has neither a money column nor a year to key on."
+    - "Verified from the live view definition on 2026-09-04, not inferred. Focus Plus is absent too."
+    - A money comparison built on this view covers two of the four schemes in megh_db. Say so.
+
+  v_cross_scheme_village_coverage:
+    table_name: curated.v_cross_scheme_village_coverage
+    object_type: view
+    column_count: 4
+    grain: one row per village
+    cross_scheme: true
+    includes_cm_elevate: false
+    business_rules:
+    - "CM ELEVATE HAS NO COLUMN HERE. The view carries pmay_houses and mgnrega_person_days only."
+    - "Village coverage is the ONLY cross-scheme axis CM Elevate can join on, and it must be done with an aggregate-then-join: aggregate v_cm_elevate to village_code first, then LEFT JOIN that aggregate onto this view. Never join the facts."
+    - "Its measures are COALESCEd to 0, never NULL. A `WHERE ... IS NULL` test against this view matches nothing - test `= 0`."
+
+# ===========================================================================
+semantic_rules:
+
+  geography_hierarchy:
+  - lgd_district
+  - lgd_block
+  - lgd_village_name
+
+  geography_codes:
+  - village_code
+  geography_codes_note: >
+    Only the village code is exposed. District and block have no code column in the
+    curated layer, and the source's block_lgd_code is never trusted. A question asking
+    for a district or block LGD code cannot be answered.
+
+  geography_exclusion_rule:
+    critical: true
+    clause: "entity_type <> 'Unresolved'"
+    applies_to: every village count and every village list
+    does_not_apply_to: >
+      Programme, scheme, district and block totals. Unresolved rows are placed under a
+      district on purpose so those totals reconcile to the source. Excluding them from a
+      district count would understate it.
+    text: >
+      'Unresolved' is a synthetic placeholder, not a village. It is the newest and
+      easiest-to-miss trap in megh_db. Keep it in a total; drop it from anything that
+      answers 'which villages' or 'how many villages'.
+
+  time_dimension: null
+  time_dimensions_available: []
+  time_rule:
+    critical: true
+    text: >
+      CM ELEVATE HAS NO TIME DIMENSION. There is no year_key, no FK to dim_year, no
+      application date, no sanction date, no status-change date. The only timestamp on
+      the fact is ingested_at, which describes the LOAD and must never be used as an
+      application date.
+      Verified against the source: the 2026-08-18 API export carries no date column
+      either. dob is the only date-like field and it is PII inside scheme_specific.
+      Every question about a year, a financial year, a month, a quarter, a trend,
+      growth, 'recent', 'last year' or 'this year vs last year' is UNANSWERABLE. Say so.
+      Do not substitute ingested_at and do not parse request_id.
+    request_id_date_note: >
+      request_id's 4th segment resembles an unpadded date, but it is ambiguous - 6, 7 or
+      8 digits with leading zeros dropped, so 1032026 is validly 1-Mar-2026 or
+      10-Mar-2026. A naive parse over the source export resolved only 3,038 of 8,436
+      rows and produced dates after the export date. There is a date signal but no
+      reliable date. Do not parse it in generated SQL.
+
+  measures:
+    status: NONE
+    text: >
+      CM ELEVATE HAS NO NUMERIC MEASURE. No amount, no quantity, no score, no rate.
+      COUNT(*) is the entire aggregate vocabulary of this partition. There is no
+      sanctioned amount, no subsidy, no loan, no disbursement, no unit cost and no
+      tranche.
+    money_rule: >
+      Never emit a rupee figure for CM Elevate, never format one, and never derive one
+      from an application count. dim_scheme.money_unit holds a value for the CM_ELEVATE
+      row only because the column is NOT NULL; there is no amount for it to describe.
+
+  beneficiary_term:
+    status: DEFINED_AS_APPLICATION_COUNT
+    reason: >
+      The curated grain is one row per APPLICATION, and citizen_name was stripped at
+      ingest. 'Beneficiary' cannot mean a named person here, and it cannot mean a funded
+      person either - there is no disbursement field to prove anyone received anything.
+      An application is a REQUEST, not an award.
+    runtime_behavior: >
+      For 'how many beneficiaries' use COUNT(*) and state that the answer is an
+      application count, not a count of people funded.
+    distinct_behavior: >
+      Use COUNT(DISTINCT request_id) only when the user asks for distinct or unique
+      applications. request_id is not unique-constrained, so the two counts can differ;
+      report both when they do.
+    name_lookup: >
+      NOT POSSIBLE. citizen_name was stripped at ingest. A name lookup must return
+      'not held in this data', never an improvised join.
+
+  scheme_dimension: scheme_name
+  scheme_key: cm_scheme_key
+  scheme_count: 15
+  scheme_rule: >
+    CM Elevate is one scheme_code covering 15 individual schemes. Resolve a casual scheme
+    name against dim_cm_elevate_scheme.scheme_name. A programme-level total without a
+    sub-scheme breakdown mixes 15 unrelated programmes - offer the breakdown. Six schemes
+    have fewer than 15 applications; always state the denominator for those.
+
+  applicant_dimension: applicant_category
+  applicant_raw_label: type_raw
+  applicant_rule: >
+    Group by applicant_category (individual / registered / unregistered), never by
+    type_raw. The raw taxonomy is not shared across the 15 schemes and the strings carry
+    source typos and double spaces that are preserved verbatim.
+
+  status_dimensions:
+    verification: data_verified
+    workflow: current_file_status
+    level: current_level
+    channel: application_mode
+  status_rule:
+    critical: true
+    text: >
+      All four are uncontrolled varchars with no dimension table and no roll-up flags.
+      Enumerate values before writing any filter.
+      ON HOLD ROUTING: data_verified = 'On Hold' is the only correct source for an
+      'on hold' question. The onhold boolean is FALSE on every row and returns zero.
+      CASE FOLDING: current_level stores both 'level1' and 'Level1' for the same level -
+      LOWER() before grouping or the level appears twice.
+      current_file_status stores both 'sendback' and 'sendback to vdv/citizen'.
+      current_file_status is NOT an approval status - 'forward' does not mean funded.
+
+  dead_flags:
+  - column: onhold
+    state: FALSE on every row in the source export
+    rule: Never use it to answer an on-hold question. Route to data_verified.
+  - column: is_withdraw
+    state: FALSE on every row in the source export
+    rule: Answer zero AND say the flag is unpopulated, so the zero is not read as behaviour.
+
+  jsonb_rule:
+    critical: true
+    text: >
+      scheme_specific keys differ per sub-scheme. Scope every read with cm_scheme_key or
+      scheme_name, discover keys with jsonb_object_keys first, and remember that ->>
+      returns NULL for a missing key rather than erroring - so a missing key is silent
+      and looks like an empty value.
+    gender_note: >
+      gender_id lives in scheme_specific and is NOT an id - it holds Female / Male /
+      Other as text and is populated on every row. It is the one genuinely useful
+      demographic on this partition and it is reachable only through JSONB.
+
+  pii_rule:
+    critical: true
+    stripped_at_ingest: [epic_id, citizen_name, mobile_number, pan_number, bank_account_number, bank_account_no, bank_account]
+    retained_in_scheme_specific: [dob, email_id, address, member_id, family_id, pds_id, account_holder_name, ifsc_code]
+    text: >
+      The strip list is not complete. dob, email_id, address, member_id, family_id,
+      pds_id, account_holder_name and ifsc_code survive into scheme_specific and are
+      queryable. dob plus address plus village is re-identifying. Never surface these
+      fields, never emit them into exports or embeddings, and aggregate before showing
+      anything to a user. request_id is itself an individual-level identifier.
+
+  null_behavior: NULL is missing; never silently coerce NULL to zero.
+
+  identifier_behavior:
+  - cm_elevate_fact_id is a technical identifier and is unstable across a reload.
+  - request_id is an application identifier and is NOT unique.
+  - village_code and geography_key are geographic identifiers.
+  - cm_scheme_key, scheme_key and endpoint are dimension keys.
+  - Identifiers and keys must never be SUMed or AVGed.
+  - geography_key and cm_elevate_fact_id must never be exported.
+
+  unanswerable_categories:
+    critical: true
+    note: >
+      These come from `Megh One AI - CM Elevate NLP Use Cases.xlsx`, which was authored
+      against a different dataset (2,847 applications, 13 schemes, four rupee measures,
+      Bank/LIFCOM loan channels, subsidy tranches, desanctioned and refused flags,
+      Month/Year columns). 40 of its 89 use cases cannot be answered from megh_db.
+      Refuse them explicitly. Never answer a money question with an application count.
+    money:
+      columns_that_do_not_exist: [sanctioned, sanctioned_amount, subsidy, loan, total_disbursement, disbursed, amount_pending, unit_cost, tranche_1, tranche_2, tranche_3]
+      affected_use_cases: [UC-007, UC-008, UC-009, UC-010, UC-011, UC-012, UC-013, UC-014, UC-015, UC-016, UC-017, UC-018, UC-020, UC-021, UC-024, UC-025, UC-030, UC-031, UC-038, UC-039, UC-040, UC-041, UC-043, UC-044, UC-058, UC-060, UC-063, UC-079, UC-080, UC-081, UC-082, UC-083, UC-084, UC-085, UC-086, UC-087, UC-088, UC-089]
+      response: >
+        'CM Elevate holds application records only. This warehouse has no sanctioned,
+        subsidy, loan or disbursement amount for the scheme, so that figure cannot be
+        produced.' Offer the application count as a DIFFERENT question, clearly labelled.
+    time:
+      columns_that_do_not_exist: [application_date, month, year, financial_year, year_key]
+      affected_use_cases: [UC-052, UC-053, UC-054]
+      response: >
+        'CM Elevate has no date field in this warehouse, so applications cannot be
+        placed in a month or a year.' Do not offer ingested_at as a substitute.
+    loan_channel:
+      columns_that_do_not_exist: [loan_entity, bank, lifcom]
+      affected_use_cases: [UC-033, UC-034, UC-035, UC-036, UC-037, UC-046, UC-047]
+      response: "'There is no loan-entity field for CM Elevate in this warehouse.'"
+    outcome_flags:
+      columns_that_do_not_exist: [desanctioned, refused, refusal_reason]
+      affected_use_cases: [UC-048, UC-049, UC-050, UC-051]
+      response: >
+        'CM Elevate has no desanctioned or refused field. The nearest recorded verdict is
+        data_verified (Valid / On Hold / Wrong / Invalid), which is a data-verification
+        outcome, not a funding decision.' Offer that instead, clearly relabelled.
+    beneficiary_identity:
+      columns_that_do_not_exist: [citizen_name, beneficiary_name]
+      affected_use_cases: [UC-042, UC-044, UC-045, UC-066]
+      response: "'Beneficiary names were removed at ingest and are not held in this data.'"
+    scheme_mismatch:
+      note: >
+        The workbook references a 'Common Facility Center' scheme that does not exist in
+        megh_db, and omits PRIME Small Enterprise Empowerment, which is the largest
+        scheme in the real data at 3,621 of 8,436 rows. Resolve scheme names against
+        dim_cm_elevate_scheme.scheme_name only, never against the workbook's 13-item list.
+    answerable_after_all:
+      note: >
+        Roughly 49 of the 89 use cases DO work: application counts, per-scheme and
+        per-district breakdowns, coverage, rankings by count, cross-tabs and data-quality
+        questions. The partition also supports questions the workbook never asked -
+        gender split, application mode, and the data_verified funnel.
+
+# ===========================================================================
+nlp_sql_rules:
+  read_only: true
+  allowed_operations: [SELECT]
+  default_from: curated.v_cm_elevate
+
+  aggregation_defaults:
+    applications: COUNT(*)
+    beneficiaries: COUNT(*)
+    records: COUNT(*)
+    distinct_applications: COUNT(DISTINCT request_id)
+    distinct_villages: "COUNT(DISTINCT village_code) FILTER (WHERE entity_type <> 'Unresolved')"
+    distinct_blocks: COUNT(DISTINCT lgd_block)
+    distinct_districts: COUNT(DISTINCT lgd_district)
+    distinct_schemes: COUNT(DISTINCT cm_scheme_key)
+  aggregation_note: >
+    There is no SUM and no AVG default because there is no measure. If a generated query
+    contains SUM or AVG over a v_cm_elevate column, it is wrong.
+
+  mandatory_predicate:
+    clause: none
+    note: >
+      Unlike PMAY there is no is_placeholder equivalent, so counts need no blanket
+      filter. The one conditional rule is geography: add
+      `entity_type <> 'Unresolved'` to every VILLAGE count and village list, and to
+      nothing else.
+
+  date_behavior: >
+    REFUSE. There is no date, month or financial year on this fact. Do not emit a date
+    filter, a date GROUP BY, a date_trunc, or a parse of request_id. Do not fall back to
+    ingested_at.
+
+  comparison: >
+    Scheme-to-scheme, district-to-district and category-to-category comparisons are
+    supported and are all count-based. Time comparisons are not supported.
+
+  ranking: >
+    ORDER BY the requested count and default to top 5 when N is omitted for plural 'top'
+    requests; singular 'highest/lowest' uses LIMIT 1. Because six schemes have fewer than
+    15 applications, always return the count alongside the rank so the reader sees the
+    denominator.
+
+  entity_behavior: >
+    Resolve scheme names against dim_cm_elevate_scheme.scheme_name, and district, block
+    and village values against dim_geography, before SQL generation. District and block
+    are stored UPPERCASE. The source's 'Ri-Bhoi' resolves to the stored 'RI BHOI'.
+    Fold case on current_level and current_file_status before grouping.
+
+  unknown_entity: Do not guess; return not-found/did-you-mean.
+
+  join_behavior: >
+    v_cm_elevate pre-joins dim_cm_elevate_scheme and dim_geography, so the generator
+    should emit no joins for ordinary questions. Never join v_cm_elevate to any other
+    fact or view - all ten fact pairs in megh_db are prohibited. The one sanctioned
+    exception is aggregating v_cm_elevate to village_code and LEFT JOINing that aggregate
+    onto v_cross_scheme_village_coverage.
+
+  cross_scheme_behavior: >
+    CM Elevate is in NEITHER cross-scheme view. Money comparison is impossible - there is
+    no amount. Village coverage is possible only through the aggregate-then-join pattern.
+    State that CM Elevate is absent from the standard cross-scheme views rather than
+    silently answering for the other schemes.
+
+  money_behavior: >
+    REFUSE. There is no money column. Never emit a rupee figure, a crore conversion or a
+    per-beneficiary amount for CM Elevate, and never present an application count as if
+    it answered a money question.
+
+  jsonb_behavior: >
+    Any scheme_specific read must carry a cm_scheme_key or scheme_name filter. Prefer
+    discovering keys with jsonb_object_keys before extracting. Use the fact table, not the
+    view, when a containment (@>) query should use the GIN index.
+
+  application_count_behavior: >
+    COUNT(*) is an application count, not a count of people funded. Say so. Use
+    COUNT(DISTINCT request_id) only for explicitly distinct/unique requests, and report
+    both figures when they differ.
+
+# ===========================================================================
+few_shot_examples:
+
+- question: How many applications are there under CM Elevate?
+  explanation: One row is one application. There is no placeholder flag to exclude, so no blanket predicate is needed. The answer is an application count, not a count of people funded.
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate;
+
+- question: How many distinct applications are there?
+  explanation: request_id is not unique-constrained, so a distinct request is a different question from a row count. Report both when they differ.
+  sql: |
+    SELECT COUNT(*) AS rows_total,
+           COUNT(DISTINCT request_id) AS distinct_applications
+    FROM curated.v_cm_elevate;
+
+- question: How many schemes run under CM Elevate?
+  explanation: The sub-scheme dimension is the authority. There are 15, not the 13 asserted by the use-case workbook.
+  sql: |
+    SELECT COUNT(*) AS schemes
+    FROM curated.dim_cm_elevate_scheme;
+
+- question: List all CM Elevate schemes by application count.
+  explanation: Group on the pre-joined scheme_name. The distribution is heavily skewed, so the count travels with the rank.
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC;
+
+- question: Which scheme has the most applications?
+  explanation: Singular superlative, so order descending and LIMIT 1.
+  sql: |
+    SELECT scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name
+    ORDER BY applications DESC
+    LIMIT 1;
+
+- question: How many applications are under the Piggery scheme?
+  explanation: A casual scheme name resolves to the stored scheme_name in dim_cm_elevate_scheme.
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Piggery Development Scheme';
+
+- question: How many districts does CM Elevate reach?
+  explanation: District is a name on dim_geography, pre-joined into the view. Unresolved rows still carry a district, so they are not excluded here.
+  sql: |
+    SELECT COUNT(DISTINCT lgd_district) AS districts
+    FROM curated.v_cm_elevate;
+
+- question: How many villages are covered by CM Elevate?
+  explanation: Village identity is the LGD code, never the name, and Unresolved placeholders are not villages so they must be excluded.
+  sql: |
+    SELECT COUNT(DISTINCT village_code) AS villages
+    FROM curated.v_cm_elevate
+    WHERE entity_type <> 'Unresolved';
+
+- question: Which district has the most CM Elevate applications?
+  explanation: District totals deliberately keep the Unresolved rows so they reconcile to the source.
+  sql: |
+    SELECT lgd_district, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district
+    ORDER BY applications DESC
+    LIMIT 1;
+
+- question: Top 5 blocks by CM Elevate applications
+  explanation: No N supplied, so the ranking rule defaults to top 5.
+  sql: |
+    SELECT lgd_block, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_block
+    ORDER BY applications DESC
+    LIMIT 5;
+
+- question: How many applications are in East Khasi Hills?
+  explanation: District is stored uppercase in dim_geography, so the resolved literal is uppercased.
+  sql: |
+    SELECT COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    WHERE lgd_district = 'EAST KHASI HILLS';
+
+- question: How many applications are on hold?
+  explanation: CRITICAL ROUTING. 'On hold' lives in data_verified, not in the onhold boolean, which is FALSE on every row and would return zero.
+  sql: |
+    SELECT COUNT(*) AS on_hold
+    FROM curated.v_cm_elevate
+    WHERE data_verified = 'On Hold';
+
+- question: Show the verification status breakdown.
+  explanation: data_verified is the only status field with real spread. NULL is a missing verdict, not Valid, so it is reported as its own bucket.
+  sql: |
+    SELECT COALESCE(data_verified, '(not recorded)') AS verification_status,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+
+- question: How many applications were submitted online?
+  explanation: application_mode is the cleanest categorical on this fact. cmconnectcenter is an assisted walk-in centre, not an online submission.
+  sql: |
+    SELECT application_mode, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY application_mode
+    ORDER BY applications DESC;
+
+- question: What is the applicant mix across schemes?
+  explanation: Group on the normalised applicant_category, never on type_raw, because the raw taxonomy is not shared between schemes.
+  sql: |
+    SELECT scheme_name, applicant_category, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY scheme_name, applicant_category
+    ORDER BY scheme_name, applications DESC;
+
+- question: How many applications came from registered bodies rather than individuals?
+  explanation: applicant_category is nullable, so the NULL bucket is surfaced rather than dropped.
+  sql: |
+    SELECT COALESCE(applicant_category, '(not recorded)') AS applicant_category,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+
+- question: Show the workflow level breakdown.
+  explanation: current_level stores both 'level1' and 'Level1' for the same level, so it must be case-folded or the level appears twice.
+  sql: |
+    SELECT LOWER(current_level) AS level, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+
+- question: How many applications were sent back?
+  explanation: current_file_status stores two different strings for a related idea, so match case-insensitively across both.
+  sql: |
+    SELECT COUNT(*) AS sent_back
+    FROM curated.v_cm_elevate
+    WHERE LOWER(current_file_status) LIKE 'sendback%';
+
+- question: How many applications were withdrawn?
+  explanation: The flag is FALSE on every row. Answer zero AND state that the flag is unpopulated, so the zero is not read as applicant behaviour.
+  sql: |
+    SELECT COUNT(*) FILTER (WHERE is_withdraw IS TRUE) AS withdrawn,
+           COUNT(*) AS total_applications
+    FROM curated.v_cm_elevate;
+
+- question: What is the gender split of CM Elevate applicants?
+  explanation: gender_id was not promoted to a typed column, so it is read out of scheme_specific. Despite the _id suffix it holds text, and it is populated on every row.
+  sql: |
+    SELECT scheme_specific ->> 'gender_id' AS gender,
+           COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY 1
+    ORDER BY applications DESC;
+
+- question: What extra fields does the Warehouse scheme record?
+  explanation: scheme_specific keys differ per sub-scheme, so key discovery must be scoped to one scheme before any extraction.
+  sql: |
+    SELECT DISTINCT jsonb_object_keys(scheme_specific) AS field
+    FROM curated.v_cm_elevate
+    WHERE scheme_name = 'Meghalaya Warehouse Scheme'
+      AND scheme_specific IS NOT NULL
+    ORDER BY field;
+
+- question: Cross-tab districts by scheme.
+  explanation: Both dimensions are pre-joined, so this is a plain two-key grouping with no joins emitted.
+  sql: |
+    SELECT lgd_district, scheme_name, COUNT(*) AS applications
+    FROM curated.v_cm_elevate
+    GROUP BY lgd_district, scheme_name
+    ORDER BY lgd_district, applications DESC;
+
+- question: Compare the Piggery and Poultry schemes.
+  explanation: Two named schemes returned side by side and never silently merged.
+  sql: |
+    SELECT scheme_name,
+           COUNT(*) AS applications,
+           COUNT(DISTINCT lgd_district) AS districts,
+           COUNT(DISTINCT village_code) FILTER (WHERE entity_type <> 'Unresolved') AS villages
+    FROM curated.v_cm_elevate
+    WHERE scheme_name IN ('Meghalaya Piggery Development Scheme',
+                          'Meghalaya Poultry Farming Scheme')
+    GROUP BY scheme_name;
+
+- question: How many CM Elevate applications could not be matched to a real village?
+  explanation: Unresolved placeholders are kept so totals reconcile. Counting them is a data-quality question in its own right.
+  sql: |
+    SELECT COUNT(*) AS unresolved_geography_applications
+    FROM curated.v_cm_elevate
+    WHERE entity_type = 'Unresolved';
+
+- question: Are there data-quality issues I should know about?
+  explanation: The four real quality signals on this partition are duplicate request_ids, unresolved geography, missing verification verdicts, and geography conflicts.
+  sql: |
+    SELECT COUNT(*)                                                        AS rows_total,
+           COUNT(*) - COUNT(DISTINCT request_id)                           AS duplicate_request_ids,
+           COUNT(*) FILTER (WHERE entity_type = 'Unresolved')              AS unresolved_geography,
+           COUNT(*) FILTER (WHERE data_verified IS NULL)                   AS verdict_not_recorded,
+           COUNT(*) FILTER (WHERE has_geo_conflict)                        AS geo_conflict_rows
+    FROM curated.v_cm_elevate;
+
+- question: Which request_ids appear more than once?
+  explanation: request_id carries no unique constraint, so duplicates are a real finding rather than an error to hide.
+  sql: |
+    SELECT request_id, COUNT(*) AS occurrences
+    FROM curated.v_cm_elevate
+    GROUP BY request_id
+    HAVING COUNT(*) > 1
+    ORDER BY occurrences DESC, request_id
+    LIMIT 100;
+
+- question: Look up application REQ/001/001/10102025/188877
+  explanation: request_id is not unique, so a lookup may legitimately return more than one row. Personal fields were stripped at ingest, so the detail is scheme, geography and status.
+  sql: |
+    SELECT request_id, scheme_name, lgd_district, lgd_block, lgd_village_name,
+           applicant_category, current_file_status, current_level,
+           application_mode, data_verified
+    FROM curated.v_cm_elevate
+    WHERE request_id = 'REQ/001/001/10102025/188877'
+    LIMIT 10;
+
+- question: Which villages have CM Elevate applications but no PMAY houses?
+  explanation: CM Elevate is not in the coverage view, so aggregate it to village_code first and join that aggregate. Never join the facts. The view's measures are COALESCEd to 0, so the test is = 0, not IS NULL.
+  sql: |
+    WITH cm AS (
+      SELECT village_code, COUNT(*) AS cm_applications
+      FROM curated.v_cm_elevate
+      WHERE entity_type <> 'Unresolved'
+      GROUP BY village_code
+    )
+    SELECT cm.village_code, c.lgd_district, cm.cm_applications, c.pmay_houses
+    FROM cm
+    LEFT JOIN curated.v_cross_scheme_village_coverage c USING (village_code)
+    WHERE COALESCE(c.pmay_houses, 0) = 0
+    ORDER BY cm.cm_applications DESC;
+
+- question: Check that CM Elevate loaded completely.
+  explanation: Reconciliation is per sub-scheme for CM Elevate - raw must equal curated plus quarantined for each endpoint independently, not merely in aggregate.
+  sql: |
+    SELECT dataset, scheme_name, raw_rows, curated_rows, quarantined,
+           raw_rows - curated_rows - quarantined AS discrepancy
+    FROM meta.v_reconciliation_cm_elevate
+    ORDER BY dataset;
+
+# ---- questions that must be refused -----------------------------------
+# The money, time, loan-channel and outcome-flag refusals below cover 40 of the
+# 89 use cases in `Megh One AI - CM Elevate NLP Use Cases.xlsx`, which was written
+# against a different dataset. See semantic_rules.unanswerable_categories.
+
+- question: What is the total amount disbursed under CM Elevate?
+  explanation: >
+    CM Elevate has NO money column. There is no disbursement, subsidy, loan or
+    sanctioned amount on fact_cm_elevate_application, and none in the source export
+    either. Answer that the figure is not held in this warehouse. Do NOT substitute the
+    application count - a count of requests is not an amount of money.
+  sql: null
+
+- question: What is the total amount sanctioned under CM Elevate?
+  explanation: >
+    Same reason. There is no sanctioned_amount column. An application is a REQUEST, not
+    an award, so the data cannot even confirm that anything was approved.
+  sql: null
+
+- question: How much subsidy has been disbursed, and how much loan?
+  explanation: >
+    Neither exists. There is no subsidy column, no loan column, no tranche column and no
+    loan-entity column. The Bank-vs-LIFCOM split in the use-case workbook describes a
+    different dataset.
+  sql: null
+
+- question: What is the gap between sanctioned and disbursed?
+  explanation: >
+    Both operands are absent, so the gap is not computable. Do not derive it, and do not
+    present a count of applications awaiting verification as a proxy for a funding gap.
+  sql: null
+
+- question: What is the average disbursement per beneficiary?
+  explanation: >
+    There is no amount to average. Dividing an application count by anything does not
+    produce a rupee figure.
+  sql: null
+
+- question: Show the CM Elevate application trend by month.
+  explanation: >
+    CM Elevate has NO date column - no application date, no year_key, no FK to dim_year.
+    The source export carries no date either, so this is a source limitation, not a
+    loading gap. Do not use ingested_at, which describes the load, and do not parse a
+    date out of request_id, which is ambiguous and unreliable.
+  sql: null
+
+- question: How many applications were made in 2024 versus 2025?
+  explanation: >
+    Same reason. There is no year on a CM Elevate row. Refuse rather than parsing
+    request_id, whose date segment resolved only 3,038 of 8,436 source rows and produced
+    dates after the export date.
+  sql: null
+
+- question: How many applications were desanctioned, and why?
+  explanation: >
+    There is no desanctioned column and no refusal-reason column. The nearest recorded
+    verdict is data_verified (Valid / On Hold / Wrong / Invalid), which is a
+    data-verification outcome, not a funding decision. Offer it only if clearly
+    relabelled as verification.
+  sql: null
+
+- question: How many applications were refused?
+  explanation: >
+    There is no refused flag. is_withdraw exists but is FALSE on every row and means
+    withdrawn by the applicant, which is a different concept. Do not present it as
+    refusal.
+  sql: null
+
+- question: Which loan channel disburses more, Bank or LIFCOM?
+  explanation: >
+    There is no loan-entity field in megh_db for CM Elevate. Both the channel and the
+    disbursement it would describe are absent.
+  sql: null
+
+- question: What is the name of the applicant on request REQ/001/001/10102025/188877?
+  explanation: >
+    citizen_name was stripped at ingest, along with epic_id, mobile_number, pan_number
+    and every bank_account field. There is no join that recovers them. Return 'not held
+    in this data' and do not build an applicant-lookup feature.
+  sql: null
+
+- question: Find an applicant named Benadvin.
+  explanation: >
+    Same reason - names are not in the curated layer. Additionally, individual-level
+    lookup is out of scope for this partition under the PII rule.
+  sql: null
+
+- question: Show me the date of birth and address for applications in Zikzak block.
+  explanation: >
+    dob, address, email_id, member_id, family_id and pds_id survive into scheme_specific
+    because the loader's strip list does not cover them, but they must never be
+    surfaced. dob plus address plus village is re-identifying. Refuse and aggregate
+    instead.
+  sql: null
+
+- question: Compare CM Elevate spending against PMAY by district.
+  explanation: >
+    CM Elevate has no money column and is absent from
+    v_cross_scheme_money_district_year, whose definition is a two-branch UNION ALL over
+    MGNREGA and PMAY only. The comparison cannot be made. Village coverage is the only
+    cross-scheme axis available for CM Elevate.
+  sql: null
+
+- question: Show MGNREGA person-days for the villages in this CM Elevate result.
+  explanation: >
+    A row-level join from fact_cm_elevate_application to any other fact is prohibited -
+    all ten fact pairs in megh_db are. Aggregate each side to village_code independently
+    and join the aggregates.
+  sql: null
+
+- question: What is the total of all village LGD codes for CM Elevate?
+  explanation: >
+    LGD codes are identifiers, not measures. SUM on village_code is semantically invalid.
+    Decline and offer COUNT(DISTINCT village_code) instead, excluding Unresolved.
+  sql: null
+
+- question: How many applications are under the Common Facility Center scheme?
+  explanation: >
+    No such scheme exists in megh_db. It appears in the use-case workbook, which
+    describes a different dataset. Resolve scheme names against
+    dim_cm_elevate_scheme.scheme_name only, and return not-found with the 15 real
+    scheme names as did-you-mean candidates.
+  sql: null
+
+- question: Update the status of a CM Elevate application.
+  explanation: The read role permits SELECT only. Refuse rather than translating into write SQL.
+  sql: null
