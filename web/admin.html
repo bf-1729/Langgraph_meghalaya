@@ -185,7 +185,7 @@ function logout(){ api("/api/auth/logout",{method:"POST"}).catch(()=>{});
   SIGNED_IN=false; TOKEN=""; localStorage.removeItem("megh_admin_jwt"); showLogin(); }
 /* The admin console and the chat console are separate pages with separate
    sessions; this just navigates, it does not sign anyone out. */
-function goToChat(){ window.location.href = "/ai-query"; }
+function goToChat(){ window.location.href = "/megh-chat"; }
 
 function showLogin(){ document.getElementById("appView").classList.add("hide");
   document.getElementById("loginView").classList.remove("hide"); }
@@ -213,7 +213,7 @@ async function boot(){
   if (!ADMIN_ROLES.includes(ME.role)) {
     // Valid session, but not an admin one: every panel would 403.
     alert("Your account does not have administrator access.");
-    location.href = "/ai-query";
+    location.href = "/megh-chat";
     return;
   }
   SIGNED_IN = true;

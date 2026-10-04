@@ -59,7 +59,7 @@ tree shape must be kept intact.
 
 ```
 browser ──HTTPS──► nginx (per app VM; TLS, WAF, rate zones)       deploy/nginx/nginx-nlpservice.conf
-                     │ proxy_pass http://127.0.0.1:8300 (single upstream, no stickiness)
+                     │ proxy_pass http://127.0.0.1:8400 (single upstream, no stickiness)
                      ▼
                 uvicorn app.main:app --workers 2                  deploy/systemd/megh-nlpservice.service
                      ├─ asyncpg pool (10–30/worker) ─► PostgreSQL 18.4 megh_db   10.48.242.4:5432
@@ -74,7 +74,7 @@ browser ──HTTPS──► nginx (per app VM; TLS, WAF, rate zones)       depl
   24 vCores and 256 GB RAM each. VM #1 has 2× H200 GPUs, which this service does not use.
 - **UNKNOWN — NEEDS VERIFICATION:** whether production is live, and whether the Docker path or
   the systemd path is used.
-- **VERIFIED:** `docker-compose.yml` binds `127.0.0.1:8301:8300` and has an optional
+- **VERIFIED:** `docker-compose.yml` binds `127.0.0.1:8401:8400` and has an optional
   `local-infra` profile (Qdrant + Redis).
 
 ## 3. Components
@@ -103,7 +103,8 @@ and output, and how it fails.
   4. security headers (the outermost layer).
 - **Global exception handler:** returns `{"detail":"internal error","request_id":…}` and never
   exposes stack traces.
-- **Static routes:** `/` (the portal), `/ai-query` (chat), `/admin-ui`, `/static/*`. These are
+- **Static routes:** `/` (the portal), `/megh-chat` (chat; `/ai-query` 301-redirects to it since
+  2026-10-04), `/admin-ui`, `/static/*`. These are
   served `Cache-Control: no-cache`.
 - `/docs` and `/openapi.json` are only available when `ENV=dev`.
 

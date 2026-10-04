@@ -2682,7 +2682,7 @@
       const userId = document.getElementById('user').value.trim();
       const name   = userId.includes('@') ? userId.split('@')[0] : userId;
       sessionStorage.setItem('meghalaya_user', JSON.stringify({ name, userId }));
-      window.location.href = '/ai-query';
+      window.location.href = '/megh-chat';
     });
   }
   if (signupForm) {
@@ -2697,7 +2697,7 @@
       const last  = document.getElementById('lastName').value.trim();
       const name  = (first + ' ' + last).trim() || document.getElementById('newUser').value.trim();
       sessionStorage.setItem('meghalaya_user', JSON.stringify({ name }));
-      window.location.href = '/ai-query';
+      window.location.href = '/megh-chat';
     });
   }
 
@@ -2910,7 +2910,7 @@
       sessionStorage.setItem('userEmail', email);
       
       // Redirect to chat interface
-      window.location.href = '/ai-query';
+      window.location.href = '/megh-chat';
       return false; // Prevent form submission
     } else {
       alert('Please enter email and password');

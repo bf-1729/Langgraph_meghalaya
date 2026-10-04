@@ -1753,7 +1753,7 @@ document.addEventListener('DOMContentLoaded', function () {
 // probe below reports each scheme's real base, and that answer is trusted over
 // anything guessed here. These candidates just decide where to knock first.
 function _prefixCandidates() {
-  const m = location.pathname.match(/^(.*?)\/(?:ai-query|portal|Meghalaya_UnifiedPortal_UI\.html)?$/);
+  const m = location.pathname.match(/^(.*?)\/(?:megh-chat|ai-query|portal|Meghalaya_UnifiedPortal_UI\.html)?$/);
   const derived = (m ? m[1] : '').replace(/\/$/, '');
 
   // Every ancestor of the current path, longest first. This is what makes a

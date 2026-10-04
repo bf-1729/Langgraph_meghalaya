@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import appdb, pipeline, schema_introspect
@@ -235,10 +235,16 @@ if _FRONTEND.is_dir():
         f = _FRONTEND / "Meghalaya_UnifiedPortal_UI.html"
         return FileResponse(f, headers=_NO_CACHE) if f.exists() else JSONResponse({"app": settings.APP_NAME})
 
-    @app.get("/ai-query", include_in_schema=False)
-    async def ai_query():
+    # Renamed /ai-query -> /megh-chat on 2026-10-04. The old path stays as a
+    # redirect: officers' bookmarks and web/admin.html both still point at it.
+    @app.get("/megh-chat", include_in_schema=False)
+    async def megh_chat():
         f = _FRONTEND / "ai_query.html"
         return FileResponse(f, headers=_NO_CACHE) if f.exists() else JSONResponse({"app": settings.APP_NAME})
+
+    @app.get("/ai-query", include_in_schema=False)
+    async def ai_query():
+        return RedirectResponse("/megh-chat", status_code=301)
 
     @app.get("/admin-ui", include_in_schema=False)
     async def admin_ui():

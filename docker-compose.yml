@@ -20,15 +20,15 @@ services:
     env_file:
       - .env
     ports:
-      - "127.0.0.1:8301:8300"
-        ## - "8300:8300"
+      - "127.0.0.1:8401:8400"
+        ## - "8400:8400"
     volumes:
       # Persist the JSONL audit mirror and uvicorn logs outside the container.
       - ./logs:/opt/meghalaya/logs
       # Keep the downloaded embedding model across container rebuilds.
       - hf_cache:/opt/hf-cache
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8300/health', timeout=4).status==200 else 1)"]
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8400/health', timeout=4).status==200 else 1)"]
       interval: 30s
       timeout: 5s
       retries: 3

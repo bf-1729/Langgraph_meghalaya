@@ -50,7 +50,7 @@ meghalaya/
 │   ├── routers/               /api/query, /api/auth, /api/history, /api/rag, /admin
 │   └── middleware/            security headers/CSP, body-size limit, per-IP rate limit
 ├── web/                       served UI
-│   ├── ai_query.html          chat console          (/ai-query)
+│   ├── ai_query.html          chat console          (/megh-chat)
 │   ├── admin.html             admin console         (/admin-ui)
 │   └── Meghalaya_UnifiedPortal_UI.html   portal     (/)
 ├── data/                      SME-curated inputs, read at startup
@@ -76,14 +76,14 @@ meghalaya/
 python -m venv .venv && . .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp .env.example .env        # then fill in DATABASE_URL + the model API keys
-uvicorn app.main:app --host 0.0.0.0 --port 8300
+uvicorn app.main:app --host 0.0.0.0 --port 8400
 ```
 
 Run from the repository root — `.env` is read relative to the working directory.
 
-- Portal:  <http://127.0.0.1:8300/>
-- Chat console:  <http://127.0.0.1:8300/ai-query>
-- Health:  <http://127.0.0.1:8300/health>
+- Portal:  <http://127.0.0.1:8400/>
+- Chat console:  <http://127.0.0.1:8400/megh-chat>
+- Health:  <http://127.0.0.1:8400/health>
 
 | Route | Purpose |
 | --- | --- |

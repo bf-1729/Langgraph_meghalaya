@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     APP_NAME: str = "NLP Service - MGNREGA / PMAY-G / Focus Plus / CM Elevate"
-    PORT: int = 8300
+    PORT: int = 8400
     LOG_LEVEL: str = "INFO"
     REQUEST_TIMEOUT_SECONDS: int = 60  # hard ceiling on one /api/query, enforced in the router
 

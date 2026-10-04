@@ -59,7 +59,7 @@ for f in tests/test_ac_full_results.py tests/test_admin_level_collision.py \
 - The script suites are slow when the DB is unreachable. Some entity-resolution paths wait for
   connect timeouts.
 - `tests/smoke_restructure.py` is an end-to-end smoke test against a **running server** at
-  `http://127.0.0.1:8502` (hardcoded `BASE`, not the default 8300). It was not run.
+  `http://127.0.0.1:8502` (hardcoded `BASE`, not the default 8400). It was not run.
 
 ### Live context validation (needs the VPN)
 

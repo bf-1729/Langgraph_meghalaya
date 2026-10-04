@@ -3,6 +3,13 @@
 *For the next Claude session or account. Keep this short and overwrite it at the end of every
 significant session.*
 
+**Latest (2026-10-04): chat route renamed and service port changed. Config + routing only; no pipeline change.**
+- `/ai-query` → **`/megh-chat`** (`app/main.py`: new `megh_chat()` serves `web/ai_query.html`; `/ai-query` now returns a 301 to it, so bookmarks keep working). The file name `ai_query.html` is unchanged.
+- Port **8300 → 8400**: `app/config.py` default, `.env`, `.env.example`, `deploy/systemd/megh-nlpservice.service`, all 9 nginx `proxy_pass` lines, `docker-compose.yml` (host 8401→container 8400), README, DEPLOYMENT, ARCHITECTURE, TESTING, CLAUDE.md §9.
+- In-page links updated: `web/admin.html` (2), `web/Meghalaya_UnifiedPortal_UI.html` (3). `web/ai_query.html` `_prefixCandidates()` regex now also matches `megh-chat` — without this the UI would derive the wrong API prefix when served from a sub-path.
+- Verified offline (VPN down) with `starlette.testclient`: `/megh-chat` 200 (serves the chat page), `/ai-query` 301 → `/megh-chat`, `/admin-ui` 200, `/` 200, unknown path 404, `settings.PORT == 8400`. Tests: 90 passed (`test_ac_full_results`, `test_asr_transcribe`, `test_history_charts`, `test_pipeline_graph`).
+- **Deploy note:** the VMs need the new `.env` PORT, the new nginx conf and the new systemd unit, then `systemctl daemon-reload` + `nginx -t` + reload. Not done from here.
+
 **Latest (2026-10-03, afternoon): Qdrant moved to a new server. Config only, no code change. KB INGESTED and verified.**
 - `.env` `QDRANT_URL` changed `http://10.48.242.4:6333` → `http://115.124.102.167:6335` (collection names unchanged: `megh_scheme_kb`, `megh_conversation_memory`). `.env.example`, `deploy/DEPLOYMENT.md`, `CLAUDE.md` §9 updated.
 - New server checked read-only: Qdrant 1.18.3 (client 1.19.0, compatible); reachable without the VPN; **no API key** (KI-200); holds six `Metadata_*` collections (1024-dim schema metadata, not ours, not used: our KB is 384-dim bge-small) — never touch them.

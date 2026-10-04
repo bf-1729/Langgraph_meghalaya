@@ -23,7 +23,7 @@ WorkingDirectory=/opt/meghalaya
 # fix ownership) before the service starts rather than failing on first write.
 ExecStartPre=/bin/mkdir -p /opt/meghalaya/logs
 ExecStartPre=/bin/chown ubuntu:ubuntu /opt/meghalaya/logs
-ExecStart=/opt/meghalaya/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8300 --workers 2
+ExecStart=/opt/meghalaya/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8400 --workers 2
 Restart=always
 RestartSec=3
 KillSignal=SIGINT

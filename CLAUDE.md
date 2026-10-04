@@ -209,8 +209,8 @@ above instead.
 
 - Windows dev box. Run from the repo root, because `.env` is read relative to the working
   directory.
-- Start the app: `.venv/Scripts/python.exe -m uvicorn app.main:app --port 8300`, then open
-  `/ai-query` (chat), `/admin-ui` and `/health`.
+- Start the app: `.venv/Scripts/python.exe -m uvicorn app.main:app --port 8400`, then open
+  `/megh-chat` (chat), `/admin-ui` and `/health`.
 - `megh_db` and the model gateway are on `10.48.242.4`, which needs the Fortinet VPN.
   The DB connection sometimes times out briefly, so retry.
 - Qdrant moved on 2026-10-03 to `http://115.124.102.167:6335` (no VPN). It also holds six

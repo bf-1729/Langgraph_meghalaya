@@ -119,10 +119,10 @@ On` and roll to the second VM. Rollback is one line + reload.
 ## 8. Verify
 
 ```bash
-curl -s localhost:8300/health            # anonymous: {"status":"ok"} only
-curl -s -H "X-Metrics-Token: $METRICS_TOKEN" localhost:8300/health    # + "components"
-curl -s -H "X-Metrics-Token: $METRICS_TOKEN" localhost:8300/metrics   # or an admin JWT
-curl -s -H "Authorization: Bearer <user JWT>" localhost:8300/api/rag/status   # KB point count
+curl -s localhost:8400/health            # anonymous: {"status":"ok"} only
+curl -s -H "X-Metrics-Token: $METRICS_TOKEN" localhost:8400/health    # + "components"
+curl -s -H "X-Metrics-Token: $METRICS_TOKEN" localhost:8400/metrics   # or an admin JWT
+curl -s -H "Authorization: Bearer <user JWT>" localhost:8400/api/rag/status   # KB point count
 ```
 
 `/health` reports `degraded` with the failing component named when Postgres or
