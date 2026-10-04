@@ -1,4 +1,4 @@
-# Meghalaya NL Assistant — local / single-host stack.
+# Meghalaya NL Assistant (LangGraph build) — local / single-host stack.
 #
 #   docker compose build          # build the app image
 #   docker compose up -d          # run just the app (Postgres + Qwen gateway are remote)
@@ -8,23 +8,34 @@
 # At minimum set DATABASE_URL, JWT_SECRET, ADMIN_TOKEN and the six model roles.
 # When running the local-infra profile, point QDRANT_URL at http://qdrant:6333
 # and REDIS_URL at redis://redis:6379/0 in .env.
+#
+# SIDE-BY-SIDE WITH THE OLDER DEPLOY (2026-10-04). An earlier build of this
+# project is already deployed from a directory of the same name, using the
+# container names megh-nlp / megh-qdrant / megh-redis, the image megh-nlp:latest,
+# the compose project "meghalaya" and host port 8401. Docker identifies
+# containers, images, volumes and networks BY NAME, so re-using any of them
+# would have `docker compose up` adopt-and-replace the running old stack rather
+# than start a second one. Every name here is therefore prefixed megh-langgraph,
+# and the host port moved 8401 -> 8411. Deploy this tree to its OWN directory
+# (e.g. /opt/meghalaya-langgraph) — see deploy/DEPLOYMENT.md §"Side-by-side".
+name: megh-langgraph
 
 services:
   nlp:
     build:
       context: .
       dockerfile: Dockerfile
-    image: megh-nlp:latest
-    container_name: megh-nlp
+    image: megh-langgraph:latest
+    container_name: megh-langgraph-nlp
     restart: unless-stopped
     env_file:
       - .env
     ports:
-      - "127.0.0.1:8401:8400"
+      - "127.0.0.1:8411:8400"      # 8401 belongs to the older deploy
         ## - "8400:8400"
     volumes:
       # Persist the JSONL audit mirror and uvicorn logs outside the container.
-      - ./logs:/opt/meghalaya/logs
+      - ./logs:/opt/meghalaya-langgraph/logs
       # Keep the downloaded embedding model across container rebuilds.
       - hf_cache:/opt/hf-cache
     healthcheck:
@@ -37,22 +48,22 @@ services:
   # ── Optional local infra (opt in with: --profile local-infra) ──────────────
   qdrant:
     image: qdrant/qdrant:v1.12.4
-    container_name: megh-qdrant
+    container_name: megh-langgraph-qdrant
     profiles: ["local-infra"]
     restart: unless-stopped
     ports:
-      - "6333:6333"
+      - "6343:6333"      # 6333 belongs to the older deploy
     volumes:
       - qdrant_data:/qdrant/storage
 
   redis:
     image: redis:7-alpine
-    container_name: megh-redis
+    container_name: megh-langgraph-redis
     profiles: ["local-infra"]
     restart: unless-stopped
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
-      - "6379:6379"
+      - "6389:6379"      # 6379 belongs to the older deploy
 
 volumes:
   hf_cache:

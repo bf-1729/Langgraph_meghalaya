@@ -1,11 +1,17 @@
 [Unit]
-Description=Meghalaya NLP Service (MGNREGA + PMAY-G — megh_db + Qdrant + Qwen gateway)
+Description=Meghalaya NLP Service, LangGraph build (megh_db + Qdrant + Qwen gateway)
+# SIDE-BY-SIDE (2026-10-04). The EARLIER deploy runs as megh-nlpservice.service
+# from /opt/meghalaya. This unit is a SEPARATE service: different unit filename
+# (megh-langgraph.service), different WorkingDirectory (/opt/meghalaya-langgraph)
+# and a different port (8410, not 8400) — two units cannot bind the same port,
+# and systemd keys services by unit filename, so re-using either would replace
+# the running old service. nginx routes to 127.0.0.1:8410 for this build.
 After=network.target
 
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/opt/meghalaya
+WorkingDirectory=/opt/meghalaya-langgraph
 # .env is read by the application itself (pydantic-settings, env_file=".env",
 # resolved against WorkingDirectory). systemd's EnvironmentFile= is deliberately
 # NOT used: it keeps inline '#' comments as part of the value, which turns
@@ -21,9 +27,9 @@ WorkingDirectory=/opt/meghalaya
 # 24-vCore box. Run this unit on both application VMs behind the vFirewall.
 # logs/ is gitignored, so a fresh checkout does not contain it. Create it (and
 # fix ownership) before the service starts rather than failing on first write.
-ExecStartPre=/bin/mkdir -p /opt/meghalaya/logs
-ExecStartPre=/bin/chown ubuntu:ubuntu /opt/meghalaya/logs
-ExecStart=/opt/meghalaya/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8300 --workers 2
+ExecStartPre=/bin/mkdir -p /opt/meghalaya-langgraph/logs
+ExecStartPre=/bin/chown ubuntu:ubuntu /opt/meghalaya-langgraph/logs
+ExecStart=/opt/meghalaya-langgraph/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8410 --workers 2
 Restart=always
 RestartSec=3
 KillSignal=SIGINT

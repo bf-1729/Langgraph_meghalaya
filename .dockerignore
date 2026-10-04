@@ -20,6 +20,11 @@ logs/*
 !logs/.gitkeep
 fastembed_cache/
 
+# Local dev TLS material (certs/local/dev-key.pem, 2026-10-04). The image needs
+# only the internal CA bundle that certs/ otherwise holds; a private key must
+# never enter an image layer, where it survives every later deletion.
+certs/local/
+
 # Docs / deploy scaffolding not needed inside the app image
 docs
 deploy

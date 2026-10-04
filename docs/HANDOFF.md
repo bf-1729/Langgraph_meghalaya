@@ -3,6 +3,22 @@
 *For the next Claude session or account. Keep this short and overwrite it at the end of every
 significant session.*
 
+**Latest (2026-10-04, later): deploy identifiers renamed so this build cannot overwrite the existing deploy.**
+- An earlier build is already deployed from a directory of the same name. Every identifier Docker/systemd/nginx keys on was
+  changed here; the old `deploy/systemd/megh-nlpservice.service` and `deploy/nginx/nginx-nlpservice.conf` were REVERTED to
+  their committed state so the running deploy keeps its port 8300 and `/opt/meghalaya`.
+- New names: compose project `megh-langgraph` (`name:` key — this also prefixes the volumes), image `megh-langgraph:latest`,
+  containers `megh-langgraph-nlp` / `-qdrant` / `-redis`, host ports 8411 (app), 6343 (Qdrant), 6389 (Redis);
+  new unit `deploy/systemd/megh-langgraph.service` (port **8410**, `WorkingDirectory=/opt/meghalaya-langgraph`);
+  new vhost `deploy/nginx/nginx-megh-langgraph.conf` (upstream 8410, rate-limit zones renamed `*_lg` — nginx refuses two
+  enabled vhosts that declare the same zone name).
+- **Dockerfile bug found and fixed:** it still had `EXPOSE 8300`, a 8300 healthcheck and `--port 8300` in CMD while compose
+  mapped to 8400 — the container would have published nothing reachable. Now 8400 throughout; `WORKDIR` is
+  `/opt/meghalaya-langgraph` and the compose log mount follows it.
+- Deploy to `/opt/meghalaya-langgraph`, never `/opt/meghalaya`. Full table + commands: DEPLOYMENT.md "Side-by-side".
+- `docker compose config` validates. Tests: 36 passed (`test_pipeline_graph`, `test_ac_full_results`, `test_history_charts`).
+  Docker Desktop is not running on this dev box, so nothing was built or started here.
+
 **Latest (2026-10-04): chat route renamed and service port changed. Config + routing only; no pipeline change.**
 - `/ai-query` → **`/megh-chat`** (`app/main.py`: new `megh_chat()` serves `web/ai_query.html`; `/ai-query` now returns a 301 to it, so bookmarks keep working). The file name `ai_query.html` is unchanged.
 - Port **8300 → 8400**: `app/config.py` default, `.env`, `.env.example`, `deploy/systemd/megh-nlpservice.service`, all 9 nginx `proxy_pass` lines, `docker-compose.yml` (host 8401→container 8400), README, DEPLOYMENT, ARCHITECTURE, TESTING, CLAUDE.md §9.

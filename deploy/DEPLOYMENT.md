@@ -135,6 +135,75 @@ Qdrant (skipped when the collection is already populated).
 
 ---
 
+## Side-by-side with an existing deploy (2026-10-04)
+
+An earlier build of this project is already deployed. Nothing in this tree may
+overwrite it, so **every name this build uses is different**. Deploy it to its
+own directory and the two run in parallel; you switch over only when ready.
+
+| Thing | Existing deploy | This (LangGraph) build |
+|---|---|---|
+| Directory | `/opt/meghalaya` | **`/opt/meghalaya-langgraph`** |
+| systemd unit | `megh-nlpservice.service` | **`megh-langgraph.service`** |
+| App port (bare metal) | 8300 | **8410** |
+| nginx vhost file | `nginx-nlpservice.conf` | **`nginx-megh-langgraph.conf`** |
+| nginx rate-limit zones | `api_rl`, `login_rl`, `conn_per_ip` | **`*_lg`** (must be unique per file) |
+| compose project | default (`meghalaya`) | **`megh-langgraph`** (`name:` in compose) |
+| Image | `megh-nlp:latest` | **`megh-langgraph:latest`** |
+| Containers | `megh-nlp`, `megh-qdrant`, `megh-redis` | **`megh-langgraph-nlp`, `-qdrant`, `-redis`** |
+| Container port / host port | 8300 / 8401 | **8400 / 8411** |
+| Local Qdrant / Redis host ports | 6333 / 6379 | **6343 / 6389** |
+| Named volumes | `meghalaya_hf_cache`, `meghalaya_qdrant_data` | **`megh-langgraph_hf_cache`, `megh-langgraph_qdrant_data`** |
+
+**Why each one matters.** Docker identifies containers, images, networks and
+volumes *by name*: re-using a name makes `docker compose up` adopt and replace
+the running stack instead of starting a second one. Volume names are prefixed
+with the compose project, so `name: megh-langgraph` separates the data too.
+systemd keys services by unit filename. Two processes cannot bind one port, and
+nginx refuses to start if two enabled vhosts declare the same `limit_req_zone`
+name or both claim `default_server`.
+
+### Bare metal
+
+```bash
+sudo mkdir -p /opt/meghalaya-langgraph && sudo chown ubuntu:ubuntu /opt/meghalaya-langgraph
+# copy THIS tree there (never into /opt/meghalaya), then:
+cd /opt/meghalaya-langgraph
+python3.11 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+cp /opt/meghalaya/.env .env     # start from the live config, then edit
+# .env MUST differ: PORT=8410, and any path/port the old one owns.
+
+sudo cp deploy/systemd/megh-langgraph.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now megh-langgraph
+systemctl status megh-langgraph --no-pager      # old service must still be active
+curl -s localhost:8410/health                   # new
+curl -s localhost:8300/health                   # old, unchanged
+
+sudo cp deploy/nginx/nginx-megh-langgraph.conf /etc/nginx/sites-available/megh-langgraph
+# Set a distinct server_name (e.g. chat-new.<domain>) and drop `default_server`
+# unless you have removed it from the old vhost.
+sudo ln -s /etc/nginx/sites-available/megh-langgraph /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### Docker
+
+```bash
+cd /opt/meghalaya-langgraph
+docker compose build && docker compose up -d
+docker ps --format '{{.Names}}	{{.Ports}}'    # old megh-nlp must still be listed
+curl -s 127.0.0.1:8411/health
+```
+
+`docker compose down` here only stops this project, because of the `name:` key.
+Run it from `/opt/meghalaya-langgraph`, never from the old directory.
+
+### Switching over / rolling back
+
+Switch: point the DNS name (or the old vhost's `proxy_pass`) at `8410` / `8411`.
+Roll back: point it back. Both stacks keep running, so a rollback needs no
+rebuild. Retire the old one only after the new build has run cleanly.
+
 ## Database roles and retention
 
 Two review-then-run scripts live in [sql/](sql/). Both need a superuser

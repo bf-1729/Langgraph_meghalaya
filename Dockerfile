@@ -8,8 +8,8 @@
 # (megh_db), Qdrant, and the self-hosted Qwen gateway — none of which live in
 # this image. Supply their addresses + credentials at run time via --env-file.
 #
-#   docker build -t megh-nlp:latest .
-#   docker run --rm -p 8300:8300 --env-file .env megh-nlp:latest
+#   docker build -t megh-langgraph:latest .
+#   docker run --rm -p 8400:8400 --env-file .env megh-langgraph:latest
 #
 # Build uses requirements.txt, NOT requirements.lock: the lock file pins
 # pywin32 / win32-setctime, which do not exist for Linux and break the install.
@@ -59,7 +59,7 @@ COPY --from=builder /opt/hf-cache /opt/hf-cache
 
 # The tree must keep its shape: app/ resolves data/ and web/ as siblings
 # (Path(__file__).resolve().parents[1]). WORKDIR is that parent.
-WORKDIR /opt/meghalaya
+WORKDIR /opt/meghalaya-langgraph
 COPY app/   ./app/
 COPY data/  ./data/
 COPY web/   ./web/
@@ -67,16 +67,16 @@ COPY certs/ ./certs/
 
 # logs/ is gitignored (contents only); create it writable for the non-root user.
 RUN mkdir -p logs \
-    && chown -R megh:megh /opt/meghalaya /opt/hf-cache
+    && chown -R megh:megh /opt/meghalaya-langgraph /opt/hf-cache
 
 USER megh
-EXPOSE 8300
+EXPOSE 8400
 
 # /health returns 200 even when a downstream dependency is degraded, which is the
 # behaviour we want from an orchestrator's liveness probe (the app is up).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8300/health', timeout=4).status==200 else 1)"
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8400/health', timeout=4).status==200 else 1)"
 
 # 2 workers matches deploy/systemd/megh-nlpservice.service. Override with e.g.
-#   docker run ... megh-nlp uvicorn app.main:app --host 0.0.0.0 --port 8300 --workers 4
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8300", "--workers", "2"]
+#   docker run ... megh-langgraph uvicorn app.main:app --host 0.0.0.0 --port 8400 --workers 4
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8400", "--workers", "2"]
